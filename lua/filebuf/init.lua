@@ -56,17 +56,19 @@ local function parse_ignore_file(path)
   return patterns
 end
 
---- Check if an entry name matches any ignore pattern.
---- Supports: * wildcard (any sequence of chars), trailing / (dir-only).
----@param name     string    entry name (not full path)
----@param patterns string[]  raw patterns from .ignore files
----@param is_dir   boolean   whether the entry is a directory
+--- Check if an entry matches any ignore pattern.
+--- Supports: * wildcard (any sequence of chars), trailing / (dir-only),
+--- and path-based patterns (containing "/").
+---@param full_path string    full filesystem path of the entry
+---@param name      string    entry basename
+---@param patterns  table[]   { raw = string, source_dir = string }
+---@param is_dir    boolean   whether the entry is a directory
 ---@return boolean
-local function matches_ignore(name, patterns, is_dir)
+local function matches_ignore(full_path, name, patterns, is_dir)
   if not patterns or #patterns == 0 then return false end
   for _, pat in ipairs(patterns) do
     local dir_only = false
-    local p = pat
+    local p = pat.raw
     -- Trailing "/" means match only directories
     if p:sub(-1) == "/" then
       dir_only = true
@@ -81,7 +83,16 @@ local function matches_ignore(name, patterns, is_dir)
     escaped = escaped:gsub("%*", ".*")
     -- Anchor to match the full name
     local lua_pattern = "^" .. escaped .. "$"
-    if name:match(lua_pattern) then
+    -- For path-based patterns (containing "/"), match against the
+    -- entry's path relative to the .gitignore's directory.
+    -- Otherwise match against the basename.
+    local target
+    if p:find("/") then
+      target = full_path:sub(#pat.source_dir + 2) -- strip source_dir + "/"
+    else
+      target = name
+    end
+    if target and target:match(lua_pattern) then
       return true
     end
     ::continue::
@@ -117,7 +128,7 @@ end
 --- Read a directory using native stat calls.  Returns entries sorted
 --- directories-first, then alphabetically (case-insensitive).
 ---@param dir string
----@param ignore_patterns? string[]  patterns from ancestor .ignore files
+---@param ignore_patterns? table[]  { raw, source_dir } patterns from ignore files
 ---@return table[]  list of { name, type, path }
 local function read_dir(dir, ignore_patterns)
   local files = vim.fn.readdir(dir)
@@ -153,7 +164,8 @@ local function read_dir(dir, ignore_patterns)
   end
 
   -- Filter hidden files and ignore-matched entries.
-  -- The .ignore file itself is never filtered.
+  -- The .ignore file itself is never filtered; .gitignore is hidden
+  -- like other dotfiles (but its patterns are still read from disk).
   -- When show_hidden is true, ignore patterns are also bypassed.
   local filtered = {}
   for _, entry in ipairs(entries) do
@@ -165,7 +177,7 @@ local function read_dir(dir, ignore_patterns)
           and M.config.respect_ignore
           and ignore_patterns
           and #ignore_patterns > 0
-          and matches_ignore(entry.name, ignore_patterns, entry.type == "dir") then
+          and matches_ignore(entry.path, entry.name, ignore_patterns, entry.type == "dir") then
         goto skip_entry
       end
     end
@@ -194,7 +206,7 @@ end
 ---@param max_depth number|nil
 ---@param current_depth number
 ---@param visited table|nil  set of real paths already visited (cycle detection)
----@param ancestor_patterns? string[]  ignore patterns from parent directories
+---@param ancestor_patterns? table[]  { raw, source_dir } patterns from parents
 ---@return table[]  list of { name, type, path, indent }
 local function read_dir_recursive(dir, max_depth, current_depth, visited, ancestor_patterns)
   current_depth = current_depth or 0
@@ -208,7 +220,10 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   end
   visited[real] = true
 
-  -- Merge ignore patterns: carry forward ancestors, add local .ignore if present
+  -- Merge ignore patterns: carry forward ancestors, add local .ignore
+  -- and .gitignore if present.  Each pattern stores its source_dir so
+  -- that path-based patterns (containing "/") can be matched against
+  -- the entry's path relative to the .ignore file's directory.
   local merged_patterns = {}
   if M.config.respect_ignore then
     if ancestor_patterns then
@@ -216,11 +231,13 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
         table.insert(merged_patterns, p)
       end
     end
-    local ignore_path = dir .. "/.ignore"
-    if vim.loop.fs_stat(ignore_path) then
-      local local_patterns = parse_ignore_file(ignore_path)
-      for _, p in ipairs(local_patterns) do
-        table.insert(merged_patterns, p)
+    for _, name in ipairs({ ".ignore", ".gitignore" }) do
+      local ignore_path = dir .. "/" .. name
+      if vim.loop.fs_stat(ignore_path) then
+        local local_patterns = parse_ignore_file(ignore_path)
+        for _, raw in ipairs(local_patterns) do
+          table.insert(merged_patterns, { raw = raw, source_dir = dir })
+        end
       end
     end
   end
