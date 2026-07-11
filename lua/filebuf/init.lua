@@ -693,9 +693,8 @@ function _G.FilebufFoldText()
   local line = vim.fn.getline(vim.v.foldstart)
   local indent_ws = line:match("^(%s*)") or ""
   local name = line:match("^%s*(.-)%s*$") or line
-  local count = vim.v.foldend - vim.v.foldstart
   local indent = string.rep(" ", vim.fn.strdisplaywidth(indent_ws))
-  return indent .. name .. "  (" .. count .. ")"
+  return indent .. name
 end
 
 ----------------------------------------------------------------------
@@ -1185,7 +1184,7 @@ function M.open(dir)
   vim.api.nvim_set_current_buf(buf)
   vim.wo.foldmethod = "manual"
   vim.wo.foldenable = true
-  vim.wo.foldcolumn = "1"
+  vim.wo.foldcolumn = "auto:9"
   vim.wo.foldtext = "v:lua.FilebufFoldText()"
   -- Override the Folded highlight group in this window to suppress
   -- the background color (many colorschemes set a prominent bg).
@@ -1197,7 +1196,7 @@ function M.open(dir)
   vim.wo.winhighlight = "Folded:FilebufFoldLine"
   -- Replace default +/- fold-column glyphs with triangles.
   local fc = vim.wo.fillchars or ""
-  vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶"
+  vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶,fold: "
   create_folds(buf)
 
   -- Restore saved fold state, or close everything on first open.
