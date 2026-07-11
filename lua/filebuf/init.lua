@@ -168,9 +168,6 @@ local programmatic = setmetatable({}, { __mode = "k" })
 --- Per-buffer flag: true while insert mode is active.
 local in_insert = setmetatable({}, { __mode = "k" })
 
---- Per-buffer flag: true when insert mode made changes (process on InsertLeave).
-local insert_dirty = setmetatable({}, { __mode = "k" })
-
 --- Get the maximum key in a table (0 if empty).
 local function max_key(t)
   local m = 0
@@ -374,15 +371,11 @@ local function on_lines_handler(buf, firstline, lastline, linedata, preview)
           create_entry_from_line(buf, lnum, line_text)
         end
       end
-    else
-      insert_dirty[buf] = true
     end
   elseif linedata < 0 then
     -- Always shift map (even during insert mode) and collect removed entries.
     local removed = shift_map_up(buf, firstline + 1, -linedata)
-    if in_insert[buf] then
-      insert_dirty[buf] = true
-    else
+    if not in_insert[buf] then
       -- Normal-mode deletion: delete the removed entries from disk.
       for _, entry in ipairs(removed) do
         delete_entry(entry)
@@ -390,9 +383,7 @@ local function on_lines_handler(buf, firstline, lastline, linedata, preview)
     end
   elseif linedata == 0 and firstline + 1 == lastline then
     -- Single line changed in-place — potential rename
-    if in_insert[buf] then
-      insert_dirty[buf] = true
-    else
+    if not in_insert[buf] then
       local lnum = firstline + 1
       local entry = get_entry_at(buf, lnum)
       if entry then
@@ -482,14 +473,6 @@ local function store_entries(buf, entries, first)
   for i, entry in ipairs(entries) do
     map[first + i - 1] = entry
   end
-end
-
---- Get the entry for the current cursor line.
----@param buf number
----@return table|nil
-local function get_entry(buf)
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
-  return get_map(buf)[lnum]
 end
 
 ----------------------------------------------------------------------
@@ -695,7 +678,6 @@ function M.open(dir)
     buffer = buf,
     callback = function()
       in_insert[buf] = false
-      insert_dirty[buf] = nil
       full_reconcile(buf)
       vim.bo[buf].modified = false
     end,
@@ -717,9 +699,7 @@ function M.open(dir)
 end
 
 --- Setup entry point for lazy.nvim. Registers user commands.
-function M.setup(opts)
-  opts = opts or {}
-
+function M.setup()
   vim.api.nvim_create_user_command("Filebuf", function()
     M.open()
   end, { desc = "Open filebuf listing buffer" })
