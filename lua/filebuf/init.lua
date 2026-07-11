@@ -876,6 +876,9 @@ end
 --- Namespace and highlight groups for hidden-file extmarks.
 local hidden_ns = vim.api.nvim_create_namespace("filebuf-hidden")
 
+--- Namespace for directory-name extmarks.
+local dir_ns = vim.api.nvim_create_namespace("filebuf-dir")
+
 local function define_hidden_highlights()
   local groups = {
     FilebufHiddenHint = { fg = "#5c6370" },
@@ -884,6 +887,24 @@ local function define_hidden_highlights()
   }
   for name, def in pairs(groups) do
     vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
+  end
+end
+
+--- Apply extmarks to color directory entry names.
+---@param buf     number
+---@param entries table[]  flat list from read_dir_recursive
+local function apply_dir_extmarks(buf, entries)
+  vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
+
+  for lnum, entry in ipairs(entries) do
+    if entry.type == "dir" then
+      local name_start = #indent_str(entry.indent)
+      local name_end = name_start + #entry.name + 1 -- include trailing "/"
+      vim.api.nvim_buf_set_extmark(buf, dir_ns, lnum - 1, name_start, {
+        end_col = name_end,
+        hl_group = "Directory",
+      })
+    end
   end
 end
 
@@ -1057,9 +1078,10 @@ local function refresh_buffer(buf)
     end
   end
 
-  -- 4. Refresh git extmarks and hidden-entry hints
+  -- 4. Refresh git extmarks, hidden-entry hints, and directory coloring
   apply_git_extmarks(buf, dir)
   apply_hidden_extmarks(buf, entries)
+  apply_dir_extmarks(buf, entries)
 
   vim.bo[buf].modified = false
 end
@@ -1136,6 +1158,9 @@ function M.open(dir)
   vim.wo.foldenable = true
   vim.wo.foldcolumn = "1"
   vim.wo.foldtext = "v:lua.FilebufFoldText()"
+  -- Override the Folded highlight group in this window to suppress
+  -- the background color (many colorschemes set a prominent bg).
+  vim.wo.winhighlight = "Folded:Directory"
   -- Replace default +/- fold-column glyphs with triangles.
   local fc = vim.wo.fillchars or ""
   vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶"
@@ -1209,6 +1234,7 @@ function M.open(dir)
   -- Apply git-status extmarks after the buffer is fully populated.
   apply_git_extmarks(buf, dir)
   apply_hidden_extmarks(buf, entries)
+  apply_dir_extmarks(buf, entries)
 
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
