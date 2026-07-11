@@ -26,6 +26,12 @@ M.config = {
 --- Survives buffer close/reopen so the user's fold preferences stick.
 M._fold_closed = {}
 
+--- Set of directories whose children have been loaded into the buffer.
+--- Keyed by root directory; each value is { [dir_path] = true }.
+--- A directory not in this set has only a placeholder child in the buffer.
+--- Survives buffer refresh but is cleared on toggle_hidden.
+M._loaded_dirs = {}
+
 ----------------------------------------------------------------------
 -- Internal helpers
 ----------------------------------------------------------------------
@@ -215,6 +221,149 @@ local function read_dir(dir, ignore_patterns)
   return entries
 end
 
+--- Quick check: does `dir` have at least one visible child entry?
+--- Uses only vim.fn.readdir (no fs_stat), so it is an order of magnitude
+--- cheaper than read_dir.  Applies dotfile filtering and ignore-pattern
+--- basename matching; directory-only patterns (trailing /) are
+--- conservatively skipped since we cannot determine the entry type
+--- without fs_stat.
+---@param dir string
+---@param ignore_patterns? table[]
+---@return boolean
+local function has_visible_children(dir, ignore_patterns)
+  local items = vim.fn.readdir(dir)
+  if vim.v.shell_error ~= 0 then return false end
+  -- When show_hidden is on, the first non-.ignore entry means "yes".
+  -- No need to evaluate ignore patterns — everything is visible.
+  if M.config.show_hidden then
+    for _, name in ipairs(items) do
+      if name ~= ".ignore" then return true end
+    end
+    return false
+  end
+  -- show_hidden off: only count entries that are not dotfiles and not ignored.
+  for _, name in ipairs(items) do
+    if name ~= ".ignore" then
+      local is_dotfile = name:sub(1, 1) == "."
+      local is_ignored = M.config.respect_ignore
+          and ignore_patterns
+          and #ignore_patterns > 0
+          and matches_ignore(dir .. "/" .. name, name, ignore_patterns, false)
+      if not (is_dotfile or is_ignored) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+--- Merge ignore patterns from ancestor directories with any local
+--- .ignore / .gitignore files found in `dir`.  Extracted from
+--- read_dir_recursive so it can be reused by expand_dir.
+---@param dir string
+---@param ancestor_patterns? table[]
+---@return table[] merged_patterns
+local function get_merged_patterns(dir, ancestor_patterns)
+  local merged = {}
+  if not M.config.respect_ignore then return merged end
+  if ancestor_patterns then
+    for _, p in ipairs(ancestor_patterns) do
+      table.insert(merged, p)
+    end
+  end
+  for _, name in ipairs({ ".ignore", ".gitignore" }) do
+    local ignore_path = dir .. "/" .. name
+    if vim.loop.fs_stat(ignore_path) then
+      local local_patterns = parse_ignore_file(ignore_path)
+      for _, p in ipairs(local_patterns) do
+        table.insert(merged, { raw = p.raw, negate = p.negate, source_dir = dir })
+      end
+    end
+  end
+  return merged
+end
+
+--- Read a single directory level (no recursion) and append placeholder
+--- entries for any subdirectory that has visible children.  Returns the
+--- flat list of entries *and* the merged ignore patterns for this
+--- directory (so the caller can cache them for later expand_dir calls).
+---@param dir string
+---@param parent_indent number
+---@param ancestor_patterns? table[]
+---@return table[] entries
+---@return table[] merged_patterns
+local function read_dir_children(dir, parent_indent, ancestor_patterns)
+  local merged = get_merged_patterns(dir, ancestor_patterns)
+  local entries = read_dir(dir, merged)
+  local result = {}
+  for _, entry in ipairs(entries) do
+    entry.indent = parent_indent + 1
+    table.insert(result, entry)
+    if entry.type == "dir" then
+      if has_visible_children(entry.path, merged) then
+        table.insert(result, {
+          name = "\226\128\166", -- "…" (U+2026) as UTF-8 bytes
+          type = "placeholder",
+          path = entry.path .. "/.",
+          indent = parent_indent + 2,
+          is_placeholder = true,
+        })
+      end
+    elseif entry.type == "link" then
+      local link_real = vim.loop.fs_realpath(entry.path)
+      if link_real and vim.fn.isdirectory(link_real) == 1
+         and has_visible_children(link_real, merged) then
+        table.insert(result, {
+          name = "\226\128\166", -- "…"
+          type = "placeholder",
+          path = entry.path .. "/.",
+          indent = parent_indent + 2,
+          is_placeholder = true,
+        })
+      end
+    end
+  end
+  return result, merged
+end
+
+--- Read the directory tree, recursing only into directories present in
+--- `loaded_set`.  Used by compute_diff and refresh_buffer to get the
+--- on-disk state for only the loaded portion of the tree.
+---@param root string
+---@param loaded_set table   { [dir_path] = true }
+---@return table[]  flat list with indent fields
+local function read_dir_loaded(root, loaded_set)
+  local result = {}
+  local visited = {}
+
+  local function recurse(dir, depth, ancestor_patterns)
+    if depth > 20 then return end
+    local real = vim.loop.fs_realpath(dir) or dir
+    if visited[real] then return end
+    visited[real] = true
+
+    local merged = get_merged_patterns(dir, ancestor_patterns)
+    local entries = read_dir(dir, merged)
+    for _, entry in ipairs(entries) do
+      entry.indent = depth
+      table.insert(result, entry)
+
+      if entry.type == "dir" and loaded_set[entry.path] then
+        recurse(entry.path, depth + 1, merged)
+      elseif entry.type == "link" then
+        local link_real = vim.loop.fs_realpath(entry.path)
+        if link_real and vim.fn.isdirectory(link_real) == 1
+           and loaded_set[entry.path] then
+          recurse(link_real, depth + 1, merged)
+        end
+      end
+    end
+  end
+
+  recurse(root, 0, nil)
+  return result
+end
+
 --- Recursively read a directory tree, returning a flat list with indent
 --- levels. Uses cycle detection via real paths to handle symlinks safely.
 ---@param dir string
@@ -239,23 +388,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   -- and .gitignore if present.  Each pattern stores its source_dir so
   -- that path-based patterns (containing "/") can be matched against
   -- the entry's path relative to the .ignore file's directory.
-  local merged_patterns = {}
-  if M.config.respect_ignore then
-    if ancestor_patterns then
-      for _, p in ipairs(ancestor_patterns) do
-        table.insert(merged_patterns, p)
-      end
-    end
-    for _, name in ipairs({ ".ignore", ".gitignore" }) do
-      local ignore_path = dir .. "/" .. name
-      if vim.loop.fs_stat(ignore_path) then
-        local local_patterns = parse_ignore_file(ignore_path)
-        for _, p in ipairs(local_patterns) do
-          table.insert(merged_patterns, { raw = p.raw, negate = p.negate, source_dir = dir })
-        end
-      end
-    end
-  end
+  local merged_patterns = get_merged_patterns(dir, ancestor_patterns)
 
   local entries = read_dir(dir, merged_patterns)
   local result = {}
@@ -332,6 +465,24 @@ local function parse_buffer(buf)
     if name == "" then goto continue end
 
     local indent = indent_level(line)
+
+    -- Placeholder entry for an unloaded directory — serves only to
+    -- enable fold creation.  Skip normal path reconstruction.
+    if name == "\226\128\166" then -- "…" (U+2026)
+      while #stack > 0 and stack[#stack].indent >= indent do
+        table.remove(stack)
+      end
+      local parent = #stack > 0 and stack[#stack].path or root
+      table.insert(entries, {
+        name = "\226\128\166",
+        type = "placeholder",
+        path = parent .. "/.",
+        indent = indent,
+        is_placeholder = true,
+        lnum = lnum,
+      })
+      goto continue
+    end
 
     -- Split name on "/" so that "dir/subfile" expands into a synthetic
     -- dir entry and a child entry.  Intermediate segments are always
@@ -1009,6 +1160,76 @@ local function save_fold_state(buf, root)
   end
 end
 
+--- Load the children of an unloaded directory into the buffer.
+--- Reads one level from disk, removes the placeholder, inserts children,
+--- rebuilds folds, and re-applies extmarks.
+---@param buf    number
+---@param entry  table   parsed buffer entry for the directory
+local function load_directory(buf, entry)
+  local root = vim.b[buf].filebuf_root
+  if not root then return end
+
+  -- Initialize loaded set for this root if needed
+  if not M._loaded_dirs[root] then
+    M._loaded_dirs[root] = {}
+  end
+  M._loaded_dirs[root][entry.path] = true
+
+  -- Determine the ignore patterns for this directory.  Walk up from
+  -- the directory to the root, collecting .ignore/.gitignore patterns.
+  -- For simplicity, re-derive by walking the path components.
+  local merged_patterns
+  -- Try to get patterns from parent via the ignore cache, or compute fresh.
+  local parent_path = vim.fn.fnamemodify(entry.path, ":h")
+  local ignore_cache = vim.b[buf].filebuf_ignore_cache or {}
+  local ancestor_patterns = ignore_cache[parent_path]
+  merged_patterns = get_merged_patterns(entry.path, ancestor_patterns)
+  -- Cache for children of this directory
+  ignore_cache[entry.path] = merged_patterns
+  vim.b[buf].filebuf_ignore_cache = ignore_cache
+
+  -- Read immediate children
+  local children, _ = read_dir_children(entry.path, entry.indent, ancestor_patterns)
+
+  -- Find and remove the placeholder line (the next line after the dir
+  -- entry).  The placeholder sits at indent+1 right after the dir line.
+  local lnum = entry.lnum
+  local placeholder_lnum = nil
+  local all_entries = parse_buffer(buf)
+  for _, e in ipairs(all_entries) do
+    if e.is_placeholder and e.lnum == lnum + 1 then
+      -- Verify it's a child of this directory by checking indent
+      if e.indent == entry.indent + 1 then
+        placeholder_lnum = e.lnum
+        break
+      end
+    end
+  end
+  if placeholder_lnum then
+    vim.api.nvim_buf_set_lines(buf, placeholder_lnum - 1, placeholder_lnum, false, {})
+    -- Adjust lnum if the placeholder was above it (shouldn't be, but be safe)
+  end
+
+  -- Insert children after the directory line (lnum is 1-indexed, so it
+  -- maps to 0-indexed insert position = lnum).
+  if #children > 0 then
+    insert_entries(buf, children, lnum)
+  end
+
+  -- Rebuild folds
+  vim.cmd("silent! normal! zE")
+  create_folds(buf)
+
+  -- Open the fold for the expanded directory
+  pcall(vim.cmd, string.format("%dfoldopen", lnum))
+
+  -- Re-apply extmarks
+  apply_git_extmarks(buf, root)
+  local updated_entries = parse_buffer(buf)
+  apply_dir_extmarks(buf, updated_entries)
+  apply_hidden_extmarks(buf, updated_entries)
+end
+
 --- Handle <CR> in the filebuf buffer.
 local function handle_enter(buf)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
@@ -1024,14 +1245,26 @@ local function handle_enter(buf)
   end
   if not entry then return end
 
+  -- Placeholder entries are not actionable — ignore.
+  if entry.is_placeholder then return end
+
   if entry.type == "dir" then
-    -- Toggle the indent-based fold at this line.
-    vim.api.nvim_win_set_cursor(0, { lnum, 0 })
-    local fold_end = vim.fn.foldclosedend(lnum)
-    if fold_end ~= -1 then
-      vim.cmd("normal! zo")
+    local root = vim.b[buf].filebuf_root
+    local loaded = M._loaded_dirs[root]
+        and M._loaded_dirs[root][entry.path]
+
+    if not loaded then
+      -- Directory hasn't been loaded yet — read children on demand.
+      load_directory(buf, entry)
     else
-      vim.cmd("normal! zc")
+      -- Toggle the indent-based fold at this line.
+      vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+      local fold_end = vim.fn.foldclosedend(lnum)
+      if fold_end ~= -1 then
+        vim.cmd("normal! zo")
+      else
+        vim.cmd("normal! zc")
+      end
     end
     -- Immediately persist the new fold state so it survives
     -- close / reopen and subsequent saves.
@@ -1072,8 +1305,56 @@ local function refresh_buffer(buf)
     end
   end
 
-  -- 2. Re-read the tree from disk with current config (filtering applied)
-  local entries = read_dir_recursive(dir)
+  -- 2. Re-read the tree from disk with current config, respecting the
+  --    loaded set: only recurse into directories whose children have
+  --    been loaded.  Unloaded directories get placeholders.
+  local loaded_set = M._loaded_dirs[dir] or {}
+  local function collect_tree(collect_dir, indent, ancestor_patterns)
+    local merged = get_merged_patterns(collect_dir, ancestor_patterns)
+    -- Update ignore cache so subsequent expand_dir calls can find patterns
+    local cache = vim.b[buf].filebuf_ignore_cache or {}
+    cache[collect_dir] = merged
+    vim.b[buf].filebuf_ignore_cache = cache
+    local dir_entries = read_dir(collect_dir, merged)
+    local result = {}
+    for _, entry in ipairs(dir_entries) do
+      entry.indent = indent
+      table.insert(result, entry)
+
+      if entry.type == "dir" then
+        if loaded_set[entry.path] then
+          local children = collect_tree(entry.path, indent + 1, merged)
+          vim.list_extend(result, children)
+        elseif has_visible_children(entry.path, merged) then
+          table.insert(result, {
+            name = "\226\128\166", -- "…"
+            type = "placeholder",
+            path = entry.path .. "/.",
+            indent = indent + 1,
+            is_placeholder = true,
+          })
+        end
+      elseif entry.type == "link" then
+        local link_real = vim.loop.fs_realpath(entry.path)
+        if link_real and vim.fn.isdirectory(link_real) == 1 then
+          if loaded_set[entry.path] then
+            local children = collect_tree(link_real, indent + 1, merged)
+            vim.list_extend(result, children)
+          elseif has_visible_children(link_real, merged) then
+            table.insert(result, {
+              name = "\226\128\166", -- "…"
+              type = "placeholder",
+              path = entry.path .. "/.",
+              indent = indent + 1,
+              is_placeholder = true,
+            })
+          end
+        end
+      end
+    end
+    return result
+  end
+  local entries = collect_tree(dir, 0, nil)
   local fresh_lines = {}
   for _, entry in ipairs(entries) do
     table.insert(fresh_lines, format_line(entry))
@@ -1135,6 +1416,13 @@ local function toggle_hidden(buf)
   end
 
   M.config.show_hidden = not M.config.show_hidden
+
+  -- Clear loaded state so the tree is re-evaluated fresh with the new
+  -- show_hidden setting.  Previously expanded directories collapse back
+  -- to placeholders; the user can re-expand as needed.
+  local dir = vim.b[buf].filebuf_root
+  M._loaded_dirs[dir] = {}
+
   refresh_buffer(buf)
 
   -- Re-locate the same entry in the refreshed buffer and move the
@@ -1154,13 +1442,9 @@ local function toggle_hidden(buf)
   vim.notify("filebuf: hidden files " .. state, vim.log.levels.INFO)
 end
 
---- Open the filebuf browser. The entire directory tree is loaded
---- recursively with indent-based folding.  Top-level entries are visible;
---- subdirectories are initially folded.  Use `za` or `<CR>` (on a
---- directory) to toggle folds.
----
---- Press <CR> on a file to edit it.
----
+--- Open the filebuf browser.  Only root-level entries are loaded eagerly;
+--- subdirectory contents are loaded on demand when expanded via <CR>.
+--- Top-level entries are visible; subdirectories are initially folded.
 --- Changes to the buffer are only applied to the filesystem when you
 --- save with `:w`.  Type mismatches (e.g. deleting the trailing "/" from
 --- a directory) are flagged as errors and block the save.
@@ -1183,6 +1467,75 @@ function M.open(dir)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].buftype = "acwrite"
 
+  -- Initialize lazy-loading state
+  M._loaded_dirs[dir] = {}
+  local loaded_set = M._loaded_dirs[dir]
+  vim.b[buf].filebuf_ignore_cache = {}
+
+  -- Pre-load ancestor directories when auto-focusing on the current file
+  -- so that the file's entry exists in the buffer.
+  if M.config.auto_focus_current_file
+    and current_file ~= ""
+    and vim.startswith(current_file, dir .. "/")
+  then
+    local target = vim.fn.resolve(current_file)
+    local parent = vim.fn.fnamemodify(target, ":h")
+    while parent ~= dir and parent ~= "/" and parent ~= "" do
+      loaded_set[parent] = true
+      parent = vim.fn.fnamemodify(parent, ":h")
+    end
+  end
+
+  -- Recursively collect entries into a flat list, recursing only into
+  -- directories that are in `loaded_set`.  Unloaded-but-non-empty dirs
+  -- get a placeholder child so the fold indicator appears.
+  local function collect_tree(collect_dir, indent, ancestor_patterns)
+    local merged = get_merged_patterns(collect_dir, ancestor_patterns)
+    -- Cache patterns so expand_dir can retrieve them later
+    local cache = vim.b[buf].filebuf_ignore_cache
+    cache[collect_dir] = merged
+    vim.b[buf].filebuf_ignore_cache = cache
+
+    local dir_entries = read_dir(collect_dir, merged)
+    local result = {}
+    for _, entry in ipairs(dir_entries) do
+      entry.indent = indent
+      table.insert(result, entry)
+
+      if entry.type == "dir" then
+        if loaded_set[entry.path] then
+          local children = collect_tree(entry.path, indent + 1, merged)
+          vim.list_extend(result, children)
+        elseif has_visible_children(entry.path, merged) then
+          table.insert(result, {
+            name = "\226\128\166", -- "…"
+            type = "placeholder",
+            path = entry.path .. "/.",
+            indent = indent + 1,
+            is_placeholder = true,
+          })
+        end
+      elseif entry.type == "link" then
+        local link_real = vim.loop.fs_realpath(entry.path)
+        if link_real and vim.fn.isdirectory(link_real) == 1 then
+          if loaded_set[entry.path] then
+            local children = collect_tree(link_real, indent + 1, merged)
+            vim.list_extend(result, children)
+          elseif has_visible_children(link_real, merged) then
+            table.insert(result, {
+              name = "\226\128\166", -- "…"
+              type = "placeholder",
+              path = entry.path .. "/.",
+              indent = indent + 1,
+              is_placeholder = true,
+            })
+          end
+        end
+      end
+    end
+    return result
+  end
+
   -- Buffer-local keymaps
   vim.keymap.set("n", "<CR>", function()
     handle_enter(buf)
@@ -1195,8 +1548,9 @@ function M.open(dir)
     toggle_hidden(buf)
   end, { buffer = buf, desc = "Toggle hidden files" })
 
-  -- Populate the buffer with the full recursive tree
-  local entries = read_dir_recursive(dir)
+  -- Populate the buffer: collect root-level entries + placeholders for
+  -- unloaded subdirectories + recursive children of pre-loaded dirs.
+  local entries = collect_tree(dir, 0, nil)
   if #entries > 0 then
     insert_entries(buf, entries, 0)
   end
@@ -1305,11 +1659,19 @@ function M.open(dir)
     buffer = buf,
     callback = function()
       local ok, result = pcall(function()
-        -- 1. Parse the buffer
-        local buf_entries = parse_buffer(buf)
+        -- 1. Parse the buffer, filtering out placeholder entries which
+        --    are not real filesystem entries.
+        local all_buf_entries = parse_buffer(buf)
+        local buf_entries = {}
+        for _, e in ipairs(all_buf_entries) do
+          if not e.is_placeholder then
+            table.insert(buf_entries, e)
+          end
+        end
 
-        -- 2. Read current filesystem state
-        local disk_entries = read_dir_recursive(dir)
+        -- 2. Read current filesystem state — only recurse into loaded dirs
+        local loaded_set = M._loaded_dirs[dir] or {}
+        local disk_entries = read_dir_loaded(dir, loaded_set)
 
         -- 3. Diff
         local ops = compute_diff(buf_entries, disk_entries)
