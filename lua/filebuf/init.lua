@@ -30,10 +30,13 @@ M._fold_closed = {}
 -- Internal helpers
 ----------------------------------------------------------------------
 
---- Parse a .ignore file and return a list of raw pattern strings.
---- Supports # comments, blank lines, and trailing / for dir-only patterns.
+--- Parse a .ignore file and return a list of patterns, each with
+--- a `negate` flag.  Supports # comments, blank lines, and trailing /
+--- for dir-only patterns.  Negation patterns (starting with `!`)
+--- re-include files that would otherwise be ignored by an earlier
+--- pattern; in gitignore semantics the last matching pattern wins.
 ---@param path string  full filesystem path to the .ignore file
----@return string[]
+---@return table[]  list of { raw = string, negate = boolean }
 local function parse_ignore_file(path)
   local lines = vim.fn.readfile(path)
   if type(lines) ~= "table" then return {} end
@@ -43,7 +46,16 @@ local function parse_ignore_file(path)
     line = line:match("^%s*(.-)%s*$")
     -- Skip blank lines and comments
     if line ~= "" and line:sub(1, 1) ~= "#" then
-      table.insert(patterns, line)
+      local negate = false
+      -- A leading "!" means negate (re-include) the pattern.
+      -- "\!" at the start is an escaped literal "!".
+      if line:sub(1, 1) == "!" then
+        negate = true
+        line = line:sub(2)
+      elseif line:sub(1, 2) == "\\!" then
+        line = line:sub(2) -- strip the backslash, keep literal "!"
+      end
+      table.insert(patterns, { raw = line, negate = negate })
     end
   end
   return patterns
@@ -51,14 +63,17 @@ end
 
 --- Check if an entry matches any ignore pattern.
 --- Supports: * wildcard (any sequence of chars), trailing / (dir-only),
---- and path-based patterns (containing "/").
+--- path-based patterns (containing "/"), and negation patterns (starting
+--- with !).  The last matching pattern wins — a negation that appears
+--- later in the ignore file overrides an earlier positive match.
 ---@param full_path string    full filesystem path of the entry
 ---@param name      string    entry basename
----@param patterns  table[]   { raw = string, source_dir = string }
+---@param patterns  table[]   { raw = string, negate? = boolean, source_dir = string }
 ---@param is_dir    boolean   whether the entry is a directory
 ---@return boolean
 local function matches_ignore(full_path, name, patterns, is_dir)
   if not patterns or #patterns == 0 then return false end
+  local matched = false
   for _, pat in ipairs(patterns) do
     local dir_only = false
     local p = pat.raw
@@ -86,11 +101,11 @@ local function matches_ignore(full_path, name, patterns, is_dir)
         target = name
       end
       if target and target:match(lua_pattern) then
-        return true
+        matched = not pat.negate -- negation patterns un-ignore
       end
     end
   end
-  return false
+  return matched
 end
 
 --- Width of one indent level in spaces (when expandtab is set).
@@ -235,8 +250,8 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
       local ignore_path = dir .. "/" .. name
       if vim.loop.fs_stat(ignore_path) then
         local local_patterns = parse_ignore_file(ignore_path)
-        for _, raw in ipairs(local_patterns) do
-          table.insert(merged_patterns, { raw = raw, source_dir = dir })
+        for _, p in ipairs(local_patterns) do
+          table.insert(merged_patterns, { raw = p.raw, negate = p.negate, source_dir = dir })
         end
       end
     end
