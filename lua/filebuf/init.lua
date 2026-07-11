@@ -19,6 +19,13 @@ M.config = {
   --- number of spaces per indent level, only used when use_tabs = false
   --- (default: auto-detected from the user's global shiftwidth)
   indent_width = nil,
+  --- when false, entries whose name starts with "." are hidden from the
+  --- buffer (default: false)
+  show_hidden = false,
+  --- when true, .ignore files in directories are read and their patterns
+  --- are used to filter entries. The .ignore file itself is never hidden.
+  --- (default: true)
+  respect_ignore = true,
 }
 
 --- Persisted fold-closed state, keyed by root directory.
@@ -29,6 +36,58 @@ M._fold_closed = {}
 ----------------------------------------------------------------------
 -- Internal helpers
 ----------------------------------------------------------------------
+
+--- Parse a .ignore file and return a list of raw pattern strings.
+--- Supports # comments, blank lines, and trailing / for dir-only patterns.
+---@param path string  full filesystem path to the .ignore file
+---@return string[]
+local function parse_ignore_file(path)
+  local lines = vim.fn.readfile(path)
+  if type(lines) ~= "table" then return {} end
+  local patterns = {}
+  for _, line in ipairs(lines) do
+    -- Strip leading/trailing whitespace
+    line = line:match("^%s*(.-)%s*$") or line
+    -- Skip blank lines and comments
+    if line ~= "" and line:sub(1, 1) ~= "#" then
+      table.insert(patterns, line)
+    end
+  end
+  return patterns
+end
+
+--- Check if an entry name matches any ignore pattern.
+--- Supports: * wildcard (any sequence of chars), trailing / (dir-only).
+---@param name     string    entry name (not full path)
+---@param patterns string[]  raw patterns from .ignore files
+---@param is_dir   boolean   whether the entry is a directory
+---@return boolean
+local function matches_ignore(name, patterns, is_dir)
+  if not patterns or #patterns == 0 then return false end
+  for _, pat in ipairs(patterns) do
+    local dir_only = false
+    local p = pat
+    -- Trailing "/" means match only directories
+    if p:sub(-1) == "/" then
+      dir_only = true
+      p = p:sub(1, -2)
+    end
+    if dir_only and not is_dir then
+      goto continue
+    end
+    -- Convert glob to Lua pattern:
+    -- Escape all Lua magic characters except *, then replace * with .*
+    local escaped = p:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
+    escaped = escaped:gsub("%*", ".*")
+    -- Anchor to match the full name
+    local lua_pattern = "^" .. escaped .. "$"
+    if name:match(lua_pattern) then
+      return true
+    end
+    ::continue::
+  end
+  return false
+end
 
 --- Build the indent prefix for a given depth level.
 ---@param level number
@@ -58,8 +117,9 @@ end
 --- Read a directory using native stat calls.  Returns entries sorted
 --- directories-first, then alphabetically (case-insensitive).
 ---@param dir string
+---@param ignore_patterns? string[]  patterns from ancestor .ignore files
 ---@return table[]  list of { name, type, path }
-local function read_dir(dir)
+local function read_dir(dir, ignore_patterns)
   local files = vim.fn.readdir(dir)
   if vim.v.shell_error ~= 0 then
     return {
@@ -92,6 +152,28 @@ local function read_dir(dir)
     end
   end
 
+  -- Filter hidden files and ignore-matched entries.
+  -- The .ignore file itself is never filtered.
+  -- When show_hidden is true, ignore patterns are also bypassed.
+  local filtered = {}
+  for _, entry in ipairs(entries) do
+    if entry.name ~= ".ignore" then
+      if not M.config.show_hidden and entry.name:sub(1, 1) == "." then
+        goto skip_entry
+      end
+      if not M.config.show_hidden
+          and M.config.respect_ignore
+          and ignore_patterns
+          and #ignore_patterns > 0
+          and matches_ignore(entry.name, ignore_patterns, entry.type == "dir") then
+        goto skip_entry
+      end
+    end
+    table.insert(filtered, entry)
+    ::skip_entry::
+  end
+  entries = filtered
+
   -- Sort: dirs first, then links, then files; alpha within each group
   table.sort(entries, function(a, b)
     local prio = { dir = 1, link = 2, file = 3, error = 4 }
@@ -112,8 +194,9 @@ end
 ---@param max_depth number|nil
 ---@param current_depth number
 ---@param visited table|nil  set of real paths already visited (cycle detection)
+---@param ancestor_patterns? string[]  ignore patterns from parent directories
 ---@return table[]  list of { name, type, path, indent }
-local function read_dir_recursive(dir, max_depth, current_depth, visited)
+local function read_dir_recursive(dir, max_depth, current_depth, visited, ancestor_patterns)
   current_depth = current_depth or 0
   max_depth = max_depth or 20 -- safety limit for deep / cyclic hierarchies
   visited = visited or {}
@@ -125,19 +208,36 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited)
   end
   visited[real] = true
 
-  local entries = read_dir(dir)
+  -- Merge ignore patterns: carry forward ancestors, add local .ignore if present
+  local merged_patterns = {}
+  if M.config.respect_ignore then
+    if ancestor_patterns then
+      for _, p in ipairs(ancestor_patterns) do
+        table.insert(merged_patterns, p)
+      end
+    end
+    local ignore_path = dir .. "/.ignore"
+    if vim.loop.fs_stat(ignore_path) then
+      local local_patterns = parse_ignore_file(ignore_path)
+      for _, p in ipairs(local_patterns) do
+        table.insert(merged_patterns, p)
+      end
+    end
+  end
+
+  local entries = read_dir(dir, merged_patterns)
   local result = {}
   for _, entry in ipairs(entries) do
     entry.indent = current_depth
     table.insert(result, entry)
     if entry.type == "dir" then
-      local children = read_dir_recursive(entry.path, max_depth, current_depth + 1, visited)
+      local children = read_dir_recursive(entry.path, max_depth, current_depth + 1, visited, merged_patterns)
       vim.list_extend(result, children)
     elseif entry.type == "link" then
       -- Follow symlinks that point to directories
       local link_real = vim.loop.fs_realpath(entry.path)
       if link_real and vim.fn.isdirectory(link_real) == 1 then
-        local children = read_dir_recursive(link_real, max_depth, current_depth + 1, visited)
+        local children = read_dir_recursive(link_real, max_depth, current_depth + 1, visited, merged_patterns)
         vim.list_extend(result, children)
       end
     end
@@ -809,6 +909,74 @@ end
 -- Public API
 ----------------------------------------------------------------------
 
+--- Re-read the directory tree from disk and refresh the buffer contents.
+--- Preserves fold state across the refresh: directories that were open
+--- stay open; new directories (e.g. hidden dirs revealed by toggle)
+--- remain closed.
+---@param buf number  filebuf buffer to refresh
+local function refresh_buffer(buf)
+  local dir = vim.b[buf].filebuf_root
+  if not dir then return end
+
+  -- 1. Snapshot which directories are currently *open* so we can
+  --    restore exactly them after the refresh.  save_fold_state also
+  --    persists the closed set so fold preferences survive buffer close.
+  save_fold_state(buf, dir)
+  local open_dirs = {}
+  local pre_entries = parse_buffer(buf)
+  for _, e in ipairs(pre_entries) do
+    if e.type == "dir" and vim.fn.foldclosed(e.lnum) == -1 then
+      open_dirs[e.path] = true
+    end
+  end
+
+  -- 2. Re-read the tree from disk with current config (filtering applied)
+  local entries = read_dir_recursive(dir)
+  local fresh_lines = {}
+  for _, entry in ipairs(entries) do
+    table.insert(fresh_lines, format_line(entry))
+  end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
+
+  -- 3. Rebuild folds — create_folds produces closed folds for every
+  --    directory.  Then re-open only the directories that were open
+  --    before the refresh.  New directories (including hidden ones that
+  --    just became visible) stay closed.
+  vim.cmd("silent! normal! zE")
+  create_folds(buf)
+  local post_entries = parse_buffer(buf)
+  for _, e in ipairs(post_entries) do
+    if e.type == "dir" and open_dirs[e.path] then
+      vim.cmd(string.format("%dfoldopen", e.lnum))
+    end
+  end
+
+  -- 4. Refresh git extmarks
+  apply_git_extmarks(buf, dir)
+
+  vim.bo[buf].modified = false
+end
+
+--- Toggle show_hidden and refresh the filebuf buffer.
+--- Refuses if the buffer has unsaved changes to prevent data loss.
+---@param buf number
+local function toggle_hidden(buf)
+  -- Guard: prevent data loss if the user has unsaved edits
+  if vim.bo[buf].modified then
+    vim.notify(
+      "filebuf: save or discard changes before toggling hidden files",
+      vim.log.levels.WARN
+    )
+    return
+  end
+
+  M.config.show_hidden = not M.config.show_hidden
+  refresh_buffer(buf)
+
+  local state = M.config.show_hidden and "shown" or "hidden"
+  vim.notify("filebuf: hidden files " .. state, vim.log.levels.INFO)
+end
+
 --- Open the filebuf browser. The entire directory tree is loaded
 --- recursively with indent-based folding.  Top-level entries are visible;
 --- subdirectories are initially folded.  Use `za` or `<CR>` (on a
@@ -844,6 +1012,9 @@ function M.open(dir)
     save_fold_state(buf, dir)
     vim.api.nvim_buf_delete(buf, { force = true })
   end, { buffer = buf, desc = "Close filebuf" })
+  vim.keymap.set("n", "H", function()
+    toggle_hidden(buf)
+  end, { buffer = buf, desc = "Toggle hidden files" })
 
   -- Populate the buffer with the full recursive tree
   local entries = read_dir_recursive(dir)
@@ -960,40 +1131,10 @@ function M.open(dir)
         -- 5. Apply
         apply_ops(ops)
 
-        -- 6. Snapshot the current fold state so we can restore it
-        --    after the buffer is reloaded from disk.
-        save_fold_state(buf, dir)
+        -- 6. Refresh the buffer from disk — preserves fold state,
+        --    rebuilds folds, and refreshes git extmarks.
+        refresh_buffer(buf)
 
-        -- 7. Reload the buffer from the filesystem so formatting is
-        --    consistent — indentation is canonical, no orphaned children,
-        --    and every directory gets a proper fold.
-        local fresh = read_dir_recursive(dir)
-        local fresh_lines = {}
-        for _, entry in ipairs(fresh) do
-          table.insert(fresh_lines, format_line(entry))
-        end
-        vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
-
-        -- 8. Rebuild folds from the fresh tree.  create_folds produces
-        --    closed folds, so open everything first, then re-close only
-        --    the directories the user had closed before the save.
-        --    New directories stay open.
-        vim.cmd("silent! normal! zE")
-        create_folds(buf)
-        vim.cmd("silent! %foldopen!")
-        do
-          local post_entries = parse_buffer(buf)
-          for _, e in ipairs(post_entries) do
-            if e.type == "dir" and M._fold_closed[dir][e.path] then
-              vim.cmd(string.format("%dfoldclose", e.lnum))
-            end
-          end
-        end
-
-        -- Refresh git status after the buffer is reloaded from disk.
-        apply_git_extmarks(buf, dir)
-
-        vim.bo[buf].modified = false
         vim.notify("filebuf: saved", vim.log.levels.INFO)
       end)
 
@@ -1044,6 +1185,15 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("Filebuf", function()
     M.open()
   end, { desc = "Open filebuf listing buffer" })
+  vim.api.nvim_create_user_command("FilebufToggleHidden", function()
+    -- Find the filebuf buffer in the current tabpage, or fail gracefully
+    local buf = vim.api.nvim_get_current_buf()
+    if vim.b[buf] and vim.b[buf].filebuf_root then
+      toggle_hidden(buf)
+    else
+      vim.notify("filebuf: not in a filebuf buffer", vim.log.levels.WARN)
+    end
+  end, { desc = "Toggle visibility of hidden (dot) files in filebuf" })
 end
 
 return M
