@@ -510,6 +510,13 @@ local function create_folds(buf)
     end
   end
 
+  -- Sort by indent descending so inner (deeper) folds are created
+  -- before outer ones.  This prevents outer folds from absorbing inner
+  -- folds in Neovim's manual-fold model.
+  table.sort(dirs, function(a, b)
+    return a.indent > b.indent
+  end)
+
   -- For each directory find its last descendant and apply a fold
   -- from the directory line itself through the last descendant.
   for _, d in ipairs(dirs) do
@@ -531,9 +538,10 @@ end
 --- Shows the cleaned entry name and the count of folded lines.
 function _G.FilebufFoldText()
   local line = vim.fn.getline(vim.v.foldstart)
+  local indent = line:match("^(\t*)") or ""
   local name = line:match("^\t*(.-)%s*$") or line
   local count = vim.v.foldend - vim.v.foldstart
-  return name .. "  (" .. count .. ")"
+  return indent .. name .. "  (" .. count .. ")"
 end
 
 ----------------------------------------------------------------------
