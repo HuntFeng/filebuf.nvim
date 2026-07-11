@@ -1077,6 +1077,12 @@ local function refresh_buffer(buf)
       vim.cmd(string.format("silent! %dfoldopen", e.lnum))
     end
   end
+  -- Persist the updated fold state so it survives a subsequent
+  -- close / reopen.  This must happen *after* folds are rebuilt,
+  -- otherwise newly-revealed directories (e.g. hidden dirs after
+  -- a toggle) are missing from the closed set and would all open
+  -- on the next :Filebuf.
+  save_fold_state(buf, dir)
 
   -- 4. Refresh git extmarks, hidden-entry hints, and directory coloring
   apply_git_extmarks(buf, dir)
@@ -1168,13 +1174,15 @@ function M.open(dir)
 
   -- Restore saved fold state, or close everything on first open.
   if M._fold_closed[dir] then
-    -- create_folds produces closed folds.  Open everything first,
-    -- then re-close only the directories the user had closed before.
-    vim.cmd("silent! %foldopen!")
+    -- create_folds already produced closed folds for every directory.
+    -- Instead of opening everything and then re-closing, open only the
+    -- directories the user had previously expanded (i.e. those missing
+    -- from the closed set).  This way any unaccounted directory (e.g. a
+    -- newly-revealed hidden dir) defaults to closed instead of open.
     local post_entries = parse_buffer(buf)
     for _, e in ipairs(post_entries) do
-      if e.type == "dir" and M._fold_closed[dir][e.path] then
-        vim.cmd(string.format("%dfoldclose", e.lnum))
+      if e.type == "dir" and not M._fold_closed[dir][e.path] then
+        vim.cmd(string.format("silent! %dfoldopen", e.lnum))
       end
     end
   else
