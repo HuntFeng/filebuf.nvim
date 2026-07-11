@@ -763,7 +763,7 @@ end
 ---@return table|nil
 local function get_git_status_map(root)
   local cmd = string.format(
-    "git -C %s status --porcelain --ignored=matching",
+    "git -C %s status --porcelain --ignored=matching --untracked-files=all",
     vim.fn.shellescape(root)
   )
   local output = vim.fn.system(cmd)
