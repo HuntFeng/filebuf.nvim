@@ -199,14 +199,20 @@ local function shift_map_down(buf, at_lnum, count)
 end
 
 --- Shift map entries up after deleting `count` lines starting at 1-indexed `at_lnum`.
+--- Returns the entries that were removed (so callers can delete them from disk).
 ---@param buf     number
 ---@param at_lnum number  1-indexed first deleted line
 ---@param count   number  positive line count
+---@return table[]  removed entries
 local function shift_map_up(buf, at_lnum, count)
   local map = buf_entries[buf]
-  if not map then return end
-  -- Remove entries in the deleted range
+  if not map then return {} end
+  -- Collect entries in the deleted range before removing them
+  local removed = {}
   for lnum = at_lnum, at_lnum + count - 1 do
+    if map[lnum] then
+      table.insert(removed, map[lnum])
+    end
     map[lnum] = nil
   end
   -- Shift remaining entries up
@@ -217,6 +223,7 @@ local function shift_map_up(buf, at_lnum, count)
       map[lnum] = nil
     end
   end
+  return removed
 end
 
 --- Get the entry at a specific line.
@@ -299,6 +306,25 @@ local function create_entry_from_line(buf, lnum, line)
   end
 end
 
+--- Delete the on-disk file or directory backing `entry`.
+--- Directories are removed recursively.
+---@param entry table  { name, type, path }
+local function delete_entry(entry)
+  if entry.type == "dir" then
+    -- vim.fn.delete with "rf" handles recursive directory removal.
+    -- pcall returns true + result on success; vim.fn.delete returns 0 on success.
+    local ok, result = pcall(vim.fn.delete, entry.path, "rf")
+    if not ok or result ~= 0 then
+      vim.notify("filebuf: cannot delete dir – " .. (result or entry.path), vim.log.levels.ERROR)
+    end
+  else
+    local ok, err = pcall(vim.loop.fs_unlink, entry.path)
+    if not ok then
+      vim.notify("filebuf: cannot delete – " .. (err or entry.path), vim.log.levels.ERROR)
+    end
+  end
+end
+
 --- Rename the on-disk file/dir backing `entry` to `new_name`.
 ---@param entry    table   { name, type, path }
 ---@param new_name string  cleaned name (no trailing slash)
@@ -352,10 +378,15 @@ local function on_lines_handler(buf, firstline, lastline, linedata, preview)
       insert_dirty[buf] = true
     end
   elseif linedata < 0 then
-    -- Always shift map (even during insert mode).
-    shift_map_up(buf, firstline + 1, -linedata)
+    -- Always shift map (even during insert mode) and collect removed entries.
+    local removed = shift_map_up(buf, firstline + 1, -linedata)
     if in_insert[buf] then
       insert_dirty[buf] = true
+    else
+      -- Normal-mode deletion: delete the removed entries from disk.
+      for _, entry in ipairs(removed) do
+        delete_entry(entry)
+      end
     end
   elseif linedata == 0 and firstline + 1 == lastline then
     -- Single line changed in-place — potential rename
@@ -436,7 +467,10 @@ local function full_reconcile(buf)
   end
 
   -- Remaining entries in by_path were deleted from the buffer.
-  -- Remove them from the map (don't delete files).
+  -- Delete them from disk.
+  for _, entry in pairs(by_path) do
+    delete_entry(entry)
+  end
 end
 
 --- Store entries into the buffer map at the given line numbers.
