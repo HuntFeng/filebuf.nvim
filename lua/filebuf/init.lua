@@ -3,8 +3,12 @@ local M = {}
 --- Plugin configuration (set via setup()).
 ---@class filebuf.Config
 ---@field permanent_delete boolean  when false, deleted entries are moved to a trash directory
+---@field auto_focus_current_file boolean  when true, focus the tree on the file
+---                                        that was open before :Filebuf
+---                                        (default: true)
 M.config = {
   permanent_delete = true,
+  auto_focus_current_file = true,
 }
 
 --- Persisted fold-closed state, keyed by root directory.
@@ -624,6 +628,10 @@ end
 function M.open(dir)
   dir = dir or vim.fn.getcwd()
 
+  -- Capture the current editing file *before* we create the filebuf
+  -- buffer, so we can auto-focus on it after the tree is built.
+  local current_file = vim.api.nvim_buf_get_name(0)
+
   local buf = vim.api.nvim_create_buf(true, true)
   -- Give the buffer a name so :w triggers BufWriteCmd instead of E32.
   vim.api.nvim_buf_set_name(buf, "filebuf://" .. dir)
@@ -673,6 +681,55 @@ function M.open(dir)
   else
     -- First open: start with a clean overview.
     vim.cmd("silent! %foldclose!")
+  end
+
+  -- Auto-focus on the file that was being edited before :Filebuf.
+  if M.config.auto_focus_current_file
+    and current_file ~= ""
+    and vim.startswith(current_file, dir:sub(-1) == "/" and dir or (dir .. "/"))
+  then
+    local target = vim.fn.resolve(current_file)
+    local focus_entries = parse_buffer(buf)
+    local target_lnum = nil
+    for _, e in ipairs(focus_entries) do
+      if vim.fn.resolve(e.path) == target then
+        target_lnum = e.lnum
+        break
+      end
+    end
+    if target_lnum then
+      -- Open ancestor folds from outermost to innermost so the
+      -- file is visible.  Collect dirs above the target line whose
+      -- indent is less than the target's.
+      local target_indent = nil
+      for _, e in ipairs(focus_entries) do
+        if e.lnum == target_lnum then
+          target_indent = e.indent
+          break
+        end
+      end
+      if target_indent then
+        local ancestors = {}
+        for _, e in ipairs(focus_entries) do
+          if e.type == "dir" and e.lnum < target_lnum and e.indent < target_indent then
+            -- Keep only the closest ancestor at each indent depth
+            -- (the last one seen before the target).
+            ancestors[e.indent] = e.lnum
+          end
+        end
+        -- Open from outermost (lowest indent) to innermost.
+        local sorted = {}
+        for _, lnum in pairs(ancestors) do
+          table.insert(sorted, lnum)
+        end
+        table.sort(sorted)
+        for _, lnum in ipairs(sorted) do
+          pcall(vim.cmd, string.format("%dfoldopen", lnum))
+        end
+      end
+      vim.api.nvim_win_set_cursor(0, { target_lnum, 0 })
+      vim.cmd("normal! zz")
+    end
   end
 
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
