@@ -1088,6 +1088,8 @@ end
 
 --- Toggle show_hidden and refresh the filebuf buffer.
 --- Refuses if the buffer has unsaved changes to prevent data loss.
+--- Preserves the cursor on the same entry across the toggle by resolving
+--- the entry path before the refresh and re-locating it afterwards.
 ---@param buf number
 local function toggle_hidden(buf)
   -- Guard: prevent data loss if the user has unsaved edits
@@ -1099,8 +1101,33 @@ local function toggle_hidden(buf)
     return
   end
 
+  -- Capture the entry under the cursor before refreshing so we can
+  -- restore the cursor to the same entry after the toggle.
+  local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local cursor_entry_path = nil
+  local pre_entries = parse_buffer(buf)
+  for _, e in ipairs(pre_entries) do
+    if e.lnum == cursor_lnum then
+      cursor_entry_path = e.path
+      break
+    end
+  end
+
   M.config.show_hidden = not M.config.show_hidden
   refresh_buffer(buf)
+
+  -- Re-locate the same entry in the refreshed buffer and move the
+  -- cursor to its new line.  This naturally accounts for any entries
+  -- that were added or removed before the cursor line by the toggle.
+  if cursor_entry_path then
+    local post_entries = parse_buffer(buf)
+    for _, e in ipairs(post_entries) do
+      if e.path == cursor_entry_path then
+        vim.api.nvim_win_set_cursor(0, { e.lnum, 0 })
+        break
+      end
+    end
+  end
 
   local state = M.config.show_hidden and "shown" or "hidden"
   vim.notify("filebuf: hidden files " .. state, vim.log.levels.INFO)
