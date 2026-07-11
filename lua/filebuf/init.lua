@@ -268,7 +268,12 @@ end
 local function format_line(entry)
   local prefix = indent_str(entry.indent or 0)
   local suffix = entry.type == "dir" and "/" or ""
-  return prefix .. entry.name .. suffix
+  -- Escape control characters so nvim_buf_set_lines doesn't reject the line.
+  -- Uses shell $'...' notation so the original name can be recovered.
+  local name = entry.name:gsub("[\n\r\t]", function(c)
+    return ({ ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" })[c]
+  end)
+  return prefix .. name .. suffix
 end
 
 --- Parse a display line: strip leading whitespace, detect trailing-slash dir marker.
@@ -281,6 +286,8 @@ local function parse_line(line)
   if is_dir then
     name = name:sub(1, -2)
   end
+  -- Reverse the $'...' escaping applied in format_line.
+  name = name:gsub("%$'\\n'", "\n"):gsub("%$'\\r'", "\r"):gsub("%$'\\t'", "\t")
   return name, is_dir
 end
 
