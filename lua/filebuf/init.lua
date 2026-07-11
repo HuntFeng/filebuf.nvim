@@ -1074,7 +1074,7 @@ local function refresh_buffer(buf)
   local post_entries = parse_buffer(buf)
   for _, e in ipairs(post_entries) do
     if e.type == "dir" and open_dirs[e.path] then
-      vim.cmd(string.format("%dfoldopen", e.lnum))
+      vim.cmd(string.format("silent! %dfoldopen", e.lnum))
     end
   end
 
