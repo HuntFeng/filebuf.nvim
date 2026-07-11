@@ -1,5 +1,12 @@
 local M = {}
 
+--- Plugin configuration (set via setup()).
+---@class filebuf.Config
+---@field permanent_delete boolean  when false, deleted entries are moved to a trash directory
+M.config = {
+  permanent_delete = true,
+}
+
 --- Persisted fold-closed state, keyed by root directory.
 --- Each value is a set of filesystem paths whose folds were closed.
 --- Survives buffer close/reopen so the user's fold preferences stick.
@@ -402,8 +409,33 @@ local function apply_ops(ops)
     table.insert(to_delete, de)
   end
   table.sort(to_delete, function(a, b) return #a.path > #b.path end)
+
+  -- When permanent_delete is disabled, prepare a timestamped trash
+  -- directory so that every save gets its own recovery folder.
+  local trash_dir = nil
+  if not M.config.permanent_delete and #to_delete > 0 then
+    trash_dir = string.format(
+      "/tmp/filebuf-trash/%s",
+      os.date("%Y_%m_%d_%H_%M_%S")
+    )
+    vim.fn.mkdir(trash_dir, "p")
+  end
+
   for _, de in ipairs(to_delete) do
-    if de.type == "dir" then
+    if trash_dir then
+      -- Move to trash instead of deleting.
+      local dest = trash_dir .. "/" .. de.name
+      -- Avoid name collisions inside the trash folder.
+      local n = 1
+      while vim.loop.fs_stat(dest) do
+        n = n + 1
+        dest = string.format("%s/%s.%d", trash_dir, de.name, n)
+      end
+      local ok, err = pcall(vim.loop.fs_rename, de.path, dest)
+      if not ok then
+        vim.notify("filebuf: cannot trash – " .. (err or de.path), vim.log.levels.ERROR)
+      end
+    elseif de.type == "dir" then
       pcall(vim.fn.delete, de.path, "rf")
     else
       pcall(vim.loop.fs_unlink, de.path)
@@ -717,8 +749,24 @@ function M.open(dir)
   vim.bo[buf].modified = false
 end
 
---- Setup entry point for lazy.nvim. Registers user commands.
-function M.setup()
+--- Setup entry point for lazy.nvim.  Accepts an optional configuration
+--- table (merged into M.config) and registers user commands.
+---
+---@param opts? filebuf.Config
+---
+--- Usage (lazy.nvim):
+---   {
+---     "user/filebuf",
+---     dir = "~/path/to/filebuf",
+---     opts = { permanent_delete = false },
+---     config = true,
+---   }
+--- Or (init.lua):
+---   require("filebuf").setup({ permanent_delete = false })
+function M.setup(opts)
+  opts = opts or {}
+  M.config = vim.tbl_deep_extend("force", M.config, opts)
+
   vim.api.nvim_create_user_command("Filebuf", function()
     M.open()
   end, { desc = "Open filebuf listing buffer" })
