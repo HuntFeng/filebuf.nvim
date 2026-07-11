@@ -9,6 +9,9 @@ local M = {}
 M.config = {
   permanent_delete = true,
   auto_focus_current_file = true,
+  --- when true, show git status indicators (A, M, D, …) next to entries
+  --- that have uncommitted changes (default: true)
+  git_status = true,
 }
 
 --- Persisted fold-closed state, keyed by root directory.
@@ -551,6 +554,163 @@ function _G.FilebufFoldText()
 end
 
 ----------------------------------------------------------------------
+-- Git status indicators (extmarks)
+----------------------------------------------------------------------
+
+--- Namespace for git-related extmarks so we can clear only our own
+--- marks without disturbing others.
+local git_ns = vim.api.nvim_create_namespace("filebuf-git")
+
+--- Define highlight groups for git statuses.  `default = true` ensures
+--- user overrides in their colorscheme take precedence.
+local function define_git_highlights()
+  local groups = {
+    FilebufGitAdded     = { fg = "#98c379" },
+    FilebufGitModified  = { fg = "#e5c07b" },
+    FilebufGitDeleted   = { fg = "#e06c75" },
+    FilebufGitUntracked = { fg = "#61afef" },
+    FilebufGitConflict  = { fg = "#c678dd" },
+    FilebufGitRenamed   = { fg = "#56b6c2" },
+  }
+  for name, def in pairs(groups) do
+    vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
+  end
+end
+
+--- Run `git status --porcelain` in `root` and return a map of
+--- filesystem path → { index, worktree } status codes.
+--- Returns nil when the directory is not inside a git repo or git is
+--- not available.
+---@param root string
+---@return table|nil
+local function get_git_status_map(root)
+  local cmd = string.format(
+    "git -C %s status --porcelain --ignored=matching",
+    vim.fn.shellescape(root)
+  )
+  local output = vim.fn.system(cmd)
+  if vim.v.shell_error ~= 0 then
+    return nil
+  end
+
+  local status_map = {}
+  for line in output:gmatch("[^\r\n]+") do
+    local x = line:sub(1, 1)
+    local y = line:sub(2, 2)
+    local filename = line:sub(4)
+
+    -- Handle renames: "R  old -> new"
+    if x == "R" then
+      local arrow = filename:find(" -> ")
+      if arrow then
+        filename = filename:sub(arrow + 4)
+      end
+    end
+
+    local path = root .. "/" .. filename
+    status_map[path] = { index = x, worktree = y }
+  end
+
+  return status_map
+end
+
+--- Convert a git-porcelain status pair to a display character and
+--- highlight-group name.  Worktree status takes priority over index
+--- status because it reflects the current on-disk state.
+---@param s table  { index, worktree }
+---@return string|nil char      single-letter status indicator
+---@return string|nil hl_group
+local function porcelain_to_display(s)
+  local x, y = s.index, s.worktree
+
+  -- Worktree status > index status
+  local code
+  if y ~= " " then
+    code = y
+  elseif x ~= " " then
+    code = x
+  else
+    return nil
+  end
+
+  if code == "?" then return "U", "FilebufGitUntracked" end
+  if code == "A" then return "A", "FilebufGitAdded" end
+  if code == "M" then return "M", "FilebufGitModified" end
+  if code == "D" then return "D", "FilebufGitDeleted" end
+  if code == "R" then return "R", "FilebufGitRenamed" end
+  if code == "U" then return "C", "FilebufGitConflict" end
+
+  return nil
+end
+
+--- Look up the git status for a single entry.  For directories this
+--- propagates child statuses upward: if any descendant has a git
+--- status the directory inherits it.
+---@param entry table       parsed buffer entry
+---@param status_map table  map from get_git_status_map
+---@return string|nil char
+---@return string|nil hl_group
+local function get_entry_git_status(entry, status_map)
+  if not status_map then
+    return nil
+  end
+
+  -- Direct match: the entry's path appears verbatim in git status
+  local s = status_map[entry.path]
+  if s then
+    return porcelain_to_display(s)
+  end
+
+  -- For directories, propagate status from any descendant
+  if entry.type == "dir" then
+    local prefix = entry.path .. "/"
+    for path, ps in pairs(status_map) do
+      if vim.startswith(path, prefix) then
+        return porcelain_to_display(ps)
+      end
+    end
+  end
+
+  return nil
+end
+
+--- Apply git-status extmarks to every entry in `buf`.  Entries with
+--- no git status are left unadorned.  Existing git extmarks are
+--- cleared before re-applying.
+---@param buf  number
+---@param root string  root directory (used to run git status)
+local function apply_git_extmarks(buf, root)
+  vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
+
+  if not M.config.git_status then
+    return
+  end
+
+  local status_map = get_git_status_map(root)
+  if not status_map then
+    return
+  end
+
+  local entries = parse_buffer(buf)
+  for _, entry in ipairs(entries) do
+    local char, hl = get_entry_git_status(entry, status_map)
+    if char then
+      -- Column range covering the filename portion of the line.
+      -- Indent is measured in tab characters (1 col each in Neovim).
+      local name_start = entry.indent
+      local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
+      local name_end = name_start + #entry.name + suffix
+
+      vim.api.nvim_buf_set_extmark(buf, git_ns, entry.lnum - 1, name_start, {
+        end_col = name_end,
+        hl_group = hl,
+        virt_text = { { " " .. char, hl } },
+      })
+    end
+  end
+end
+
+----------------------------------------------------------------------
 -- <CR> handler
 ----------------------------------------------------------------------
 
@@ -732,6 +892,9 @@ function M.open(dir)
     end
   end
 
+  -- Apply git-status extmarks after the buffer is fully populated.
+  apply_git_extmarks(buf, dir)
+
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
@@ -791,6 +954,9 @@ function M.open(dir)
           end
         end
 
+        -- Refresh git status after the buffer is reloaded from disk.
+        apply_git_extmarks(buf, dir)
+
         vim.bo[buf].modified = false
         vim.notify("filebuf: saved", vim.log.levels.INFO)
       end)
@@ -823,6 +989,10 @@ end
 function M.setup(opts)
   opts = opts or {}
   M.config = vim.tbl_deep_extend("force", M.config, opts)
+
+  -- Ensure highlight groups exist so users can override them in their
+  -- colorscheme before the first buffer is opened.
+  define_git_highlights()
 
   vim.api.nvim_create_user_command("Filebuf", function()
     M.open()
