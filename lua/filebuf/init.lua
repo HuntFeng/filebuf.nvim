@@ -40,7 +40,7 @@ local function parse_ignore_file(path)
   local patterns = {}
   for _, line in ipairs(lines) do
     -- Strip leading/trailing whitespace
-    line = line:match("^%s*(.-)%s*$") or line
+    line = line:match("^%s*(.-)%s*$")
     -- Skip blank lines and comments
     if line ~= "" and line:sub(1, 1) ~= "#" then
       table.insert(patterns, line)
@@ -68,29 +68,36 @@ local function matches_ignore(full_path, name, patterns, is_dir)
       p = p:sub(1, -2)
     end
     if dir_only and not is_dir then
-      goto continue
-    end
-    -- Convert glob to Lua pattern:
-    -- Escape all Lua magic characters except *, then replace * with .*
-    local escaped = p:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
-    escaped = escaped:gsub("%*", ".*")
-    -- Anchor to match the full name
-    local lua_pattern = "^" .. escaped .. "$"
-    -- For path-based patterns (containing "/"), match against the
-    -- entry's path relative to the .gitignore's directory.
-    -- Otherwise match against the basename.
-    local target
-    if p:find("/") then
-      target = full_path:sub(#pat.source_dir + 2) -- strip source_dir + "/"
+      -- skip — trailing-slash patterns only match directories
     else
-      target = name
+      -- Convert glob to Lua pattern:
+      -- Escape all Lua magic characters except *, then replace * with .*
+      local escaped = p:gsub("([%^%$%(%)%%%.%[%]%+%-%?])", "%%%1")
+      escaped = escaped:gsub("%*", ".*")
+      -- Anchor to match the full name
+      local lua_pattern = "^" .. escaped .. "$"
+      -- For path-based patterns (containing "/"), match against the
+      -- entry's path relative to the .gitignore's directory.
+      -- Otherwise match against the basename.
+      local target
+      if p:find("/") then
+        target = full_path:sub(#pat.source_dir + 2) -- strip source_dir + "/"
+      else
+        target = name
+      end
+      if target and target:match(lua_pattern) then
+        return true
+      end
     end
-    if target and target:match(lua_pattern) then
-      return true
-    end
-    ::continue::
   end
   return false
+end
+
+--- Width of one indent level in spaces (when expandtab is set).
+---@return number
+local function indent_width()
+  local sw = vim.go.shiftwidth
+  return (sw > 0 and sw) or vim.go.tabstop
 end
 
 --- Build the indent prefix for a given depth level.
@@ -100,11 +107,8 @@ local function indent_str(level)
   if level <= 0 then return "" end
   if not vim.go.expandtab then
     return string.rep("\t", level)
-  else
-    local sw = vim.go.shiftwidth
-    local width = (sw > 0 and sw) or vim.go.tabstop
-    return string.rep(" ", level * width)
   end
+  return string.rep(" ", level * indent_width())
 end
 
 --- Compute the indent depth level from a buffer line's leading whitespace.
@@ -115,11 +119,8 @@ local function indent_level(line)
   if not vim.go.expandtab then
     local _, count = ws:gsub("\t", "")
     return count
-  else
-    local sw = vim.go.shiftwidth
-    local width = (sw > 0 and sw) or vim.go.tabstop
-    return math.floor(#ws / width)
   end
+  return math.floor(#ws / indent_width())
 end
 
 --- Read a directory using native stat calls.  Returns entries sorted
@@ -165,7 +166,6 @@ local function read_dir(dir, ignore_patterns)
   -- like other dotfiles (but its patterns are still read from disk).
   -- When show_hidden is true, ignore patterns are also bypassed.
   -- Hidden entries are tagged with is_hidden for later highlighting.
-  local hidden_count = 0
   local filtered = {}
   for _, entry in ipairs(entries) do
     if entry.name ~= ".ignore" then
@@ -176,7 +176,6 @@ local function read_dir(dir, ignore_patterns)
           and matches_ignore(entry.path, entry.name, ignore_patterns, entry.type == "dir")
       if is_dotfile or is_ignored then
         entry.is_hidden = true
-        hidden_count = hidden_count + 1
         if not M.config.show_hidden then
           goto skip_entry
         end
@@ -198,7 +197,7 @@ local function read_dir(dir, ignore_patterns)
     return a.name:lower() < b.name:lower()
   end)
 
-  return entries, hidden_count
+  return entries
 end
 
 --- Recursively read a directory tree, returning a flat list with indent
@@ -209,7 +208,6 @@ end
 ---@param visited table|nil  set of real paths already visited (cycle detection)
 ---@param ancestor_patterns? table[]  { raw, source_dir } patterns from parents
 ---@return table[]  list of { name, type, path, indent }
----@return number   total count of hidden entries in the tree
 local function read_dir_recursive(dir, max_depth, current_depth, visited, ancestor_patterns)
   current_depth = current_depth or 0
   max_depth = max_depth or 20 -- safety limit for deep / cyclic hierarchies
@@ -244,29 +242,24 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
     end
   end
 
-  local entries, local_hidden = read_dir(dir, merged_patterns)
-  local total_hidden = local_hidden
+  local entries = read_dir(dir, merged_patterns)
   local result = {}
   for _, entry in ipairs(entries) do
     entry.indent = current_depth
     table.insert(result, entry)
     if entry.type == "dir" then
-      local children, child_hidden = read_dir_recursive(entry.path, max_depth, current_depth + 1, visited, merged_patterns)
-      entry.has_hidden = child_hidden > 0
-      total_hidden = total_hidden + child_hidden
+      local children = read_dir_recursive(entry.path, max_depth, current_depth + 1, visited, merged_patterns)
       vim.list_extend(result, children)
     elseif entry.type == "link" then
       -- Follow symlinks that point to directories
       local link_real = vim.loop.fs_realpath(entry.path)
       if link_real and vim.fn.isdirectory(link_real) == 1 then
-        local children, child_hidden = read_dir_recursive(link_real, max_depth, current_depth + 1, visited, merged_patterns)
-        entry.has_hidden = child_hidden > 0
-        total_hidden = total_hidden + child_hidden
+        local children = read_dir_recursive(link_real, max_depth, current_depth + 1, visited, merged_patterns)
         vim.list_extend(result, children)
       end
     end
   end
-  return result, total_hidden
+  return result
 end
 
 --- Build the display line for an entry. Directories get a trailing slash.
@@ -393,12 +386,6 @@ local function compute_diff(buf_entries, disk_entries)
 
   local consumed = {}  -- set of disk paths already matched
 
-  -- Helper: "dir" is the only directory type; "file" and "link" are both
-  -- non-directory and should not flag a type mismatch against each other.
-  local function is_dir_type(t)
-    return t == "dir"
-  end
-
   ------------------------------------------------------------------
   -- Phase 1: exact-path match -------------------------------------
   ------------------------------------------------------------------
@@ -406,7 +393,7 @@ local function compute_diff(buf_entries, disk_entries)
   for _, be in ipairs(buf_entries) do
     local de = disk_by_path[be.path]
     if de then
-      if is_dir_type(de.type) ~= is_dir_type(be.type) then
+      if (de.type == "dir") ~= (be.type == "dir") then
         -- Type mismatch on an otherwise-unchanged entry.
         -- e.g. user accidentally deleted the trailing "/" from a dir,
         -- or added "/" to a file.
@@ -477,7 +464,7 @@ local function compute_diff(buf_entries, disk_entries)
       end
 
       if best then
-        if is_dir_type(best.type) ~= is_dir_type(be.type) then
+        if (best.type == "dir") ~= (be.type == "dir") then
           table.insert(errors, {
             lnum = be.lnum,
             message = string.format(
@@ -608,15 +595,13 @@ local function apply_ops(ops)
   -- 3. Creates — sort by depth so parents are always created before
   --    children, and ensure every parent directory exists.
   table.sort(ops.created, function(a, b)
-    local _, na = a.path:gsub("/", "")
-    local _, nb = b.path:gsub("/", "")
+    local na = select(2, a.path:gsub("/", "/"))
+    local nb = select(2, b.path:gsub("/", "/"))
     if na ~= nb then
       return na < nb -- shallower paths first
     end
     -- Directories before files at the same depth
-    if a.type == "dir" and b.type ~= "dir" then return true end
-    if a.type ~= "dir" and b.type == "dir" then return false end
-    return false
+    return a.type == "dir" and b.type ~= "dir"
   end)
   for _, be in ipairs(ops.created) do
     if be.type == "dir" then
@@ -917,16 +902,21 @@ end
 --- background would leak through.  By resolving Directory's fg and Normal's
 --- bg at setup time we give winhighlight a group that fully replaces both.
 local function define_filebuf_highlights()
-  local dir_fg = nil
-  local normal_bg = nil
-
   -- nvim_get_hl is available since Neovim 0.9
-  if pcall(vim.api.nvim_get_hl, 0, { name = "Normal" }) then
-    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = "Directory" })
-    if ok and hl then dir_fg = hl.fg end
-    ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = "Normal" })
-    if ok and hl then normal_bg = hl.bg end
+  if not pcall(vim.api.nvim_get_hl, 0, { name = "Normal" }) then
+    -- Fallback for older Neovim: plain link (may still leak bg,
+    -- but better than nothing).
+    vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Directory", default = true })
+    return
   end
+
+  local function hl_attr(name, attr)
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name })
+    return ok and hl and hl[attr] or nil
+  end
+
+  local dir_fg = hl_attr("Directory", "fg")
+  local normal_bg = hl_attr("Normal", "bg")
 
   if dir_fg or normal_bg then
     local attrs = { default = true }
@@ -934,8 +924,6 @@ local function define_filebuf_highlights()
     if normal_bg then attrs.bg = normal_bg end
     vim.api.nvim_set_hl(0, "FilebufFoldLine", attrs)
   else
-    -- Fallback for older Neovim: plain link (may still leak bg,
-    -- but better than nothing).
     vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Directory", default = true })
   end
 end
@@ -1029,11 +1017,7 @@ local function handle_enter(buf)
     save_fold_state(buf, vim.b[buf].filebuf_root)
   else
     -- File or symlink — resolve the real path and open.
-    local target = entry.path
-    local real = vim.loop.fs_realpath(entry.path)
-    if real and real ~= entry.path then
-      target = real
-    end
+    local target = vim.loop.fs_realpath(entry.path) or entry.path
     if vim.fn.filereadable(target) == 1 then
       vim.cmd("edit " .. vim.fn.fnameescape(target))
     else
@@ -1136,6 +1120,8 @@ end
 ---@param dir string|nil  root directory (default: cwd)
 function M.open(dir)
   dir = dir or vim.fn.getcwd()
+  -- Normalize: strip trailing slash for consistent path joining.
+  dir = dir:gsub("/$", "")
 
   -- Capture the current editing file *before* we create the filebuf
   -- buffer, so we can auto-focus on it after the tree is built.
@@ -1208,46 +1194,38 @@ function M.open(dir)
   -- Auto-focus on the file that was being edited before :Filebuf.
   if M.config.auto_focus_current_file
     and current_file ~= ""
-    and vim.startswith(current_file, dir:sub(-1) == "/" and dir or (dir .. "/"))
+    and vim.startswith(current_file, dir .. "/")
   then
     local target = vim.fn.resolve(current_file)
     local focus_entries = parse_buffer(buf)
-    local target_lnum = nil
+    local target_lnum, target_indent = nil, nil
     for _, e in ipairs(focus_entries) do
       if vim.fn.resolve(e.path) == target then
         target_lnum = e.lnum
+        target_indent = e.indent
         break
       end
     end
-    if target_lnum then
+    if target_lnum and target_indent then
       -- Open ancestor folds from outermost to innermost so the
       -- file is visible.  Collect dirs above the target line whose
       -- indent is less than the target's.
-      local target_indent = nil
+      local ancestors = {}
       for _, e in ipairs(focus_entries) do
-        if e.lnum == target_lnum then
-          target_indent = e.indent
-          break
+        if e.type == "dir" and e.lnum < target_lnum and e.indent < target_indent then
+          -- Keep only the closest ancestor at each indent depth
+          -- (the last one seen before the target).
+          ancestors[e.indent] = e.lnum
         end
       end
-      if target_indent then
-        local ancestors = {}
-        for _, e in ipairs(focus_entries) do
-          if e.type == "dir" and e.lnum < target_lnum and e.indent < target_indent then
-            -- Keep only the closest ancestor at each indent depth
-            -- (the last one seen before the target).
-            ancestors[e.indent] = e.lnum
-          end
-        end
-        -- Open from outermost (lowest indent) to innermost.
-        local sorted = {}
-        for _, lnum in pairs(ancestors) do
-          table.insert(sorted, lnum)
-        end
-        table.sort(sorted)
-        for _, lnum in ipairs(sorted) do
-          pcall(vim.cmd, string.format("%dfoldopen", lnum))
-        end
+      -- Open from outermost (lowest indent) to innermost.
+      local sorted = {}
+      for _, lnum in pairs(ancestors) do
+        table.insert(sorted, lnum)
+      end
+      table.sort(sorted)
+      for _, lnum in ipairs(sorted) do
+        pcall(vim.cmd, string.format("%dfoldopen", lnum))
       end
       vim.api.nvim_win_set_cursor(0, { target_lnum, 0 })
       vim.cmd("normal! zz")
