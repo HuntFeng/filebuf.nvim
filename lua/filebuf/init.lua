@@ -577,11 +577,15 @@ end
 
 --- Custom fold-text callback (called via v:lua.FilebufFoldText).
 --- Shows the cleaned entry name and the count of folded lines.
+--- Uses strdisplaywidth to convert the line's leading whitespace into an
+--- equivalent number of space characters, so the fold text always visually
+--- aligns with the unfolded lines regardless of tabstop.
 function _G.FilebufFoldText()
   local line = vim.fn.getline(vim.v.foldstart)
-  local indent = line:match("^(%s*)") or ""
+  local indent_ws = line:match("^(%s*)") or ""
   local name = line:match("^%s*(.-)%s*$") or line
   local count = vim.v.foldend - vim.v.foldstart
+  local indent = string.rep(" ", vim.fn.strdisplaywidth(indent_ws))
   return indent .. name .. "  (" .. count .. ")"
 end
 
