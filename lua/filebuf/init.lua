@@ -167,18 +167,22 @@ local function read_dir(dir, ignore_patterns)
   -- The .ignore file itself is never filtered; .gitignore is hidden
   -- like other dotfiles (but its patterns are still read from disk).
   -- When show_hidden is true, ignore patterns are also bypassed.
+  -- Hidden entries are tagged with is_hidden for later highlighting.
+  local hidden_count = 0
   local filtered = {}
   for _, entry in ipairs(entries) do
     if entry.name ~= ".ignore" then
-      if not M.config.show_hidden and entry.name:sub(1, 1) == "." then
-        goto skip_entry
-      end
-      if not M.config.show_hidden
-          and M.config.respect_ignore
+      local is_dotfile = entry.name:sub(1, 1) == "."
+      local is_ignored = M.config.respect_ignore
           and ignore_patterns
           and #ignore_patterns > 0
-          and matches_ignore(entry.path, entry.name, ignore_patterns, entry.type == "dir") then
-        goto skip_entry
+          and matches_ignore(entry.path, entry.name, ignore_patterns, entry.type == "dir")
+      if is_dotfile or is_ignored then
+        entry.is_hidden = true
+        hidden_count = hidden_count + 1
+        if not M.config.show_hidden then
+          goto skip_entry
+        end
       end
     end
     table.insert(filtered, entry)
@@ -197,7 +201,7 @@ local function read_dir(dir, ignore_patterns)
     return a.name:lower() < b.name:lower()
   end)
 
-  return entries
+  return entries, hidden_count
 end
 
 --- Recursively read a directory tree, returning a flat list with indent
@@ -208,6 +212,7 @@ end
 ---@param visited table|nil  set of real paths already visited (cycle detection)
 ---@param ancestor_patterns? table[]  { raw, source_dir } patterns from parents
 ---@return table[]  list of { name, type, path, indent }
+---@return number   total count of hidden entries in the tree
 local function read_dir_recursive(dir, max_depth, current_depth, visited, ancestor_patterns)
   current_depth = current_depth or 0
   max_depth = max_depth or 20 -- safety limit for deep / cyclic hierarchies
@@ -242,24 +247,29 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
     end
   end
 
-  local entries = read_dir(dir, merged_patterns)
+  local entries, local_hidden = read_dir(dir, merged_patterns)
+  local total_hidden = local_hidden
   local result = {}
   for _, entry in ipairs(entries) do
     entry.indent = current_depth
     table.insert(result, entry)
     if entry.type == "dir" then
-      local children = read_dir_recursive(entry.path, max_depth, current_depth + 1, visited, merged_patterns)
+      local children, child_hidden = read_dir_recursive(entry.path, max_depth, current_depth + 1, visited, merged_patterns)
+      entry.has_hidden = child_hidden > 0
+      total_hidden = total_hidden + child_hidden
       vim.list_extend(result, children)
     elseif entry.type == "link" then
       -- Follow symlinks that point to directories
       local link_real = vim.loop.fs_realpath(entry.path)
       if link_real and vim.fn.isdirectory(link_real) == 1 then
-        local children = read_dir_recursive(link_real, max_depth, current_depth + 1, visited, merged_patterns)
+        local children, child_hidden = read_dir_recursive(link_real, max_depth, current_depth + 1, visited, merged_patterns)
+        entry.has_hidden = child_hidden > 0
+        total_hidden = total_hidden + child_hidden
         vim.list_extend(result, children)
       end
     end
   end
-  return result
+  return result, total_hidden
 end
 
 --- Build the display line for an entry. Directories get a trailing slash.
@@ -863,6 +873,52 @@ local function apply_git_extmarks(buf, root)
   end
 end
 
+--- Namespace and highlight groups for hidden-file extmarks.
+local hidden_ns = vim.api.nvim_create_namespace("filebuf-hidden")
+
+local function define_hidden_highlights()
+  local groups = {
+    FilebufHiddenHint = { fg = "#5c6370" },
+    FilebufHiddenFile = { fg = "#5c6370" },
+    FilebufHiddenDir  = { fg = "#5c6370" },
+  }
+  for name, def in pairs(groups) do
+    vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
+  end
+end
+
+--- Apply extmarks for hidden-content hints and hidden-file coloring.
+--- Directory entries with has_hidden get a " …" virtual-text hint.
+--- Entries tagged is_hidden get dimmed highlighting on their name.
+---@param buf     number
+---@param entries table[]  flat list from read_dir_recursive (with is_hidden,
+---                        has_hidden, indent, name, type fields)
+local function apply_hidden_extmarks(buf, entries)
+  vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
+
+  for lnum, entry in ipairs(entries) do
+    local name_start = #indent_str(entry.indent)
+    local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
+    local name_end = name_start + #entry.name + suffix
+
+    if entry.has_hidden and not M.config.show_hidden then
+      -- Subtle ellipsis after the directory name, only when content
+      -- is actually being filtered (not when hidden files are shown).
+      vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_end, {
+        virt_text = { { " …", "FilebufHiddenHint" } },
+      })
+    end
+
+    if entry.is_hidden then
+      local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
+      vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
+        end_col = name_end,
+        hl_group = hl,
+      })
+    end
+  end
+end
+
 ----------------------------------------------------------------------
 -- <CR> handler
 ----------------------------------------------------------------------
@@ -968,8 +1024,9 @@ local function refresh_buffer(buf)
     end
   end
 
-  -- 4. Refresh git extmarks
+  -- 4. Refresh git extmarks and hidden-entry hints
   apply_git_extmarks(buf, dir)
+  apply_hidden_extmarks(buf, entries)
 
   vim.bo[buf].modified = false
 end
@@ -1118,6 +1175,7 @@ function M.open(dir)
 
   -- Apply git-status extmarks after the buffer is fully populated.
   apply_git_extmarks(buf, dir)
+  apply_hidden_extmarks(buf, entries)
 
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
@@ -1198,6 +1256,7 @@ function M.setup(opts)
   -- Ensure highlight groups exist so users can override them in their
   -- colorscheme before the first buffer is opened.
   define_git_highlights()
+  define_hidden_highlights()
 
   vim.api.nvim_create_user_command("Filebuf", function()
     M.open()
