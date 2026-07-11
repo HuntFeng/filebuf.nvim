@@ -12,6 +12,13 @@ M.config = {
   --- when true, show git status indicators (A, M, D, …) next to entries
   --- that have uncommitted changes (default: true)
   git_status = true,
+  --- when true, use tab characters for indentation; when false, use
+  --- indent_width spaces per indent level (default: auto-detected from
+  --- the user's global expandtab setting)
+  use_tabs = nil,
+  --- number of spaces per indent level, only used when use_tabs = false
+  --- (default: auto-detected from the user's global shiftwidth)
+  indent_width = nil,
 }
 
 --- Persisted fold-closed state, keyed by root directory.
@@ -22,6 +29,31 @@ M._fold_closed = {}
 ----------------------------------------------------------------------
 -- Internal helpers
 ----------------------------------------------------------------------
+
+--- Build the indent prefix for a given depth level.
+---@param level number
+---@return string
+local function indent_str(level)
+  if level <= 0 then return "" end
+  if M.config.use_tabs then
+    return string.rep("\t", level)
+  else
+    return string.rep(" ", level * M.config.indent_width)
+  end
+end
+
+--- Compute the indent depth level from a buffer line's leading whitespace.
+---@param line string
+---@return number
+local function indent_level(line)
+  local ws = line:match("^(%s*)") or ""
+  if M.config.use_tabs then
+    local _, count = ws:gsub("\t", "")
+    return count
+  else
+    return math.floor(#ws / M.config.indent_width)
+  end
+end
 
 --- Read a directory using native stat calls.  Returns entries sorted
 --- directories-first, then alphabetically (case-insensitive).
@@ -117,7 +149,7 @@ end
 ---@param entry  table  { name, type, path, indent? }
 ---@return string
 local function format_line(entry)
-  local prefix = string.rep("\t", entry.indent or 0)
+  local prefix = indent_str(entry.indent or 0)
   local suffix = entry.type == "dir" and "/" or ""
   return prefix .. entry.name .. suffix
 end
@@ -160,7 +192,7 @@ local function parse_buffer(buf)
     local name, is_dir = parse_line(line)
     if name == "" then goto continue end
 
-    local indent = #(line:match("^(%s*)") or "")
+    local indent = indent_level(line)
 
     -- Split name on "/" so that "dir/subfile" expands into a synthetic
     -- dir entry and a child entry.  Intermediate segments are always
@@ -547,8 +579,8 @@ end
 --- Shows the cleaned entry name and the count of folded lines.
 function _G.FilebufFoldText()
   local line = vim.fn.getline(vim.v.foldstart)
-  local indent = line:match("^(\t*)") or ""
-  local name = line:match("^\t*(.-)%s*$") or line
+  local indent = line:match("^(%s*)") or ""
+  local name = line:match("^%s*(.-)%s*$") or line
   local count = vim.v.foldend - vim.v.foldstart
   return indent .. name .. "  (" .. count .. ")"
 end
@@ -696,8 +728,8 @@ local function apply_git_extmarks(buf, root)
     local char, hl = get_entry_git_status(entry, status_map)
     if char then
       -- Column range covering the filename portion of the line.
-      -- Indent is measured in tab characters (1 col each in Neovim).
-      local name_start = entry.indent
+      -- Use indent_str to convert depth-level to actual character offset.
+      local name_start = #indent_str(entry.indent)
       local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
       local name_end = name_start + #entry.name + suffix
 
@@ -988,6 +1020,17 @@ end
 ---   require("filebuf").setup({ permanent_delete = false })
 function M.setup(opts)
   opts = opts or {}
+
+  -- Auto-detect indentation preferences from the user's global config
+  -- when not explicitly provided.
+  if opts.use_tabs == nil then
+    opts.use_tabs = not vim.go.expandtab
+  end
+  if opts.indent_width == nil then
+    local sw = vim.go.shiftwidth
+    opts.indent_width = (sw > 0 and sw) or vim.go.tabstop
+  end
+
   M.config = vim.tbl_deep_extend("force", M.config, opts)
 
   -- Ensure highlight groups exist so users can override them in their
