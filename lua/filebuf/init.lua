@@ -12,13 +12,6 @@ M.config = {
   --- when true, show git status indicators (A, M, D, …) next to entries
   --- that have uncommitted changes (default: true)
   git_status = true,
-  --- when true, use tab characters for indentation; when false, use
-  --- indent_width spaces per indent level (default: auto-detected from
-  --- the user's global expandtab setting)
-  use_tabs = nil,
-  --- number of spaces per indent level, only used when use_tabs = false
-  --- (default: auto-detected from the user's global shiftwidth)
-  indent_width = nil,
   --- when false, entries whose name starts with "." are hidden from the
   --- buffer (default: false)
   show_hidden = false,
@@ -105,10 +98,12 @@ end
 ---@return string
 local function indent_str(level)
   if level <= 0 then return "" end
-  if M.config.use_tabs then
+  if not vim.go.expandtab then
     return string.rep("\t", level)
   else
-    return string.rep(" ", level * M.config.indent_width)
+    local sw = vim.go.shiftwidth
+    local width = (sw > 0 and sw) or vim.go.tabstop
+    return string.rep(" ", level * width)
   end
 end
 
@@ -117,11 +112,13 @@ end
 ---@return number
 local function indent_level(line)
   local ws = line:match("^(%s*)") or ""
-  if M.config.use_tabs then
+  if not vim.go.expandtab then
     local _, count = ws:gsub("\t", "")
     return count
   else
-    return math.floor(#ws / M.config.indent_width)
+    local sw = vim.go.shiftwidth
+    local width = (sw > 0 and sw) or vim.go.tabstop
+    return math.floor(#ws / width)
   end
 end
 
@@ -740,6 +737,24 @@ local function define_git_highlights()
   end
 end
 
+--- Unquote a path from git status --porcelain output.  Git wraps
+--- paths that contain special characters (spaces, tabs, newlines,
+--- non-ASCII bytes, etc.) in double quotes and uses C-style escaping
+--- (\n, \t, \\, \") inside them.
+---@param path string
+---@return string
+local function unquote_git_path(path)
+  if path:sub(1, 1) == '"' and path:sub(-1) == '"' then
+    path = path:sub(2, -2)
+    path = path:gsub("\\n", "\n")
+    path = path:gsub("\\t", "\t")
+    path = path:gsub("\\r", "\r")
+    path = path:gsub('\\"', '"')
+    path = path:gsub("\\\\", "\\")
+  end
+  return path
+end
+
 --- Run `git status --porcelain` in `root` and return a map of
 --- filesystem path → { index, worktree } status codes.
 --- Returns nil when the directory is not inside a git repo or git is
@@ -760,14 +775,20 @@ local function get_git_status_map(root)
   for line in output:gmatch("[^\r\n]+") do
     local x = line:sub(1, 1)
     local y = line:sub(2, 2)
-    local filename = line:sub(4)
+    local filename = unquote_git_path(line:sub(4))
 
     -- Handle renames: "R  old -> new"
+    -- The "->" arrow and both paths may be quoted separately when
+    -- either path contains special characters, e.g.
+    -- R  "old path" -> "new path"
     if x == "R" then
       local arrow = filename:find(" -> ")
       if arrow then
         filename = filename:sub(arrow + 4)
       end
+      -- Unquote again for the new-name portion in case it was
+      -- individually quoted inside the combined rename string.
+      filename = unquote_git_path(filename)
     end
 
     local path = root .. "/" .. filename
@@ -1247,6 +1268,17 @@ function M.open(dir)
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
+
+  -- Re-apply git-status extmarks whenever the user edits the buffer
+  -- so that stale indicators don't linger on deleted or moved lines.
+  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
+    group = group,
+    buffer = buf,
+    callback = function()
+      apply_git_extmarks(buf, dir)
+    end,
+  })
+
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
     buffer = buf,
@@ -1307,16 +1339,6 @@ end
 ---   require("filebuf").setup({ permanent_delete = false })
 function M.setup(opts)
   opts = opts or {}
-
-  -- Auto-detect indentation preferences from the user's global config
-  -- when not explicitly provided.
-  if opts.use_tabs == nil then
-    opts.use_tabs = not vim.go.expandtab
-  end
-  if opts.indent_width == nil then
-    local sw = vim.go.shiftwidth
-    opts.indent_width = (sw > 0 and sw) or vim.go.tabstop
-  end
 
   M.config = vim.tbl_deep_extend("force", M.config, opts)
 
