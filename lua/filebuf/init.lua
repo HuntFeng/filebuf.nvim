@@ -103,12 +103,12 @@ local function format_line(entry)
   return prefix .. entry.name .. suffix
 end
 
---- Parse a display line: strip indent, detect trailing-slash dir marker.
+--- Parse a display line: strip leading whitespace, detect trailing-slash dir marker.
 ---@param line string
 ---@return string name      cleaned name (no indent, no trailing slash)
 ---@return boolean is_dir   true if the line ends with "/"
 local function parse_line(line)
-  local name = line:match("^\t*(.+)") or ""
+  local name = line:match("^%s*(.+)") or ""
   local is_dir = name:sub(-1) == "/"
   if is_dir then
     name = name:sub(1, -2)
@@ -141,30 +141,46 @@ local function parse_buffer(buf)
     local name, is_dir = parse_line(line)
     if name == "" then goto continue end
 
-    local indent = #(line:match("^(\t*)") or "")
+    local indent = #(line:match("^(%s*)") or "")
 
-    -- Pop entries that are at or deeper than the current indent — they
-    -- are siblings or descendants of siblings, not ancestors.
-    while #stack > 0 and stack[#stack].indent >= indent do
-      table.remove(stack)
+    -- Split name on "/" so that "dir/subfile" expands into a synthetic
+    -- dir entry and a child entry.  Intermediate segments are always
+    -- directories; only the final segment inherits the trailing-slash
+    -- flag from the line.
+    local name_parts = {}
+    for part in name:gmatch("[^/]+") do
+      table.insert(name_parts, part)
     end
+    if #name_parts == 0 then goto continue end
 
-    -- Parent is the top of the stack, or the filesystem root for
-    -- top-level entries.
-    local parent = #stack > 0 and stack[#stack].path or root
-    local path = parent .. "/" .. name
+    for i, part in ipairs(name_parts) do
+      -- Only the last segment keeps the original is_dir flag;
+      -- intermediate segments are always directories.
+      local part_is_dir = (i < #name_parts) or is_dir
+      -- First segment keeps the line's original indent; subsequent
+      -- segments nest one level deeper.
+      local part_indent = indent + (i - 1)
 
-    if is_dir then
-      table.insert(stack, { indent = indent, path = path })
+      -- Pop entries that are at or deeper than the current indent.
+      while #stack > 0 and stack[#stack].indent >= part_indent do
+        table.remove(stack)
+      end
+
+      local parent = #stack > 0 and stack[#stack].path or root
+      local part_path = parent .. "/" .. part
+
+      if part_is_dir then
+        table.insert(stack, { indent = part_indent, path = part_path })
+      end
+
+      table.insert(entries, {
+        name = part,
+        type = part_is_dir and "dir" or "file",
+        path = part_path,
+        indent = part_indent,
+        lnum = lnum,
+      })
     end
-
-    table.insert(entries, {
-      name = name,
-      type = is_dir and "dir" or "file",
-      path = path,
-      indent = indent,
-      lnum = lnum,
-    })
 
     ::continue::
   end
@@ -355,13 +371,27 @@ end
 --- Apply the computed operations to the filesystem.
 ---
 --- Execution order:
----   1. Deletes — deepest path first (children before parents).
----   2. Renames — individual file / empty-dir renames.
----   3. Creates — buffer order is depth-first, so parents exist before
----      children.
+---   1. Renames — move files before their source directories are deleted.
+---      Target parent directories are created first when needed.
+---   2. Deletes — deepest path first (children before parents).
+---   3. Creates — sorted by depth (shallowest first) with `mkdir -p`
+---      semantics so intermediate directories are always created
+---      automatically.
 ---@param ops table  result of compute_diff()
 local function apply_ops(ops)
-  -- 1. Deletes (deepest first)
+  -- 1. Renames (before deletes so source files are moved out before
+  --    their parent dirs are recursively removed).
+  for _, r in ipairs(ops.renamed) do
+    -- Ensure the target parent directory exists before renaming.
+    local target_parent = vim.fn.fnamemodify(r.new.path, ":h")
+    vim.fn.mkdir(target_parent, "p")
+    local ok, err = pcall(vim.loop.fs_rename, r.old.path, r.new.path)
+    if not ok then
+      vim.notify("filebuf: cannot rename – " .. (err or r.old.path), vim.log.levels.ERROR)
+    end
+  end
+
+  -- 2. Deletes (deepest first)
   local to_delete = {}
   for _, de in ipairs(ops.deleted) do
     table.insert(to_delete, de)
@@ -375,22 +405,30 @@ local function apply_ops(ops)
     end
   end
 
-  -- 2. Renames
-  for _, r in ipairs(ops.renamed) do
-    local ok, err = pcall(vim.loop.fs_rename, r.old.path, r.new.path)
-    if not ok then
-      vim.notify("filebuf: cannot rename – " .. (err or r.old.path), vim.log.levels.ERROR)
+  -- 3. Creates — sort by depth so parents are always created before
+  --    children, and ensure every parent directory exists.
+  table.sort(ops.created, function(a, b)
+    local _, na = a.path:gsub("/", "")
+    local _, nb = b.path:gsub("/", "")
+    if na ~= nb then
+      return na < nb -- shallower paths first
     end
-  end
-
-  -- 3. Creates (buffer order — parents before children)
+    -- Directories before files at the same depth
+    if a.type == "dir" and b.type ~= "dir" then return true end
+    if a.type ~= "dir" and b.type == "dir" then return false end
+    return false
+  end)
   for _, be in ipairs(ops.created) do
     if be.type == "dir" then
-      local ok, err = pcall(vim.loop.fs_mkdir, be.path, 493) -- 0755
+      -- "p" flag creates intermediate directories (mkdir -p).
+      local ok, err = pcall(vim.fn.mkdir, be.path, "p")
       if not ok then
         vim.notify("filebuf: cannot create dir – " .. (err or be.path), vim.log.levels.ERROR)
       end
     else
+      -- Ensure the parent directory chain exists before creating the file.
+      local parent_dir = vim.fn.fnamemodify(be.path, ":h")
+      vim.fn.mkdir(parent_dir, "p")
       local fd, err = vim.loop.fs_open(be.path, "w", 420) -- 0644
       if not fd then
         vim.notify("filebuf: cannot create file – " .. (err or be.path), vim.log.levels.ERROR)
