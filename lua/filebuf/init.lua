@@ -1,5 +1,10 @@
 local M = {}
 
+--- Persisted fold-closed state, keyed by root directory.
+--- Each value is a set of filesystem paths whose folds were closed.
+--- Survives buffer close/reopen so the user's fold preferences stick.
+M._fold_closed = {}
+
 ----------------------------------------------------------------------
 -- Internal helpers
 ----------------------------------------------------------------------
@@ -513,6 +518,19 @@ end
 -- <CR> handler
 ----------------------------------------------------------------------
 
+--- Persist the closed-fold set for `dir` by scanning the current buffer.
+---@param buf   number
+---@param root  string  root directory (key into M._fold_closed)
+local function save_fold_state(buf, root)
+  M._fold_closed[root] = {}
+  local entries = parse_buffer(buf)
+  for _, e in ipairs(entries) do
+    if e.type == "dir" and vim.fn.foldclosed(e.lnum) ~= -1 then
+      M._fold_closed[root][e.path] = true
+    end
+  end
+end
+
 --- Handle <CR> in the filebuf buffer.
 local function handle_enter(buf)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
@@ -537,6 +555,9 @@ local function handle_enter(buf)
     else
       vim.cmd("normal! zc")
     end
+    -- Immediately persist the new fold state so it survives
+    -- close / reopen and subsequent saves.
+    save_fold_state(buf, vim.b[buf].filebuf_root)
   else
     -- File or symlink — resolve the real path and open.
     local target = entry.path
@@ -584,6 +605,7 @@ function M.open(dir)
     handle_enter(buf)
   end, { buffer = buf, desc = "Open file / toggle directory fold" })
   vim.keymap.set("n", "q", function()
+    save_fold_state(buf, dir)
     vim.api.nvim_buf_delete(buf, { force = true })
   end, { buffer = buf, desc = "Close filebuf" })
 
@@ -604,11 +626,22 @@ function M.open(dir)
   local fc = vim.wo.fillchars or ""
   vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶"
   create_folds(buf)
-  -- Close all folds so the user starts with a clean overview.
-  vim.cmd("silent! %foldclose!")
 
-  -- BufWriteCmd is the *only* autocmd.  It parses the buffer, diffs
-  -- against the filesystem, validates, and applies changes.
+  -- Restore saved fold state, or close everything on first open.
+  if M._fold_closed[dir] then
+    local post_entries = parse_buffer(buf)
+    for _, e in ipairs(post_entries) do
+      if e.type == "dir" and M._fold_closed[dir][e.path] then
+        vim.cmd(string.format("%dfoldclose", e.lnum))
+      end
+    end
+  else
+    -- First open: start with a clean overview.
+    vim.cmd("silent! %foldclose!")
+  end
+
+  -- BufWriteCmd parses the buffer, diffs against the filesystem,
+  -- validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
@@ -635,6 +668,34 @@ function M.open(dir)
 
         -- 5. Apply
         apply_ops(ops)
+
+        -- 6. Snapshot the current fold state so we can restore it
+        --    after the buffer is reloaded from disk.
+        save_fold_state(buf, dir)
+
+        -- 7. Reload the buffer from the filesystem so formatting is
+        --    consistent — indentation is canonical, no orphaned children,
+        --    and every directory gets a proper fold.
+        local fresh = read_dir_recursive(dir)
+        local fresh_lines = {}
+        for _, entry in ipairs(fresh) do
+          table.insert(fresh_lines, format_line(entry))
+        end
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
+
+        -- 8. Rebuild folds from the fresh tree, then re-close the
+        --    directories that were closed before the save.  New
+        --    directories stay open.
+        vim.cmd("silent! normal! zE")
+        create_folds(buf)
+        do
+          local post_entries = parse_buffer(buf)
+          for _, e in ipairs(post_entries) do
+            if e.type == "dir" and M._fold_closed[dir][e.path] then
+              vim.cmd(string.format("%dfoldclose", e.lnum))
+            end
+          end
+        end
 
         vim.bo[buf].modified = false
         vim.notify("filebuf: saved", vim.log.levels.INFO)
