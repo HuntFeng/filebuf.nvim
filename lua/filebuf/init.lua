@@ -1216,18 +1216,26 @@ local function load_directory(buf, entry)
     insert_entries(buf, children, lnum)
   end
 
-  -- Rebuild folds
+  -- Rebuild folds — all directories start closed after create_folds.
   vim.cmd("silent! normal! zE")
   create_folds(buf)
 
-  -- Open the fold for the expanded directory
-  pcall(vim.cmd, string.format("%dfoldopen", lnum))
+  -- Open the fold for the expanded directory so children are visible
+  -- immediately.  Use normal-mode zo (same mechanism as the fold toggle
+  -- in handle_enter) rather than the :Nfoldopen Ex command, which can
+  -- fail silently when the fold was just created.
+  vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+  vim.cmd("normal! zo")
 
   -- Re-apply extmarks
   apply_git_extmarks(buf, root)
   local updated_entries = parse_buffer(buf)
   apply_dir_extmarks(buf, updated_entries)
   apply_hidden_extmarks(buf, updated_entries)
+
+  -- Loading children into the buffer is a view operation, not a user
+  -- edit — the buffer should not appear modified.
+  vim.bo[buf].modified = false
 end
 
 --- Handle <CR> in the filebuf buffer.
