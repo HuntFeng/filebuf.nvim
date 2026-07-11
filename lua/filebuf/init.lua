@@ -629,6 +629,9 @@ function M.open(dir)
 
   -- Restore saved fold state, or close everything on first open.
   if M._fold_closed[dir] then
+    -- create_folds produces closed folds.  Open everything first,
+    -- then re-close only the directories the user had closed before.
+    vim.cmd("silent! %foldopen!")
     local post_entries = parse_buffer(buf)
     for _, e in ipairs(post_entries) do
       if e.type == "dir" and M._fold_closed[dir][e.path] then
@@ -683,11 +686,13 @@ function M.open(dir)
         end
         vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
 
-        -- 8. Rebuild folds from the fresh tree, then re-close the
-        --    directories that were closed before the save.  New
-        --    directories stay open.
+        -- 8. Rebuild folds from the fresh tree.  create_folds produces
+        --    closed folds, so open everything first, then re-close only
+        --    the directories the user had closed before the save.
+        --    New directories stay open.
         vim.cmd("silent! normal! zE")
         create_folds(buf)
+        vim.cmd("silent! %foldopen!")
         do
           local post_entries = parse_buffer(buf)
           for _, e in ipairs(post_entries) do
