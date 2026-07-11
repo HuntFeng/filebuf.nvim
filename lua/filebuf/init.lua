@@ -902,7 +902,6 @@ local dir_ns = vim.api.nvim_create_namespace("filebuf-dir")
 
 local function define_hidden_highlights()
   local groups = {
-    FilebufHiddenHint = { fg = "#5c6370" },
     FilebufHiddenFile = { fg = "#5c6370" },
     FilebufHiddenDir  = { fg = "#5c6370" },
   }
@@ -963,57 +962,13 @@ local function apply_dir_extmarks(buf, entries)
   end
 end
 
---- Apply extmarks for hidden-content hints and hidden-file coloring.
---- Directory entries with has_hidden get a " (...hidden...)" virt_lines
---- hint on a new line right after the directory's last visible descendant,
---- indented one level deeper than the directory.  This ensures the hint is
---- always visible, including for root-level hidden content.
---- Entries tagged is_hidden get dimmed highlighting on their name.
+--- Apply dimmed highlighting to hidden file and directory names.
 ---@param buf     number
 ---@param entries table[]  flat list from read_dir_recursive (with is_hidden,
----                        has_hidden, indent, name, type fields)
+---                        indent, name, type fields)
 local function apply_hidden_extmarks(buf, entries)
   vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
-  if #entries == 0 then return end
 
-  if not M.config.show_hidden then
-    -- Root-level hidden content: check if any top-level entry is hidden
-    -- or has hidden descendants.
-    local root_has_hidden = false
-    for _, entry in ipairs(entries) do
-      if entry.indent == 0 and (entry.has_hidden or entry.is_hidden) then
-        root_has_hidden = true
-        break
-      end
-    end
-    if root_has_hidden then
-      local hint_line = indent_str(0) .. "(...hidden...)"
-      vim.api.nvim_buf_set_extmark(buf, hidden_ns, #entries - 1, 0, {
-        virt_lines = { { { hint_line, "FilebufHiddenHint" } } },
-      })
-    end
-
-    -- Subdirectory hints: for each directory with has_hidden, find its
-    -- last visible descendant and add a virt_lines hint after it.
-    for lnum, entry in ipairs(entries) do
-      if entry.type == "dir" and entry.has_hidden then
-        local last_child = lnum
-        for i = lnum + 1, #entries do
-          if entries[i].indent > entry.indent then
-            last_child = i
-          else
-            break
-          end
-        end
-        local hint_line = indent_str(entry.indent + 1) .. "(...hidden...)"
-        vim.api.nvim_buf_set_extmark(buf, hidden_ns, last_child - 1, 0, {
-          virt_lines = { { { hint_line, "FilebufHiddenHint" } } },
-        })
-      end
-    end
-  end
-
-  -- Hidden-file coloring
   for lnum, entry in ipairs(entries) do
     if entry.is_hidden then
       local name_start = #indent_str(entry.indent)
