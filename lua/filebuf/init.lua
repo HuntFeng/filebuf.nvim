@@ -827,9 +827,10 @@ local function porcelain_to_display(s)
   return nil
 end
 
---- Look up the git status for a single entry.  For directories this
---- propagates child statuses upward: if any descendant has a git
---- status the directory inherits it.
+--- Look up the git status for a single entry.
+--- Only returns a status for entries that appear directly in git-status
+--- output (i.e. files with changes).  Directory names are not colored by
+--- git status — the Directory highlight group always wins.
 ---@param entry table       parsed buffer entry
 ---@param status_map table  map from get_git_status_map
 ---@return string|nil char
@@ -839,20 +840,13 @@ local function get_entry_git_status(entry, status_map)
     return nil
   end
 
-  -- Direct match: the entry's path appears verbatim in git status
+  -- Direct match: the entry's path appears verbatim in git status.
+  -- Directories only appear in rare cases (e.g. untracked dirs); for
+  -- those we still show the status indicator but don't change the name
+  -- color (handled in apply_git_extmarks).
   local s = status_map[entry.path]
   if s then
     return porcelain_to_display(s)
-  end
-
-  -- For directories, propagate status from any descendant
-  if entry.type == "dir" then
-    local prefix = entry.path .. "/"
-    for path, ps in pairs(status_map) do
-      if vim.startswith(path, prefix) then
-        return porcelain_to_display(ps)
-      end
-    end
   end
 
   return nil
@@ -885,11 +879,17 @@ local function apply_git_extmarks(buf, root)
       local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
       local name_end = name_start + #entry.name + suffix
 
-      vim.api.nvim_buf_set_extmark(buf, git_ns, entry.lnum - 1, name_start, {
-        end_col = name_end,
-        hl_group = hl,
+      -- For directories we only add the status indicator as virtual
+      -- text; the name itself keeps its Directory coloring.  For files
+      -- and links the name is colored with the git status highlight.
+      local extmark_opts = {
         virt_text = { { " " .. char, hl } },
-      })
+      }
+      if entry.type ~= "dir" then
+        extmark_opts.end_col = name_end
+        extmark_opts.hl_group = hl
+      end
+      vim.api.nvim_buf_set_extmark(buf, git_ns, entry.lnum - 1, name_start, extmark_opts)
     end
   end
 end
@@ -911,19 +911,53 @@ local function define_hidden_highlights()
   end
 end
 
+--- Create FilebufFoldLine: Directory's foreground on Normal's background.
+--- This is used by winhighlight to override Folded on the filebuf window.
+--- A plain link to Directory doesn't work because winhighlight overlays
+--- attributes — Directory typically sets only fg (bg=NONE), so Folded's
+--- background would leak through.  By resolving Directory's fg and Normal's
+--- bg at setup time we give winhighlight a group that fully replaces both.
+local function define_filebuf_highlights()
+  local dir_fg = nil
+  local normal_bg = nil
+
+  -- nvim_get_hl is available since Neovim 0.9
+  if pcall(vim.api.nvim_get_hl, 0, { name = "Normal" }) then
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = "Directory" })
+    if ok and hl then dir_fg = hl.fg end
+    ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = "Normal" })
+    if ok and hl then normal_bg = hl.bg end
+  end
+
+  if dir_fg or normal_bg then
+    local attrs = { default = true }
+    if dir_fg then attrs.fg = dir_fg end
+    if normal_bg then attrs.bg = normal_bg end
+    vim.api.nvim_set_hl(0, "FilebufFoldLine", attrs)
+  else
+    -- Fallback for older Neovim: plain link (may still leak bg,
+    -- but better than nothing).
+    vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Directory", default = true })
+  end
+end
+
 --- Apply extmarks to color directory entry names.
+--- Works with entries from either read_dir_recursive (sequential, no lnum)
+--- or parse_buffer (may have gaps, has lnum field).
 ---@param buf     number
----@param entries table[]  flat list from read_dir_recursive
+---@param entries table[]  flat list (from read_dir_recursive or parse_buffer)
 local function apply_dir_extmarks(buf, entries)
   vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
 
   for lnum, entry in ipairs(entries) do
     if entry.type == "dir" then
+      local line = entry.lnum or lnum
       local name_start = #indent_str(entry.indent)
       local name_end = name_start + #entry.name + 1 -- include trailing "/"
-      vim.api.nvim_buf_set_extmark(buf, dir_ns, lnum - 1, name_start, {
+      vim.api.nvim_buf_set_extmark(buf, dir_ns, line - 1, name_start, {
         end_col = name_end,
         hl_group = "Directory",
+        priority = 10,
       })
     end
   end
@@ -1187,7 +1221,12 @@ function M.open(dir)
   vim.wo.foldtext = "v:lua.FilebufFoldText()"
   -- Override the Folded highlight group in this window to suppress
   -- the background color (many colorschemes set a prominent bg).
-  vim.wo.winhighlight = "Folded:Directory"
+  -- FilebufFoldLine is created at setup time by reading Directory's
+  -- fg and Normal's bg.  A plain link to Directory doesn't work
+  -- because winhighlight overlays attributes — Directory typically
+  -- sets only fg (bg=NONE), so Folded's background would leak through.
+  -- FilebufFoldLine has both fg and bg set, fully replacing Folded.
+  vim.wo.winhighlight = "Folded:FilebufFoldLine"
   -- Replace default +/- fold-column glyphs with triangles.
   local fc = vim.wo.fillchars or ""
   vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶"
@@ -1269,13 +1308,14 @@ function M.open(dir)
   -- validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
 
-  -- Re-apply git-status extmarks whenever the user edits the buffer
-  -- so that stale indicators don't linger on deleted or moved lines.
+  -- Re-apply extmarks whenever the user edits the buffer so that
+  -- stale indicators don't linger on deleted or moved lines.
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
     group = group,
     buffer = buf,
     callback = function()
       apply_git_extmarks(buf, dir)
+      apply_dir_extmarks(buf, parse_buffer(buf))
     end,
   })
 
@@ -1346,6 +1386,7 @@ function M.setup(opts)
   -- colorscheme before the first buffer is opened.
   define_git_highlights()
   define_hidden_highlights()
+  define_filebuf_highlights()
 
   vim.api.nvim_create_user_command("Filebuf", function()
     M.open()
