@@ -4,10 +4,6 @@ local M = {}
 -- Internal helpers
 ----------------------------------------------------------------------
 
---- Module-level cache: buf → { [lnum] = { name, type, path } }
---- Uses weak keys so entries evaporate when the buffer is wiped.
-local buf_entries = setmetatable({}, { __mode = "k" })
-
 --- Read a directory using native stat calls.  Returns entries sorted
 --- directories-first, then alphabetically (case-insensitive).
 ---@param dir string
@@ -107,160 +103,6 @@ local function format_line(entry)
   return prefix .. entry.name .. suffix
 end
 
-----------------------------------------------------------------------
--- Buffer line ↔ entry metadata
-----------------------------------------------------------------------
-
---- Get the entry map for a buffer (lazily created).
----@param buf number
----@return table  { [lnum] = entry }
-local function get_map(buf)
-  local map = buf_entries[buf]
-  if not map then
-    map = {}
-    buf_entries[buf] = map
-  end
-  return map
-end
-
---- Shift line-indexed entries when lines are inserted or deleted.
----@param buf   number
----@param after_line number  0-indexed line after which the change happened
----@param delta number  positive = inserted N lines, negative = removed N lines
-local function shift_map(buf, after_line, delta)
-  local map = buf_entries[buf]
-  if not map then
-    return
-  end
-
-  if delta > 0 then
-    -- Shift entries at or below after_line+1 down by delta
-    for lnum = max_key(map), after_line + 1, -1 do
-      if map[lnum] then
-        map[lnum + delta] = map[lnum]
-        map[lnum] = nil
-      end
-    end
-  elseif delta < 0 then
-    -- Remove entries in the deleted range and shift remaining up
-    local remove_start = after_line + 1
-    local remove_end = after_line - delta -- delta is negative (e.g. -3)
-    for lnum = remove_start, remove_end do
-      map[lnum] = nil
-    end
-    for lnum = remove_end + 1, max_key(map) do
-      if map[lnum] then
-        map[lnum + delta] = map[lnum]
-        map[lnum] = nil
-      end
-    end
-  end
-end
-
-----------------------------------------------------------------------
--- Programmatic-change tracking — used to suppress user-edit handlers
--- when the plugin itself modifies the buffer.
-----------------------------------------------------------------------
-
---- Per-buffer flags: true while the plugin is mutating buffer lines.
-local programmatic = setmetatable({}, { __mode = "k" })
-
---- Per-buffer flag: true while insert mode is active.
-local in_insert = setmetatable({}, { __mode = "k" })
-
---- Get the maximum key in a table (0 if empty).
-local function max_key(t)
-  local m = 0
-  for k in pairs(t) do
-    if type(k) == "number" and k > m then
-      m = k
-    end
-  end
-  return m
-end
-
---- Shift map entries down by `count` starting at 1-indexed `at_lnum`.
---- Used after user inserts lines.
----@param buf     number
----@param at_lnum number  1-indexed first line that should shift down
----@param count   number  positive line count
-local function shift_map_down(buf, at_lnum, count)
-  local map = buf_entries[buf]
-  if not map then return end
-  for lnum = max_key(map), at_lnum, -1 do
-    if map[lnum] then
-      map[lnum + count] = map[lnum]
-      map[lnum] = nil
-    end
-  end
-end
-
---- Shift map entries up after deleting `count` lines starting at 1-indexed `at_lnum`.
---- Returns the entries that were removed (so callers can delete them from disk).
----@param buf     number
----@param at_lnum number  1-indexed first deleted line
----@param count   number  positive line count
----@return table[]  removed entries
-local function shift_map_up(buf, at_lnum, count)
-  local map = buf_entries[buf]
-  if not map then return {} end
-  -- Collect entries in the deleted range before removing them
-  local removed = {}
-  for lnum = at_lnum, at_lnum + count - 1 do
-    if map[lnum] then
-      table.insert(removed, map[lnum])
-    end
-    map[lnum] = nil
-  end
-  -- Shift remaining entries up
-  local max = max_key(map)
-  for lnum = at_lnum + count, max do
-    if map[lnum] then
-      map[lnum - count] = map[lnum]
-      map[lnum] = nil
-    end
-  end
-  return removed
-end
-
---- Get the entry at a specific line.
----@param buf  number
----@param lnum number  1-indexed
----@return table|nil
-local function get_entry_at(buf, lnum)
-  return get_map(buf)[lnum]
-end
-
---- Walk upward from `lnum` to find the parent directory path.
----@param buf  number
----@param lnum number  1-indexed line
----@return string  parent directory path
-local function get_parent_dir(buf, lnum)
-  local line = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1] or ""
-  local current_indent = #(line:match("^(\t*)") or "")
-
-  for i = lnum - 1, 1, -1 do
-    local above = vim.api.nvim_buf_get_lines(buf, i - 1, i, false)[1] or ""
-    if #above > 0 then
-      local above_indent = #(above:match("^(\t*)") or "")
-      if above_indent < current_indent then
-        local entry = get_entry_at(buf, i)
-        if entry and entry.type == "dir" then
-          return entry.path
-        elseif entry and entry.type == "link" then
-          local real = vim.loop.fs_realpath(entry.path)
-          if real and vim.fn.isdirectory(real) == 1 then
-            return real
-          end
-        end
-        break
-      end
-    end
-  end
-
-  return vim.b[buf].filebuf_root
-end
-
 --- Parse a display line: strip indent, detect trailing-slash dir marker.
 ---@param line string
 ---@return string name      cleaned name (no indent, no trailing slash)
@@ -274,278 +116,288 @@ local function parse_line(line)
   return name, is_dir
 end
 
---- Create a file or directory on disk from a user-added buffer line.
---- When `apply` is false (or nil), only the in-memory map is updated;
---- the actual filesystem operation is deferred until `apply` is true.
----@param buf   number
----@param lnum  number  1-indexed
----@param line  string  the full display line
----@param apply boolean|nil  whether to execute the filesystem operation
-local function create_entry_from_line(buf, lnum, line, apply)
-  local name, is_dir = parse_line(line)
-  if name == "" then return end
+----------------------------------------------------------------------
+-- Buffer parser — derives structured entries from the raw buffer text
+----------------------------------------------------------------------
 
-  local parent = get_parent_dir(buf, lnum)
-  local path = parent .. "/" .. name
-
-  -- Always update the in-memory map so the buffer remains functional
-  -- (navigation, folds, parent resolution, etc.).
-  get_map(buf)[lnum] = { name = name, type = (is_dir and "dir" or "file"), path = path }
-
-  if not apply then return end
-
-  if is_dir then
-    local ok, err = pcall(vim.loop.fs_mkdir, path, 493) -- 0755
-    if not ok then
-      vim.notify("filebuf: cannot create dir – " .. (err or path), vim.log.levels.ERROR)
-    end
-  else
-    local fd, err = vim.loop.fs_open(path, "w", 420) -- 0644
-    if not fd then
-      vim.notify("filebuf: cannot create file – " .. (err or path), vim.log.levels.ERROR)
-      return
-    end
-    vim.loop.fs_close(fd)
-  end
-end
-
---- Delete the on-disk file or directory backing `entry`.
---- Directories are removed recursively.
---- When `apply` is false (or nil), the filesystem is left untouched.
----@param entry table  { name, type, path }
----@param apply boolean|nil
-local function delete_entry(entry, apply)
-  if not apply then return end
-
-  if entry.type == "dir" then
-    -- vim.fn.delete with "rf" handles recursive directory removal.
-    -- pcall returns true + result on success; vim.fn.delete returns 0 on success.
-    local ok, result = pcall(vim.fn.delete, entry.path, "rf")
-    if not ok or result ~= 0 then
-      vim.notify("filebuf: cannot delete dir – " .. (result or entry.path), vim.log.levels.ERROR)
-    end
-  else
-    local ok, err = pcall(vim.loop.fs_unlink, entry.path)
-    if not ok then
-      vim.notify("filebuf: cannot delete – " .. (err or entry.path), vim.log.levels.ERROR)
-    end
-  end
-end
-
---- Rename the on-disk file/dir backing `entry` to `new_name`.
---- The in-memory entry is always updated; the filesystem operation is
---- skipped when `apply` is false (or nil).
----@param entry    table   { name, type, path }
----@param new_name string  cleaned name (no trailing slash)
----@param is_dir   boolean
----@param apply    boolean|nil
-local function rename_entry(entry, new_name, is_dir, apply)
-  local old_path = entry.path
-  local parent = vim.fn.fnamemodify(old_path, ":h")
-  local new_path = parent .. "/" .. new_name
-
-  -- Always update in-memory fields so the buffer stays consistent.
-  entry.name = new_name
-  entry.path = new_path
-  if is_dir then
-    entry.type = "dir"
-  else
-    entry.type = "file"
-  end
-
-  if not apply then return true end
-
-  local ok, err = pcall(vim.loop.fs_rename, old_path, new_path)
-  if not ok then
-    vim.notify("filebuf: cannot rename – " .. (err or old_path), vim.log.levels.ERROR)
-    return false
-  end
-  return true
-end
-
---- Process line-range changes from nvim_buf_attach on_lines.
---- (Does NOT rely on a `lines` parameter from the callback — fetches
----  buffer content manually for portability across Neovim versions.)
----
---- We shift the line→entry map so positions stay roughly correct
---- between edits (needed by `get_parent_dir` during reconciliation),
---- but we do NOT create, rename, or delete entries here.  That work is
---- done by `full_reconcile` (triggered by TextChanged / InsertLeave).
----@param buf       number
----@param firstline number  0-indexed
----@param lastline  number  0-indexed, exclusive
----@param linedata  number  line-count delta
----@param preview   boolean  true during inccommand preview
-local function on_lines_handler(buf, firstline, lastline, linedata, preview)
-  if preview or programmatic[buf] then return end
-
-  if linedata > 0 then
-    shift_map_down(buf, firstline + 1, linedata)
-  elseif linedata < 0 then
-    shift_map_up(buf, firstline + 1, -linedata)
-  end
-  -- For linedata == 0 (in-place edit), we intentionally do nothing:
-  -- let full_reconcile detect the rename via TextChanged.
-end
-
---- Apply the buffer contents to the filesystem — create, rename, and
---- delete entries so the disk matches what the user sees in the buffer.
---- Called by the BufWriteCmd handler when the user types :w.
----
---- Unlike `full_reconcile` (which diffs the buffer against the in-memory
---- map), this function reads the *actual filesystem* via `read_dir_recursive`
---- so it correctly detects changes even after the map has been rebuilt.
+--- Parse the entire buffer in one pass, computing the full filesystem
+--- path for every entry via an indent stack.  No persistent state needed.
 ---@param buf number
-local function apply_to_filesystem(buf)
+---@return table[]  list of { name, type, path, indent, lnum }
+local function parse_buffer(buf)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local root = vim.b[buf].filebuf_root
+  local entries = {}
 
-  -- Snapshot what actually exists on disk right now.
-  local disk_entries = read_dir_recursive(root)
-  local by_path = {}
-  for _, e in ipairs(disk_entries) do
-    by_path[e.path] = e
-  end
+  -- Stack of { indent, path } — the ancestry chain.  A directory pushes
+  -- onto the stack; when indent decreases we pop until the top is a true
+  -- ancestor (indent < current).
+  local stack = {} -- { indent = number, path = string }
 
-  local total = vim.api.nvim_buf_line_count(buf)
-  for lnum = 1, total do
-    local line = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1] or ""
+  for lnum = 1, #lines do
+    local line = lines[lnum]
+    if line == "" then goto continue end
+
     local name, is_dir = parse_line(line)
-    if name == "" then goto continue_apply end
+    if name == "" then goto continue end
 
-    local parent = get_parent_dir(buf, lnum)
+    local indent = #(line:match("^(\t*)") or "")
+
+    -- Pop entries that are at or deeper than the current indent — they
+    -- are siblings or descendants of siblings, not ancestors.
+    while #stack > 0 and stack[#stack].indent >= indent do
+      table.remove(stack)
+    end
+
+    -- Parent is the top of the stack, or the filesystem root for
+    -- top-level entries.
+    local parent = #stack > 0 and stack[#stack].path or root
     local path = parent .. "/" .. name
 
-    if by_path[path] then
-      -- Already exists on disk — nothing to do.
-      by_path[path] = nil -- consumed
-    else
-      -- Not on disk at this path.  Check whether an on-disk entry in
-      -- the same parent directory was renamed.
-      local matched = false
-      for old_path, old_entry in pairs(by_path) do
-        if vim.fn.fnamemodify(old_path, ":h") == parent then
-          local ok, err = pcall(vim.loop.fs_rename, old_path, path)
-          if not ok then
-            vim.notify("filebuf: cannot rename – " .. (err or old_path), vim.log.levels.ERROR)
-          end
-          by_path[old_path] = nil
-          matched = true
-          break
-        end
-      end
-      if not matched then
-        -- Truly new entry — create on disk.
-        if is_dir then
-          local ok, err = pcall(vim.loop.fs_mkdir, path, 493) -- 0755
-          if not ok then
-            vim.notify("filebuf: cannot create dir – " .. (err or path), vim.log.levels.ERROR)
-          end
-        else
-          local fd, err = vim.loop.fs_open(path, "w", 420) -- 0644
-          if not fd then
-            vim.notify("filebuf: cannot create file – " .. (err or path), vim.log.levels.ERROR)
-          else
-            vim.loop.fs_close(fd)
-          end
-        end
-      end
+    if is_dir then
+      table.insert(stack, { indent = indent, path = path })
     end
-    ::continue_apply::
+
+    table.insert(entries, {
+      name = name,
+      type = is_dir and "dir" or "file",
+      path = path,
+      indent = indent,
+      lnum = lnum,
+    })
+
+    ::continue::
   end
 
-  -- Any disk entries still in `by_path` were deleted from the buffer.
-  -- Delete deepest paths first so children are removed before parents.
+  return entries
+end
+
+----------------------------------------------------------------------
+-- Diff engine — compares buffer entries against on-disk state
+----------------------------------------------------------------------
+
+--- Compare the buffer's desired state with the actual filesystem and
+--- produce a set of operations that would bring the disk in line with
+--- the buffer.
+---
+--- Rename detection is name-based: an unmatched buffer entry is paired
+--- with an unmatched disk entry that shares the same name, preferring a
+--- match in the same parent directory.
+---
+---@param buf_entries  table[]  parsed buffer entries (from parse_buffer)
+---@param disk_entries  table[]  entries from read_dir_recursive
+---@return table  { unchanged, renamed, created, deleted, errors }
+local function compute_diff(buf_entries, disk_entries)
+  -- Index disk entries by path for O(1) lookup
+  local disk_by_path = {}
+  for _, de in ipairs(disk_entries) do
+    disk_by_path[de.path] = de
+  end
+
+  local unchanged = {}
+  local renamed = {}   -- { old = disk_entry, new = buf_entry }
+  local created = {}
+  local deleted = {}
+  local errors = {}
+
+  local consumed = {}  -- set of disk paths already matched
+
+  -- Helper: "dir" is the only directory type; "file" and "link" are both
+  -- non-directory and should not flag a type mismatch against each other.
+  local function is_dir_type(t)
+    return t == "dir"
+  end
+
+  ------------------------------------------------------------------
+  -- Phase 1: exact-path match -------------------------------------
+  ------------------------------------------------------------------
+  local buf_unmatched = {}
+  for _, be in ipairs(buf_entries) do
+    local de = disk_by_path[be.path]
+    if de then
+      if is_dir_type(de.type) ~= is_dir_type(be.type) then
+        -- Type mismatch on an otherwise-unchanged entry.
+        -- e.g. user accidentally deleted the trailing "/" from a dir,
+        -- or added "/" to a file.
+        local detail = be.type == "dir"
+            and " (extra trailing '/')"
+            or " (missing trailing '/')"
+        table.insert(errors, {
+          lnum = be.lnum,
+          message = string.format(
+            "'%s' is a %s on disk but shown as %s in buffer%s",
+            be.name, de.type, be.type, detail
+          ),
+        })
+      end
+      table.insert(unchanged, be)
+      consumed[de.path] = true
+    else
+      table.insert(buf_unmatched, be)
+    end
+  end
+
+  ------------------------------------------------------------------
+  -- Phase 2: name-based rename matching ---------------------------
+  ------------------------------------------------------------------
+
+  -- Collect unmatched disk entries
+  local disk_unmatched = {}
+  for _, de in ipairs(disk_entries) do
+    if not consumed[de.path] then
+      table.insert(disk_unmatched, de)
+    end
+  end
+
+  -- Index unmatched disk entries by name
+  local disk_by_name = {}
+  for _, de in ipairs(disk_unmatched) do
+    if not disk_by_name[de.name] then
+      disk_by_name[de.name] = {}
+    end
+    table.insert(disk_by_name[de.name], de)
+  end
+
+  local renamed_disk_paths = {} -- set of disk paths consumed by renames
+  for _, be in ipairs(buf_unmatched) do
+    local candidates = disk_by_name[be.name]
+    if candidates then
+      -- Prefer same-parent matches to avoid false positives when
+      -- multiple directories contain files with the same name.
+      local best = nil
+      local be_parent = vim.fn.fnamemodify(be.path, ":h")
+      for _, de in ipairs(candidates) do
+        if not renamed_disk_paths[de.path] then
+          local de_parent = vim.fn.fnamemodify(de.path, ":h")
+          if de_parent == be_parent then
+            best = de
+            break
+          end
+        end
+      end
+      -- Fallback: any unmatched disk entry with the same name
+      if not best then
+        for _, de in ipairs(candidates) do
+          if not renamed_disk_paths[de.path] then
+            best = de
+            break
+          end
+        end
+      end
+
+      if best then
+        if is_dir_type(best.type) ~= is_dir_type(be.type) then
+          table.insert(errors, {
+            lnum = be.lnum,
+            message = string.format(
+              "'%s' rename changes type: %s on disk -> %s in buffer",
+              be.name, best.type, be.type
+            ),
+          })
+        end
+        table.insert(renamed, { old = best, new = be })
+        renamed_disk_paths[best.path] = true
+      else
+        table.insert(created, be)
+      end
+    else
+      table.insert(created, be)
+    end
+  end
+
+  ------------------------------------------------------------------
+  -- Phase 3: remaining disk entries are deletes -------------------
+  ------------------------------------------------------------------
+  for _, de in ipairs(disk_unmatched) do
+    if not renamed_disk_paths[de.path] then
+      table.insert(deleted, de)
+    end
+  end
+
+  return {
+    unchanged = unchanged,
+    renamed = renamed,
+    created = created,
+    deleted = deleted,
+    errors = errors,
+  }
+end
+
+----------------------------------------------------------------------
+-- Operation applicator — executes the diff results on the filesystem
+----------------------------------------------------------------------
+
+--- Report validation errors via vim.diagnostic (inline markers) and a
+--- single vim.notify summary.
+---@param buf    number
+---@param errors table[]  { lnum, message }
+local function report_errors(buf, errors)
+  vim.diagnostic.reset(nil, buf)
+  if #errors == 0 then return end
+
+  local diags = {}
+  for _, err in ipairs(errors) do
+    table.insert(diags, {
+      lnum = (err.lnum or 1) - 1, -- 0-indexed
+      col = 0,
+      severity = vim.diagnostic.severity.ERROR,
+      message = err.message,
+      source = "filebuf",
+    })
+  end
+  vim.diagnostic.set(nil, buf, diags)
+  vim.notify(
+    string.format("filebuf: %d error(s) — fix and save again", #errors),
+    vim.log.levels.ERROR
+  )
+end
+
+--- Apply the computed operations to the filesystem.
+---
+--- Execution order:
+---   1. Deletes — deepest path first (children before parents).
+---   2. Renames — individual file / empty-dir renames.
+---   3. Creates — buffer order is depth-first, so parents exist before
+---      children.
+---@param ops table  result of compute_diff()
+local function apply_ops(ops)
+  -- 1. Deletes (deepest first)
   local to_delete = {}
-  for path, entry in pairs(by_path) do
-    table.insert(to_delete, { path = path, type = entry.type })
+  for _, de in ipairs(ops.deleted) do
+    table.insert(to_delete, de)
   end
   table.sort(to_delete, function(a, b) return #a.path > #b.path end)
-  for _, item in ipairs(to_delete) do
-    if item.type == "dir" then
-      pcall(vim.fn.delete, item.path, "rf")
+  for _, de in ipairs(to_delete) do
+    if de.type == "dir" then
+      pcall(vim.fn.delete, de.path, "rf")
     else
-      pcall(vim.loop.fs_unlink, item.path)
+      pcall(vim.loop.fs_unlink, de.path)
     end
   end
-end
 
---- Full reconciliation pass — walks every buffer line, rebuilds the
---- line→entry map, and optionally applies filesystem changes.
---- When `apply` is false (or nil) only the in-memory map is updated.
----@param buf   number
----@param apply boolean|nil
-local function full_reconcile(buf, apply)
-  if programmatic[buf] then return end
-
-  local map = get_map(buf)
-  local total = vim.api.nvim_buf_line_count(buf)
-
-  -- Build a set of existing map entries indexed by path so we can
-  -- re-home them when line numbers shift.
-  local by_path = {}
-  for _, entry in pairs(map) do
-    by_path[entry.path] = entry
+  -- 2. Renames
+  for _, r in ipairs(ops.renamed) do
+    local ok, err = pcall(vim.loop.fs_rename, r.old.path, r.new.path)
+    if not ok then
+      vim.notify("filebuf: cannot rename – " .. (err or r.old.path), vim.log.levels.ERROR)
+    end
   end
 
-  -- Clear the old line→entry map; we rebuild it from scratch.
-  for lnum in pairs(map) do
-    map[lnum] = nil
-  end
-
-  for lnum = 1, total do
-    local line = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1] or ""
-    local name, is_dir = parse_line(line)
-    if name == "" then goto continue_reconcile end
-
-    local parent = get_parent_dir(buf, lnum)
-    local path = parent .. "/" .. name
-
-    -- Try to re-home an existing entry whose path matches.
-    local entry = by_path[path]
-    if entry then
-      -- Existing entry placed at a (possibly new) line — update type in
-      -- case a trailing slash was added or removed.
-      entry.type = is_dir and "dir" or "file"
-      map[lnum] = entry
-      by_path[path] = nil -- consumed
-    else
-      -- No existing entry at this path — could be a rename or a creation.
-      -- Try to find an old entry whose name changed: look through remaining
-      -- by_path entries for one in the same parent directory.
-      local matched = false
-      for old_path, old_entry in pairs(by_path) do
-        if vim.fn.fnamemodify(old_path, ":h") == parent then
-          -- Rename: old entry at this parent, new name
-          rename_entry(old_entry, name, is_dir, apply)
-          map[lnum] = old_entry
-          by_path[old_path] = nil
-          matched = true
-          break
-        end
+  -- 3. Creates (buffer order — parents before children)
+  for _, be in ipairs(ops.created) do
+    if be.type == "dir" then
+      local ok, err = pcall(vim.loop.fs_mkdir, be.path, 493) -- 0755
+      if not ok then
+        vim.notify("filebuf: cannot create dir – " .. (err or be.path), vim.log.levels.ERROR)
       end
-      if not matched then
-        -- Truly new entry — create (or queue creation).
-        create_entry_from_line(buf, lnum, line, apply)
+    else
+      local fd, err = vim.loop.fs_open(be.path, "w", 420) -- 0644
+      if not fd then
+        vim.notify("filebuf: cannot create file – " .. (err or be.path), vim.log.levels.ERROR)
+      else
+        vim.loop.fs_close(fd)
       end
     end
-    ::continue_reconcile::
-  end
-
-  -- Remaining entries in by_path were deleted from the buffer.
-  -- Delete them from disk (or queue deletion).
-  for _, entry in pairs(by_path) do
-    delete_entry(entry, apply)
-  end
-end
-
---- Store entries into the buffer map at the given line numbers.
----@param buf      number
----@param entries  table[]
----@param first    number  1-indexed line of the first entry
-local function store_entries(buf, entries, first)
-  local map = get_map(buf)
-  for i, entry in ipairs(entries) do
-    map[first + i - 1] = entry
   end
 end
 
@@ -561,21 +413,11 @@ end
 ---@param after_line number  0-indexed line to insert after (0 = top)
 ---@return number
 local function insert_entries(buf, entries, after_line)
-  -- Build display lines
   local lines = {}
   for _, entry in ipairs(entries) do
     table.insert(lines, format_line(entry))
   end
-
-  programmatic[buf] = true
-  -- Insert into buffer (after_line is 0-indexed in the API)
   vim.api.nvim_buf_set_lines(buf, after_line, after_line, false, lines)
-  programmatic[buf] = false
-
-  -- Update metadata
-  shift_map(buf, after_line, #lines)
-  store_entries(buf, entries, after_line + 1)
-
   return #lines
 end
 
@@ -584,20 +426,14 @@ end
 --- own inner folds.
 ---@param buf number
 local function create_folds(buf)
-  local map = get_map(buf)
-  local total = vim.api.nvim_buf_line_count(buf)
-  if total == 0 then
-    return
-  end
+  local entries = parse_buffer(buf)
+  if #entries == 0 then return end
 
   -- Gather every directory line with its indent level.
   local dirs = {} -- { lnum, indent }
-  for lnum = 1, total do
-    local entry = map[lnum]
-    if entry and entry.type == "dir" then
-      local line = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1] or ""
-      local indent = #(line:match("^(\t*)") or "")
-      table.insert(dirs, { lnum = lnum, indent = indent })
+  for _, e in ipairs(entries) do
+    if e.type == "dir" then
+      table.insert(dirs, { lnum = e.lnum, indent = e.indent })
     end
   end
 
@@ -612,12 +448,12 @@ local function create_folds(buf)
   -- from the directory line itself through the last descendant.
   for _, d in ipairs(dirs) do
     local end_lnum = d.lnum
-    for lnum = d.lnum + 1, total do
-      local line = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1] or ""
-      if #line == 0 then break end
-      local li = #(line:match("^(\t*)") or "")
-      if li <= d.indent then break end
-      end_lnum = lnum
+    for _, e in ipairs(entries) do
+      if e.lnum > d.lnum and e.indent > d.indent then
+        end_lnum = e.lnum
+      elseif e.lnum > d.lnum and e.indent <= d.indent then
+        break
+      end
     end
     if end_lnum > d.lnum then
       vim.cmd(string.format("%d,%dfold", d.lnum, end_lnum))
@@ -642,10 +478,17 @@ end
 --- Handle <CR> in the filebuf buffer.
 local function handle_enter(buf)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
-  local entry = get_entry_at(buf, lnum)
-  if not entry then
-    return
+
+  -- Parse the buffer on demand to resolve the entry at the cursor.
+  local entries = parse_buffer(buf)
+  local entry = nil
+  for _, e in ipairs(entries) do
+    if e.lnum == lnum then
+      entry = e
+      break
+    end
   end
+  if not entry then return end
 
   if entry.type == "dir" then
     -- Toggle the indent-based fold at this line.
@@ -656,20 +499,15 @@ local function handle_enter(buf)
     else
       vim.cmd("normal! zc")
     end
-  elseif entry.type == "file" or entry.type == "link" then
-    -- For symlinks, follow them; if the target is a file, open it
-    if entry.type == "link" then
-      local real = vim.loop.fs_realpath(entry.path)
-      if real then
-        if vim.fn.filereadable(real) == 1 then
-          vim.cmd("edit " .. vim.fn.fnameescape(real))
-          return
-        end
-      end
+  else
+    -- File or symlink — resolve the real path and open.
+    local target = entry.path
+    local real = vim.loop.fs_realpath(entry.path)
+    if real and real ~= entry.path then
+      target = real
     end
-
-    if vim.fn.filereadable(entry.path) == 1 then
-      vim.cmd("edit " .. vim.fn.fnameescape(entry.path))
+    if vim.fn.filereadable(target) == 1 then
+      vim.cmd("edit " .. vim.fn.fnameescape(target))
     else
       vim.notify("Cannot read: " .. entry.path, vim.log.levels.WARN)
     end
@@ -686,6 +524,10 @@ end
 --- directory) to toggle folds.
 ---
 --- Press <CR> on a file to edit it.
+---
+--- Changes to the buffer are only applied to the filesystem when you
+--- save with `:w`.  Type mismatches (e.g. deleting the trailing "/" from
+--- a directory) are flagged as errors and block the save.
 ---
 ---@param dir string|nil  root directory (default: cwd)
 function M.open(dir)
@@ -727,57 +569,44 @@ function M.open(dir)
   -- Close all folds so the user starts with a clean overview.
   vim.cmd("silent! %foldclose!")
 
-  -- Attach buffer change listener for structural line changes
-  -- (insertions / deletions).  This keeps the line→entry map in sync.
-  vim.api.nvim_buf_attach(buf, false, {
-    on_lines = function(_, _, firstline, lastline, linedata, preview)
-      on_lines_handler(buf, firstline, lastline, linedata, preview)
-    end,
-  })
-
+  -- BufWriteCmd is the *only* autocmd.  It parses the buffer, diffs
+  -- against the filesystem, validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
-
-  vim.api.nvim_create_autocmd("InsertEnter", {
-    group = group,
-    buffer = buf,
-    callback = function()
-      in_insert[buf] = true
-    end,
-  })
-
-  -- On InsertLeave, reconcile the in-memory line→entry map so the buffer
-  -- stays functional (navigation, folds, etc.).  Filesystem operations are
-  -- deferred until the user saves with :w.
-  vim.api.nvim_create_autocmd("InsertLeave", {
-    group = group,
-    buffer = buf,
-    callback = function()
-      in_insert[buf] = false
-      full_reconcile(buf, false) -- map-only, no filesystem ops
-    end,
-  })
-
-  -- TextChanged catches normal-mode edits that might not trigger on_lines
-  -- on every Neovim version (e.g. r, ~, x, J).
-  vim.api.nvim_create_autocmd("TextChanged", {
-    group = group,
-    buffer = buf,
-    callback = function()
-      if not in_insert[buf] then
-        full_reconcile(buf, false) -- map-only, no filesystem ops
-      end
-    end,
-  })
-
-  -- BufWriteCmd intercepts :w and applies the buffer contents to the
-  -- filesystem.  We diff against the actual on-disk state (not the
-  -- in-memory map) so that creates, renames, and deletes are all detected.
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
     buffer = buf,
     callback = function()
-      apply_to_filesystem(buf)
-      vim.bo[buf].modified = false
+      local ok, result = pcall(function()
+        -- 1. Parse the buffer
+        local buf_entries = parse_buffer(buf)
+
+        -- 2. Read current filesystem state
+        local disk_entries = read_dir_recursive(dir)
+
+        -- 3. Diff
+        local ops = compute_diff(buf_entries, disk_entries)
+
+        -- 4. Validate — abort on errors
+        if #ops.errors > 0 then
+          report_errors(buf, ops.errors)
+          error("filebuf: validation failed")
+        end
+
+        -- Clear any stale diagnostics from a previous failed save
+        vim.diagnostic.reset(nil, buf)
+
+        -- 5. Apply
+        apply_ops(ops)
+
+        vim.bo[buf].modified = false
+        vim.notify("filebuf: saved", vim.log.levels.INFO)
+      end)
+
+      -- If pcall caught an unexpected error (not a validation failure),
+      -- surface it to the user.
+      if not ok and not tostring(result):match("validation failed") then
+        vim.notify("filebuf: save error – " .. tostring(result), vim.log.levels.ERROR)
+      end
     end,
   })
 
