@@ -27,6 +27,62 @@ M.config = {
 M._fold_closed = {}
 
 ----------------------------------------------------------------------
+-- Profiler — lightweight cumulative timer (enable with M.profile(true))
+----------------------------------------------------------------------
+local prof = { enabled = false, _timers = {}, _stack = {} }
+local function _p_start(name)
+  if not prof.enabled then return end
+  prof._stack[#prof._stack + 1] = { name = name, t = vim.loop.hrtime() }
+end
+local function _p_end()
+  if not prof.enabled then return end
+  local s = prof._stack[#prof._stack]
+  if not s then return end
+  prof._stack[#prof._stack] = nil
+  local elapsed = (vim.loop.hrtime() - s.t) / 1e6 -- ms
+  local t = prof._timers[s.name]
+  if not t then
+    t = { total = 0, count = 0, min = math.huge, max = 0 }
+    prof._timers[s.name] = t
+  end
+  t.total = t.total + elapsed
+  t.count = t.count + 1
+  if elapsed < t.min then t.min = elapsed end
+  if elapsed > t.max then t.max = elapsed end
+end
+function M.profile(enable)
+  prof.enabled = enable
+  prof._timers = {}
+  prof._stack = {}
+  vim.notify("filebuf: profiling " .. (enable and "ON" or "OFF"), vim.log.levels.INFO)
+end
+function M.profile_report()
+  local lines = { "=== filebuf profile ===" }
+  -- Sort by total time descending
+  local sorted = {}
+  for name, t in pairs(prof._timers) do
+    sorted[#sorted + 1] = { name = name, total = t.total, count = t.count, min = t.min, max = t.max, avg = t.total / t.count }
+  end
+  table.sort(sorted, function(a, b) return a.total > b.total end)
+  local grand_total = 0
+  for _, s in ipairs(sorted) do grand_total = grand_total + s.total end
+  for _, s in ipairs(sorted) do
+    local pct = grand_total > 0 and string.format("(%.0f%%)", s.total / grand_total * 100) or ""
+    lines[#lines + 1] = string.format(
+      "  %-35s %8.2f ms  x%-4d  %s  (min %.2f, max %.2f, avg %.2f)",
+      s.name, s.total, s.count, pct, s.min, s.max, s.avg
+    )
+  end
+  lines[#lines + 1] = string.format("  %-35s %8.2f ms", "TOTAL", grand_total)
+  -- Print to :messages so the user can review with :messages
+  for _, line in ipairs(lines) do
+    vim.api.nvim_echo({{ line .. "\n", "Normal" }}, true, {})
+  end
+  vim.notify("filebuf: profile report printed to :messages", vim.log.levels.INFO)
+  return lines
+end
+
+----------------------------------------------------------------------
 -- Internal helpers
 ----------------------------------------------------------------------
 
@@ -144,6 +200,7 @@ end
 ---@param ignore_patterns? table[]  { raw, source_dir } patterns from ignore files
 ---@return table[]  list of { name, type, path }
 local function read_dir(dir, ignore_patterns)
+  _p_start("read_dir")
   local files = vim.fn.readdir(dir)
   if vim.v.shell_error ~= 0 then
     return {
@@ -205,6 +262,7 @@ local function read_dir(dir, ignore_patterns)
     return a.name:lower() < b.name:lower()
   end)
 
+  _p_end()
   return entries
 end
 
@@ -254,6 +312,7 @@ end
 ---@param ancestor_patterns? table[]  { raw, source_dir } patterns from parents
 ---@return table[]  list of { name, type, path, indent }
 local function read_dir_recursive(dir, max_depth, current_depth, visited, ancestor_patterns)
+  _p_start("read_dir_recursive")
   current_depth = current_depth or 0
   max_depth = max_depth or 20 -- safety limit for deep / cyclic hierarchies
   visited = visited or {}
@@ -261,6 +320,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   -- Cycle detection via real path
   local real = vim.loop.fs_realpath(dir) or dir
   if visited[real] or current_depth > max_depth then
+    _p_end()
     return {}
   end
   visited[real] = true
@@ -304,6 +364,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
       end
     end
   end
+  _p_end()
   return result
 end
 
@@ -345,6 +406,7 @@ end
 ---@param buf number
 ---@return table[]  list of { name, type, path, indent, lnum }
 local function parse_buffer(buf)
+  _p_start("parse_buffer")
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
   local root = vim.b[buf].filebuf_root
   local entries = {}
@@ -405,6 +467,7 @@ local function parse_buffer(buf)
     ::continue::
   end
 
+  _p_end()
   return entries
 end
 
@@ -424,6 +487,7 @@ end
 ---@param disk_entries  table[]  entries from read_dir_recursive
 ---@return table  { unchanged, renamed, created, deleted, errors }
 local function compute_diff(buf_entries, disk_entries)
+  _p_start("compute_diff")
   -- Index disk entries by path for O(1) lookup
   local disk_by_path = {}
   for _, de in ipairs(disk_entries) do
@@ -544,6 +608,7 @@ local function compute_diff(buf_entries, disk_entries)
     end
   end
 
+  _p_end()
   return {
     unchanged = unchanged,
     renamed = renamed,
@@ -701,8 +766,9 @@ end
 --- own inner folds.
 ---@param buf number
 local function create_folds(buf)
+  _p_start("create_folds")
   local entries = parse_buffer(buf)
-  if #entries == 0 then return end
+  if #entries == 0 then _p_end() return end
 
   -- Gather every directory line with its indent level.
   local dirs = {} -- { lnum, indent }
@@ -734,6 +800,7 @@ local function create_folds(buf)
       vim.cmd(string.format("%d,%dfold", d.lnum, end_lnum))
     end
   end
+  _p_end()
 end
 
 --- Custom fold-text callback (called via v:lua.FilebufFoldText).
@@ -798,12 +865,14 @@ end
 ---@param root string
 ---@return table|nil
 local function get_git_status_map(root)
+  _p_start("get_git_status_map")
   local cmd = string.format(
     "git -C %s status --porcelain --ignored=matching --untracked-files=all",
     vim.fn.shellescape(root)
   )
   local output = vim.fn.system(cmd)
   if vim.v.shell_error ~= 0 then
+    _p_end()
     return nil
   end
 
@@ -831,6 +900,7 @@ local function get_git_status_map(root)
     status_map[path] = { index = x, worktree = y }
   end
 
+  _p_end()
   return status_map
 end
 
@@ -894,15 +964,16 @@ end
 ---@param buf  number
 ---@param root string  root directory (used to run git status)
 local function apply_git_extmarks(buf, root)
+  _p_start("apply_git_extmarks")
   vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
 
   if not M.config.git_status then
-    return
+    _p_end() return
   end
 
   local status_map = get_git_status_map(root)
   if not status_map then
-    return
+    _p_end() return
   end
 
   local entries = parse_buffer(buf)
@@ -928,6 +999,7 @@ local function apply_git_extmarks(buf, root)
       vim.api.nvim_buf_set_extmark(buf, git_ns, entry.lnum - 1, name_start, extmark_opts)
     end
   end
+  _p_end()
 end
 
 --- Namespace and highlight groups for hidden-file extmarks.
@@ -985,6 +1057,7 @@ end
 ---@param buf     number
 ---@param entries table[]  flat list (from read_dir_recursive or parse_buffer)
 local function apply_dir_extmarks(buf, entries)
+  _p_start("apply_dir_extmarks")
   vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
 
   for lnum, entry in ipairs(entries) do
@@ -999,6 +1072,7 @@ local function apply_dir_extmarks(buf, entries)
       })
     end
   end
+  _p_end()
 end
 
 --- Apply dimmed highlighting to hidden file and directory names.
@@ -1006,6 +1080,7 @@ end
 ---@param entries table[]  flat list from read_dir_recursive (with is_hidden,
 ---                        indent, name, type fields)
 local function apply_hidden_extmarks(buf, entries)
+  _p_start("apply_hidden_extmarks")
   vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
 
   for lnum, entry in ipairs(entries) do
@@ -1020,6 +1095,7 @@ local function apply_hidden_extmarks(buf, entries)
       })
     end
   end
+  _p_end()
 end
 
 ----------------------------------------------------------------------
@@ -1126,6 +1202,8 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   apply_dir_extmarks(buf, entries)
 
   vim.bo[buf].modified = false
+
+  if prof.enabled then M.profile_report() end
 end
 
 --- Re-read the directory tree from disk and refresh the buffer contents.
@@ -1156,6 +1234,8 @@ local function refresh_buffer(buf)
 
   -- 3. Filter for display and rebuild the buffer.
   rebuild_buffer_display(buf, filter_visible(all_entries), open_dirs)
+
+  if prof.enabled then M.profile_report() end
 end
 
 --- Toggle show_hidden and refresh the filebuf buffer.
@@ -1420,6 +1500,8 @@ function M.open(dir)
   })
 
   vim.bo[buf].modified = false
+
+  if prof.enabled then M.profile_report() end
 end
 
 --- Setup entry point for lazy.nvim.  Accepts an optional configuration
