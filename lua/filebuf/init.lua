@@ -279,11 +279,12 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   end
 
   -- Use find(1) to get all entries under dir in one subprocess call.
-  -- %y = type char (d/f/l), %p = full path.
+  -- %y = type char (d/f/l), %h = parent dir, %f = basename.
+  -- Let find compute dirname/basename in C to avoid Lua regex per entry.
   -- Redirect stderr so permission errors don't leak into the output.
   _p_start("read_dir")
   local cmd = string.format(
-    "find %s -mindepth 1 -maxdepth %d -printf '%%y\t%%p\n' 2>/dev/null",
+    "find %s -mindepth 1 -maxdepth %d -printf '%%y\t%%h\t%%f\n' 2>/dev/null",
     vim.fn.shellescape(dir),
     find_depth
   )
@@ -292,37 +293,29 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
 
   _p_start("parse_find_output")
   -- Parse the flat listing into a parent→children map.
-  -- Use pure-Lua dirname/basename to avoid the Lua→VimL→C boundary
-  -- crossing that vim.fn.fnamemodify imposes on every single entry.
+  -- find already split dirname/basename for us, so no Lua-level
+  -- path decomposition is needed per entry.
   local by_parent = {} -- parent_path → { entry, ... }
+  local TYPE_MAP = { d = "dir", l = "link", f = "file" }
   for line in output:gmatch("[^\r\n]+") do
-    local type_char, path = line:match("^(.)\t(.+)$")
-    if type_char and path then
-      local type_label
-      if type_char == "d" then
-        type_label = "dir"
-      elseif type_char == "l" then
-        type_label = "link"
-      else
-        type_label = "file"
+    local type_char, parent, name = line:match("^(.)\t(.+)\t(.+)$")
+    if type_char and parent and name then
+      local type_label = TYPE_MAP[type_char]
+      if type_label then
+        local path = parent .. "/" .. name
+        local entry = {
+          name = name,
+          type = type_label,
+          path = path,
+        }
+
+        local lst = by_parent[parent]
+        if not lst then
+          lst = {}
+          by_parent[parent] = lst
+        end
+        lst[#lst + 1] = entry
       end
-
-      -- Pure-Lua dirname: everything before the last "/"
-      local last_slash = path:find("/[^/]*$")
-      local parent = last_slash and path:sub(1, last_slash - 1) or "."
-      local name = last_slash and path:sub(last_slash + 1) or path
-
-      local entry = {
-        name = name,
-        type = type_label,
-        path = path,
-      }
-
-      if not by_parent[parent] then
-        by_parent[parent] = {}
-      end
-      local lst = by_parent[parent]
-      lst[#lst + 1] = entry
     end
   end
   _p_end() -- parse_find_output
