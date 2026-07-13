@@ -131,9 +131,12 @@ end
 ---@param patterns  table[]   { raw = string, negate? = boolean, source_dir = string }
 ---@param is_dir    boolean   whether the entry is a directory
 ---@return boolean
-local function matches_ignore(full_path, name, patterns, is_dir)
+local function matches_ignore(full_path, name, patterns, is_dir, negate_count)
   _p_start("matches_ignore")
   if not patterns or #patterns == 0 then _p_end() return false end
+  -- When no negation patterns are active, the first match is definitive
+  -- and we can skip the rest of the pattern list entirely.
+  local can_early_exit = (negate_count or 0) == 0
   local matched = false
   for _, pat in ipairs(patterns) do
     -- Compile glob → Lua pattern once, then cache on the object
@@ -161,6 +164,10 @@ local function matches_ignore(full_path, name, patterns, is_dir)
         target = name
       end
       if target and target:match(pat._lua_pattern) then
+        if can_early_exit then
+          _p_end()
+          return true
+        end
         matched = not pat.negate -- negation patterns un-ignore
       end
     end
@@ -342,10 +349,14 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   -- Mutable stack of active ignore patterns.  Patterns are pushed when
   -- entering a directory (reading its .ignore/.gitignore) and popped
   -- when leaving — no per-entry table copying needed.
+  -- active_negate_count tracks how many patterns have negate=true,
+  -- letting matches_ignore early-exit when no negation patterns exist.
   local active_patterns = {}
+  local active_negate_count = 0
   if M.config.respect_ignore and ancestor_patterns then
     for _, p in ipairs(ancestor_patterns) do
       active_patterns[#active_patterns + 1] = p
+      if p.negate then active_negate_count = active_negate_count + 1 end
     end
   end
 
@@ -362,6 +373,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
           local local_patterns = parse_ignore_file(child.path)
           for _, p in ipairs(local_patterns) do
             active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = dir }
+            if p.negate then active_negate_count = active_negate_count + 1 end
           end
         end
       end
@@ -374,9 +386,10 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   -- hidden entries using the active pattern stack.
   local result = {}
 
-  ---@param parent_path string  the directory whose children to emit
-  ---@param depth number         indent level for these children
-  local function emit_children(parent_path, depth)
+  ---@param parent_path   string  the directory whose children to emit
+  ---@param depth         number  indent level for these children
+  ---@param inside_hidden boolean true when an ancestor directory is hidden
+  local function emit_children(parent_path, depth, inside_hidden)
     local children = by_parent[parent_path]
     if not children then
       return
@@ -386,15 +399,21 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
       entry.indent = depth
 
       -- Tag hidden entries using the active pattern stack.
-      -- .ignore itself is never tagged as hidden; .gitignore inherits
-      -- normal dotfile tagging.
+      -- .ignore itself is never tagged as hidden.
       if entry.name ~= ".ignore" then
-        local is_dotfile = entry.name:sub(1, 1) == "."
-        local is_ignored = M.config.respect_ignore
-            and #active_patterns > 0
-            and matches_ignore(entry.path, entry.name, active_patterns, entry.type == "dir")
-        if is_dotfile or is_ignored then
+        if inside_hidden then
+          -- All descendants of a hidden directory inherit the tag;
+          -- skip the expensive matches_ignore call for the whole subtree.
           entry.is_hidden = true
+        else
+          local is_dotfile = entry.name:sub(1, 1) == "."
+          if is_dotfile then
+            -- Dotfiles are always hidden — short-circuit before matches_ignore.
+            entry.is_hidden = true
+          elseif M.config.respect_ignore and #active_patterns > 0
+              and matches_ignore(entry.path, entry.name, active_patterns, entry.type == "dir", active_negate_count) then
+            entry.is_hidden = true
+          end
         end
       end
 
@@ -416,15 +435,20 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
                 for _, p in ipairs(local_patterns) do
                   pushed = pushed + 1
                   active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = entry.path }
+                  if p.negate then active_negate_count = active_negate_count + 1 end
                 end
               end
             end
           end
         end
-        emit_children(entry.path, depth + 1)
+        -- Recurse, carrying forward whether we're inside a hidden tree.
+        emit_children(entry.path, depth + 1, inside_hidden or entry.is_hidden)
         -- Pop exactly the patterns we pushed so the stack is correct
         -- for sibling entries.
         for _ = 1, pushed do
+          if active_patterns[#active_patterns].negate then
+            active_negate_count = active_negate_count - 1
+          end
           active_patterns[#active_patterns] = nil
         end
       elseif entry.type == "link" then
@@ -446,7 +470,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   end
 
   _p_start("dfs_emit")
-  emit_children(dir, current_depth)
+  emit_children(dir, current_depth, false)
   _p_end() -- dfs_emit
 
   _p_end()
