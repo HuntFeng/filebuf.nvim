@@ -156,13 +156,12 @@ local function read_dir(dir, ignore_patterns)
     local path = (dir == "/" and "/" .. name) or (dir .. "/" .. name)
     local stat = vim.loop.fs_stat(path)
     if stat then
-      local ftype = vim.fn.getftype(path) or "file"
-
-      -- Resolve type label
+      -- stat.type is "directory", "file", "link", etc. -- map to
+      -- the shorter labels used internally.
       local type_label
-      if ftype == "dir" then
+      if stat.type == "directory" then
         type_label = "dir"
-      elseif ftype == "link" then
+      elseif stat.type == "link" then
         type_label = "link"
       else
         type_label = "file"
@@ -176,12 +175,12 @@ local function read_dir(dir, ignore_patterns)
     end
   end
 
-  -- Filter hidden files and ignore-matched entries.
-  -- The .ignore file itself is never filtered; .gitignore is hidden
-  -- like other dotfiles (but its patterns are still read from disk).
-  -- When show_hidden is true, ignore patterns are also bypassed.
-  -- Hidden entries are tagged with is_hidden for later highlighting.
-  local filtered = {}
+  -- Tag hidden entries (dotfiles and ignore-matched entries) for later
+  -- filtering and dimmed-highlighting.  ALL entries are returned —
+  -- callers apply filter_visible() when they only want visible entries.
+  -- The .ignore file itself is never tagged as hidden; .gitignore is
+  -- tagged like other dotfiles (its patterns are still read from disk
+  -- regardless of its own visibility).
   for _, entry in ipairs(entries) do
     if entry.name ~= ".ignore" then
       local is_dotfile = entry.name:sub(1, 1) == "."
@@ -191,15 +190,9 @@ local function read_dir(dir, ignore_patterns)
           and matches_ignore(entry.path, entry.name, ignore_patterns, entry.type == "dir")
       if is_dotfile or is_ignored then
         entry.is_hidden = true
-        if not M.config.show_hidden then
-          goto skip_entry
-        end
       end
     end
-    table.insert(filtered, entry)
-    ::skip_entry::
   end
-  entries = filtered
 
   -- Sort: dirs first, then links, then files; alpha within each group
   table.sort(entries, function(a, b)
@@ -213,6 +206,43 @@ local function read_dir(dir, ignore_patterns)
   end)
 
   return entries
+end
+
+--- Filter entries based on the current show_hidden config.
+--- Returns only the entries that should be visible in the buffer.
+--- When show_hidden is true, all entries are returned (hidden ones
+--- will be dimmed via apply_hidden_extmarks).  When false, entries
+--- tagged is_hidden are excluded, along with all descendants of
+--- hidden directories (so .git/contents don't leak into the tree).
+---@param entries table[]  flat list from read_dir or read_dir_recursive
+---@return table[]
+local function filter_visible(entries)
+  if M.config.show_hidden then
+    return entries
+  end
+  local visible = {}
+  -- Stack of indent levels of hidden directories we're currently inside.
+  -- Since entries are in depth-first tree order, we push when we enter a
+  -- hidden dir and pop when indent returns to (or above) the dir's level.
+  local hidden_stack = {}
+  for _, entry in ipairs(entries) do
+    -- Pop hidden directories we've exited (indent is back at or above
+    -- the hidden dir's level, i.e. we're in a different subtree).
+    while #hidden_stack > 0 and entry.indent <= hidden_stack[#hidden_stack] do
+      table.remove(hidden_stack)
+    end
+
+    local inside_hidden = #hidden_stack > 0
+
+    if entry.is_hidden and entry.type == "dir" then
+      table.insert(hidden_stack, entry.indent)
+    end
+
+    if not entry.is_hidden and not inside_hidden then
+      table.insert(visible, entry)
+    end
+  end
+  return visible
 end
 
 --- Recursively read a directory tree, returning a flat list with indent
@@ -1051,10 +1081,58 @@ end
 -- Public API
 ----------------------------------------------------------------------
 
+--- Rebuild buffer display from a pre-computed entries list.
+--- Handles setting buffer lines, rebuilding folds, restoring
+--- previously-open directories, persisting fold state, and applying
+--- extmarks.  The entry list MUST correspond 1:1 with the desired
+--- buffer lines (i.e. it should already be filtered by filter_visible
+--- if hidden entries should be excluded).
+---@param buf       number
+---@param entries   table[]  display entries (1:1 with buffer lines)
+---@param open_dirs table|nil  set of dir paths that should stay open;
+---                            when nil, all directories start closed
+local function rebuild_buffer_display(buf, entries, open_dirs)
+  local dir = vim.b[buf].filebuf_root
+  if not dir then return end
+
+  -- 1. Rebuild buffer lines from entries
+  local fresh_lines = {}
+  for _, entry in ipairs(entries) do
+    table.insert(fresh_lines, format_line(entry))
+  end
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
+
+  -- 2. Rebuild folds — create_folds produces closed folds for every
+  --    directory.  Then re-open only the directories that were open
+  --    before the refresh.
+  vim.cmd("silent! normal! zE")
+  create_folds(buf)
+  local post_entries = parse_buffer(buf)
+  for _, e in ipairs(post_entries) do
+    if e.type == "dir" and open_dirs and open_dirs[e.path] then
+      vim.cmd(string.format("silent! %dfoldopen", e.lnum))
+    end
+  end
+  -- Persist the updated fold state so it survives a subsequent
+  -- close / reopen.  This must happen *after* folds are rebuilt,
+  -- otherwise newly-revealed directories (e.g. hidden dirs after
+  -- a toggle) are missing from the closed set and would all open
+  -- on the next :Filebuf.
+  save_fold_state(buf, dir)
+
+  -- 3. Refresh extmarks
+  apply_git_extmarks(buf, dir)
+  apply_hidden_extmarks(buf, entries)
+  apply_dir_extmarks(buf, entries)
+
+  vim.bo[buf].modified = false
+end
+
 --- Re-read the directory tree from disk and refresh the buffer contents.
 --- Preserves fold state across the refresh: directories that were open
 --- stay open; new directories (e.g. hidden dirs revealed by toggle)
---- remain closed.
+--- remain closed.  Updates the cached full entry list so subsequent
+--- toggles can re-filter without touching the filesystem.
 ---@param buf number  filebuf buffer to refresh
 local function refresh_buffer(buf)
   local dir = vim.b[buf].filebuf_root
@@ -1072,39 +1150,12 @@ local function refresh_buffer(buf)
     end
   end
 
-  -- 2. Re-read the tree from disk with current config (filtering applied)
-  local entries = read_dir_recursive(dir)
-  local fresh_lines = {}
-  for _, entry in ipairs(entries) do
-    table.insert(fresh_lines, format_line(entry))
-  end
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
+  -- 2. Re-read the tree from disk (all entries, unfiltered) and cache it.
+  local all_entries = read_dir_recursive(dir)
+  vim.b[buf].filebuf_all_entries = all_entries
 
-  -- 3. Rebuild folds — create_folds produces closed folds for every
-  --    directory.  Then re-open only the directories that were open
-  --    before the refresh.  New directories (including hidden ones that
-  --    just became visible) stay closed.
-  vim.cmd("silent! normal! zE")
-  create_folds(buf)
-  local post_entries = parse_buffer(buf)
-  for _, e in ipairs(post_entries) do
-    if e.type == "dir" and open_dirs[e.path] then
-      vim.cmd(string.format("silent! %dfoldopen", e.lnum))
-    end
-  end
-  -- Persist the updated fold state so it survives a subsequent
-  -- close / reopen.  This must happen *after* folds are rebuilt,
-  -- otherwise newly-revealed directories (e.g. hidden dirs after
-  -- a toggle) are missing from the closed set and would all open
-  -- on the next :Filebuf.
-  save_fold_state(buf, dir)
-
-  -- 4. Refresh git extmarks, hidden-entry hints, and directory coloring
-  apply_git_extmarks(buf, dir)
-  apply_hidden_extmarks(buf, entries)
-  apply_dir_extmarks(buf, entries)
-
-  vim.bo[buf].modified = false
+  -- 3. Filter for display and rebuild the buffer.
+  rebuild_buffer_display(buf, filter_visible(all_entries), open_dirs)
 end
 
 --- Toggle show_hidden and refresh the filebuf buffer.
@@ -1134,8 +1185,28 @@ local function toggle_hidden(buf)
     end
   end
 
+  -- Capture which directories are currently open so we can restore
+  -- the same state after the toggle.
+  local dir = vim.b[buf].filebuf_root
+  save_fold_state(buf, dir)
+  local open_dirs = {}
+  for _, e in ipairs(pre_entries) do
+    if e.type == "dir" and vim.fn.foldclosed(e.lnum) == -1 then
+      open_dirs[e.path] = true
+    end
+  end
+
   M.config.show_hidden = not M.config.show_hidden
-  refresh_buffer(buf)
+
+  -- Re-filter from cached in-memory entries (no filesystem I/O).
+  -- Fall back to a full disk refresh if the cache is missing (should
+  -- not happen in normal operation, but guards against edge cases).
+  local all_entries = vim.b[buf].filebuf_all_entries
+  if all_entries then
+    rebuild_buffer_display(buf, filter_visible(all_entries), open_dirs)
+  else
+    refresh_buffer(buf)
+  end
 
   -- Re-locate the same entry in the refreshed buffer and move the
   -- cursor to its new line.  This naturally accounts for any entries
@@ -1195,10 +1266,14 @@ function M.open(dir)
     toggle_hidden(buf)
   end, { buffer = buf, desc = "Toggle hidden files" })
 
-  -- Populate the buffer with the full recursive tree
-  local entries = read_dir_recursive(dir)
-  if #entries > 0 then
-    insert_entries(buf, entries, 0)
+  -- Populate the buffer with the full recursive tree.
+  -- Cache the unfiltered list so toggle_hidden() can re-filter
+  -- from memory instead of re-walking the filesystem.
+  local all_entries = read_dir_recursive(dir)
+  vim.b[buf].filebuf_all_entries = all_entries
+  local display_entries = filter_visible(all_entries)
+  if #display_entries > 0 then
+    insert_entries(buf, display_entries, 0)
   end
 
   -- Manual folding: each directory + its descendants form a fold.
@@ -1282,8 +1357,8 @@ function M.open(dir)
 
   -- Apply git-status extmarks after the buffer is fully populated.
   apply_git_extmarks(buf, dir)
-  apply_hidden_extmarks(buf, entries)
-  apply_dir_extmarks(buf, entries)
+  apply_hidden_extmarks(buf, display_entries)
+  apply_dir_extmarks(buf, display_entries)
 
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
@@ -1309,7 +1384,10 @@ function M.open(dir)
         local buf_entries = parse_buffer(buf)
 
         -- 2. Read current filesystem state
-        local disk_entries = read_dir_recursive(dir)
+        local all_disk_entries = read_dir_recursive(dir)
+        -- Only consider entries that are visible in the buffer, so
+        -- hidden files on disk don't appear as "deleted".
+        local disk_entries = filter_visible(all_disk_entries)
 
         -- 3. Diff
         local ops = compute_diff(buf_entries, disk_entries)
