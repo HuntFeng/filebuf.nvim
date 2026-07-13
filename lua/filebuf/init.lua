@@ -344,14 +344,18 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   end
 
   -- Read the root directory's own .ignore / .gitignore before descending.
+  -- Uses the already-populated by_parent map instead of fs_stat to avoid
+  -- synchronous stat syscalls — find(1) already listed these files.
   -- (emit_children handles ignore files inside each subdirectory.)
   if M.config.respect_ignore then
-    for _, name in ipairs({ ".ignore", ".gitignore" }) do
-      local ignore_path = dir .. "/" .. name
-      if vim.loop.fs_stat(ignore_path) then
-        local local_patterns = parse_ignore_file(ignore_path)
-        for _, p in ipairs(local_patterns) do
-          active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = dir }
+    local root_children = by_parent[dir]
+    if root_children then
+      for _, child in ipairs(root_children) do
+        if child.name == ".ignore" or child.name == ".gitignore" then
+          local local_patterns = parse_ignore_file(child.path)
+          for _, p in ipairs(local_patterns) do
+            active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = dir }
+          end
         end
       end
     end
@@ -393,13 +397,18 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
         -- Track the count so we can pop them exactly after recursion.
         local pushed = 0
         if M.config.respect_ignore then
-          for _, name in ipairs({ ".ignore", ".gitignore" }) do
-            local ignore_path = entry.path .. "/" .. name
-            if vim.loop.fs_stat(ignore_path) then
-              local local_patterns = parse_ignore_file(ignore_path)
-              for _, p in ipairs(local_patterns) do
-                pushed = pushed + 1
-                active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = entry.path }
+          -- Look up .ignore / .gitignore in the already-populated
+          -- by_parent map instead of calling fs_stat, avoiding
+          -- synchronous stat syscalls on every directory.
+          local dir_children = by_parent[entry.path]
+          if dir_children then
+            for _, child in ipairs(dir_children) do
+              if child.name == ".ignore" or child.name == ".gitignore" then
+                local local_patterns = parse_ignore_file(child.path)
+                for _, p in ipairs(local_patterns) do
+                  pushed = pushed + 1
+                  active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = entry.path }
+                end
               end
             end
           end
@@ -830,42 +839,59 @@ end
 --- Create manual folds so that each directory line *includes* its
 --- descendants (not just the children).  Nested directories get their
 --- own inner folds.
----@param buf number
-local function create_folds(buf)
+---
+--- Uses a single-pass stack-based algorithm (O(n)) instead of scanning
+--- all entries per directory (O(n²)).  Directories are pushed onto a
+--- stack when encountered; when an entry at ≤ indent arrives, the
+--- directory on top of the stack has ended and its fold is emitted.
+--- Because the stack is LIFO, inner folds are always emitted before
+--- outer ones, which is required by Neovim's manual-fold model.
+---
+---@param buf     number
+---@param entries? table[]  pre-parsed entries (avoids redundant parse_buffer)
+local function create_folds(buf, entries)
   _p_start("create_folds")
-  local entries = parse_buffer(buf)
+  entries = entries or parse_buffer(buf)
   if #entries == 0 then _p_end() return end
 
-  -- Gather every directory line with its indent level.
-  local dirs = {} -- { lnum, indent }
+  local stack = {} -- { lnum = number, indent = number }
+  local prev = nil -- last entry processed (used as fold endpoint)
+  local cmds = {}  -- batched fold commands
+
   for _, e in ipairs(entries) do
-    if e.type == "dir" then
-      table.insert(dirs, { lnum = e.lnum, indent = e.indent })
-    end
-  end
-
-  -- Sort by indent descending so inner (deeper) folds are created
-  -- before outer ones.  This prevents outer folds from absorbing inner
-  -- folds in Neovim's manual-fold model.
-  table.sort(dirs, function(a, b)
-    return a.indent > b.indent
-  end)
-
-  -- For each directory find its last descendant and apply a fold
-  -- from the directory line itself through the last descendant.
-  for _, d in ipairs(dirs) do
-    local end_lnum = d.lnum
-    for _, e in ipairs(entries) do
-      if e.lnum > d.lnum and e.indent > d.indent then
-        end_lnum = e.lnum
-      elseif e.lnum > d.lnum and e.indent <= d.indent then
-        break
+    -- Pop directories whose scope has ended: when the current entry's
+    -- indent is back at or above the directory's own indent, we've left
+    -- that directory's subtree.  The previous entry (if deeper) is the
+    -- last descendant and becomes the fold's end line.
+    while #stack > 0 and stack[#stack].indent >= e.indent do
+      local d = table.remove(stack)
+      if prev and prev.indent > d.indent and prev.lnum > d.lnum then
+        cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev.lnum)
       end
     end
-    if end_lnum > d.lnum then
-      vim.cmd(string.format("%d,%dfold", d.lnum, end_lnum))
+
+    if e.type == "dir" then
+      stack[#stack + 1] = { lnum = e.lnum, indent = e.indent }
+    end
+
+    prev = e
+  end
+
+  -- Close any directories that extend to the end of the buffer.
+  while #stack > 0 do
+    local d = table.remove(stack)
+    if prev and prev.indent > d.indent and prev.lnum > d.lnum then
+      cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev.lnum)
     end
   end
+
+  -- Execute all fold commands in one batch.  Inner folds are emitted
+  -- first (they're popped from the top of the LIFO stack), satisfying
+  -- Neovim's requirement that nested folds be created inside-out.
+  if #cmds > 0 then
+    vim.cmd(table.concat(cmds, "|"))
+  end
+
   _p_end()
 end
 
@@ -1027,9 +1053,10 @@ end
 --- Apply git-status extmarks to every entry in `buf`.  Entries with
 --- no git status are left unadorned.  Existing git extmarks are
 --- cleared before re-applying.
----@param buf  number
----@param root string  root directory (used to run git status)
-local function apply_git_extmarks(buf, root)
+---@param buf     number
+---@param root    string  root directory (used to run git status)
+---@param entries? table[] pre-parsed buffer entries (avoids redundant parse)
+local function apply_git_extmarks(buf, root, entries)
   _p_start("apply_git_extmarks")
   vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
 
@@ -1042,7 +1069,7 @@ local function apply_git_extmarks(buf, root)
     _p_end() return
   end
 
-  local entries = parse_buffer(buf)
+  entries = entries or parse_buffer(buf)
   for _, entry in ipairs(entries) do
     local char, hl = get_entry_git_status(entry, status_map)
     if char then
@@ -1169,11 +1196,12 @@ end
 ----------------------------------------------------------------------
 
 --- Persist the closed-fold set for `dir` by scanning the current buffer.
----@param buf   number
----@param root  string  root directory (key into M._fold_closed)
-local function save_fold_state(buf, root)
+---@param buf     number
+---@param root    string  root directory (key into M._fold_closed)
+---@param entries? table[] pre-parsed buffer entries (avoids redundant parse)
+local function save_fold_state(buf, root, entries)
   M._fold_closed[root] = {}
-  local entries = parse_buffer(buf)
+  entries = entries or parse_buffer(buf)
   for _, e in ipairs(entries) do
     if e.type == "dir" and vim.fn.foldclosed(e.lnum) ~= -1 then
       M._fold_closed[root][e.path] = true
@@ -1244,13 +1272,15 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   end
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
 
-  -- 2. Rebuild folds — create_folds produces closed folds for every
+  -- 2. Parse once, then reuse for folds, open-dir restoration, and extmarks.
+  local buf_entries = parse_buffer(buf)
+
+  -- 3. Rebuild folds — create_folds produces closed folds for every
   --    directory.  Then re-open only the directories that were open
   --    before the refresh.
   vim.cmd("silent! normal! zE")
-  create_folds(buf)
-  local post_entries = parse_buffer(buf)
-  for _, e in ipairs(post_entries) do
+  create_folds(buf, buf_entries)
+  for _, e in ipairs(buf_entries) do
     if e.type == "dir" and open_dirs and open_dirs[e.path] then
       vim.cmd(string.format("silent! %dfoldopen", e.lnum))
     end
@@ -1260,10 +1290,10 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   -- otherwise newly-revealed directories (e.g. hidden dirs after
   -- a toggle) are missing from the closed set and would all open
   -- on the next :Filebuf.
-  save_fold_state(buf, dir)
+  save_fold_state(buf, dir, buf_entries)
 
-  -- 3. Refresh extmarks
-  apply_git_extmarks(buf, dir)
+  -- 4. Refresh extmarks — pass parsed entries to avoid re-parsing.
+  apply_git_extmarks(buf, dir, buf_entries)
   apply_hidden_extmarks(buf, entries)
   apply_dir_extmarks(buf, entries)
 
@@ -1440,7 +1470,10 @@ function M.open(dir)
   -- Replace default +/- fold-column glyphs with triangles.
   local fc = vim.wo.fillchars or ""
   vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶,fold: "
-  create_folds(buf)
+
+  -- Parse once and reuse for create_folds and fold-state restoration.
+  local open_entries = parse_buffer(buf)
+  create_folds(buf, open_entries)
 
   -- Restore saved fold state, or close everything on first open.
   if M._fold_closed[dir] then
@@ -1449,8 +1482,7 @@ function M.open(dir)
     -- directories the user had previously expanded (i.e. those missing
     -- from the closed set).  This way any unaccounted directory (e.g. a
     -- newly-revealed hidden dir) defaults to closed instead of open.
-    local post_entries = parse_buffer(buf)
-    for _, e in ipairs(post_entries) do
+    for _, e in ipairs(open_entries) do
       if e.type == "dir" and not M._fold_closed[dir][e.path] then
         vim.cmd(string.format("silent! %dfoldopen", e.lnum))
       end
@@ -1502,7 +1534,8 @@ function M.open(dir)
   end
 
   -- Apply git-status extmarks after the buffer is fully populated.
-  apply_git_extmarks(buf, dir)
+  -- Reuse the already-parsed entries from above (buffer content hasn't changed).
+  apply_git_extmarks(buf, dir, open_entries)
   apply_hidden_extmarks(buf, display_entries)
   apply_dir_extmarks(buf, display_entries)
 
