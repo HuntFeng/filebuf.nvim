@@ -1174,45 +1174,113 @@ end
 --- Apply extmarks to color directory entry names.
 --- Works with entries from either read_dir_recursive (sequential, no lnum)
 --- or parse_buffer (may have gaps, has lnum field).
+--- Only applies extmarks to visible lines (outside closed folds).
 ---@param buf     number
 ---@param entries table[]  flat list (from read_dir_recursive or parse_buffer)
 local function apply_dir_extmarks(buf, entries)
   _p_start("apply_dir_extmarks")
   vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
 
-  for lnum, entry in ipairs(entries) do
+  -- Pre-compute indent width multiplier (avoids #indent_str allocation).
+  local use_tabs = not vim.go.expandtab
+  local iw = indent_width()
+
+  -- Build a set of visible buffer lines using foldclosedend() jumps,
+  -- so we skip entries buried inside closed folds.
+  local visible = {}
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local lnum = 1
+  while lnum <= line_count do
+    local fold_end = vim.fn.foldclosedend(lnum)
+    if fold_end ~= -1 then
+      lnum = math.max(lnum + 1, fold_end + 1)
+    else
+      visible[lnum] = true
+      lnum = lnum + 1
+    end
+  end
+
+  for idx, entry in ipairs(entries) do
     if entry.type == "dir" then
-      local line = entry.lnum or lnum
-      local name_start = #indent_str(entry.indent)
-      local name_end = name_start + #entry.name + 1 -- include trailing "/"
-      vim.api.nvim_buf_set_extmark(buf, dir_ns, line - 1, name_start, {
-        end_col = name_end,
-        hl_group = "Directory",
-        priority = 10,
-      })
+      -- parse_buffer provides lnum; display entries are 1:1 with buffer lines.
+      local line = entry.lnum or idx
+      if visible[line] then
+        local name_start = use_tabs and entry.indent or (entry.indent * iw)
+        local name_end = name_start + #entry.name + 1 -- trailing "/"
+        vim.api.nvim_buf_set_extmark(buf, dir_ns, line - 1, name_start, {
+          end_col = name_end,
+          hl_group = "Directory",
+          priority = 10,
+        })
+      end
     end
   end
   _p_end()
 end
 
 --- Apply dimmed highlighting to hidden file and directory names.
----@param buf     number
----@param entries table[]  flat list from read_dir_recursive (with is_hidden,
----                        indent, name, type fields)
-local function apply_hidden_extmarks(buf, entries)
+--- Only applies extmarks to visible lines (outside closed folds) to avoid
+--- thousands of API calls for entries the user cannot see.  Lines inside
+--- closed folds are skipped — handle_enter re-applies extmarks lazily
+--- when a directory fold is opened via <CR>.
+---@param buf       number
+---@param entries   table[]  flat list from read_dir_recursive (with is_hidden,
+---                          indent, name, type fields), 1:1 with buffer lines
+---@param line_start? number  first buffer line to process (1-indexed, default 1)
+---@param line_end?   number  last  buffer line to process (1-indexed, default #entries)
+local function apply_hidden_extmarks(buf, entries, line_start, line_end)
   _p_start("apply_hidden_extmarks")
-  vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
 
-  for lnum, entry in ipairs(entries) do
-    if entry.is_hidden then
-      local name_start = #indent_str(entry.indent)
-      local suffix = entry.type == "dir" and 1 or 0
-      local name_end = name_start + #entry.name + suffix
-      local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
-      vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
-        end_col = name_end,
-        hl_group = hl,
-      })
+  -- Early exit: when hidden files are not shown, no entry in the buffer
+  -- can have is_hidden set, so there are no extmarks to apply.
+  if not M.config.show_hidden then
+    vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
+    _p_end()
+    return
+  end
+
+  line_start = line_start or 1
+  line_end = line_end or #entries
+
+  -- Pre-compute indent width multiplier (avoids #indent_str allocation per entry).
+  -- indent_str uses string.rep(" ", level * indent_width()) — its #length is
+  -- level * indent_width() for spaces, or just level for tabs.
+  local use_tabs = not vim.go.expandtab
+  local iw = indent_width()
+
+  -- Walk the buffer using foldclosedend() to skip entire closed-fold
+  -- regions in one step.  A visible[lnum]=true set is built for the
+  -- requested line range; lines inside closed folds are absent from it.
+  local visible = {}
+  local lnum = line_start
+  while lnum <= line_end do
+    local fold_end = vim.fn.foldclosedend(lnum)
+    if fold_end ~= -1 then
+      lnum = math.max(lnum + 1, fold_end + 1)
+    else
+      visible[lnum] = true
+      lnum = lnum + 1
+    end
+  end
+
+  -- Clear only the line range we are about to repopulate, so extmarks on
+  -- other lines (outside the range) survive — important for incremental
+  -- handle_enter updates.
+  vim.api.nvim_buf_clear_namespace(buf, hidden_ns, line_start - 1, line_end)
+
+  for lnum = line_start, line_end do
+    if visible[lnum] then
+      local entry = entries[lnum]
+      if entry and entry.is_hidden then
+        local name_start = use_tabs and entry.indent or (entry.indent * iw)
+        local suffix = entry.type == "dir" and 1 or 0
+        local name_end = name_start + #entry.name + suffix
+        local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
+        vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
+          end_col = name_end,
+          hl_group = hl,
+        })
+      end
     end
   end
   _p_end()
@@ -1257,6 +1325,15 @@ local function handle_enter(buf)
     local fold_end = vim.fn.foldclosedend(lnum)
     if fold_end ~= -1 then
       vim.cmd("normal! zo")
+      -- Lazily apply hidden-extmark dimming to the newly visible lines.
+      -- This avoids the up-front cost of dimming entries inside closed
+      -- folds (which is the vast majority on large trees).
+      if M.config.show_hidden then
+        local display_entries = vim.b[buf].filebuf_display_entries
+        if display_entries then
+          apply_hidden_extmarks(buf, display_entries, lnum, fold_end)
+        end
+      end
     else
       vim.cmd("normal! zc")
     end
@@ -1301,6 +1378,7 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
 
   -- 2. Parse once, then reuse for folds, open-dir restoration, and extmarks.
   local buf_entries = parse_buffer(buf)
+  vim.b[buf].filebuf_buf_entries = buf_entries
 
   -- 3. Rebuild folds — create_folds produces closed folds for every
   --    directory.  Then re-open only the directories that were open
@@ -1319,7 +1397,8 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   -- on the next :Filebuf.
   save_fold_state(buf, dir, buf_entries)
 
-  -- 4. Refresh extmarks — pass parsed entries to avoid re-parsing.
+  -- 4. Store display entries and refresh extmarks.
+  vim.b[buf].filebuf_display_entries = entries
   apply_git_extmarks(buf, dir, buf_entries)
   apply_hidden_extmarks(buf, entries)
   apply_dir_extmarks(buf, entries)
@@ -1391,7 +1470,7 @@ local function toggle_hidden(buf)
   -- Capture which directories are currently open so we can restore
   -- the same state after the toggle.
   local dir = vim.b[buf].filebuf_root
-  save_fold_state(buf, dir)
+  save_fold_state(buf, dir, pre_entries)
   local open_dirs = {}
   for _, e in ipairs(pre_entries) do
     if e.type == "dir" and vim.fn.foldclosed(e.lnum) == -1 then
@@ -1414,9 +1493,11 @@ local function toggle_hidden(buf)
   -- Re-locate the same entry in the refreshed buffer and move the
   -- cursor to its new line.  This naturally accounts for any entries
   -- that were added or removed before the cursor line by the toggle.
+  -- Reuse the buf_entries that rebuild_buffer_display already parsed
+  -- and stored, avoiding a redundant parse_buffer call.
   if cursor_entry_path then
-    local post_entries = parse_buffer(buf)
-    for _, e in ipairs(post_entries) do
+    local post_entries = vim.b[buf].filebuf_buf_entries
+    for _, e in ipairs(post_entries or {}) do
       if e.path == cursor_entry_path then
         vim.api.nvim_win_set_cursor(0, { e.lnum, 0 })
         break
@@ -1561,7 +1642,9 @@ function M.open(dir)
   end
 
   -- Apply git-status extmarks after the buffer is fully populated.
-  -- Reuse the already-parsed entries from above (buffer content hasn't changed).
+  -- Store display entries so handle_enter can lazily apply hidden
+  -- extmarks when directory folds are opened via <CR>.
+  vim.b[buf].filebuf_display_entries = display_entries
   apply_git_extmarks(buf, dir, open_entries)
   apply_hidden_extmarks(buf, display_entries)
   apply_dir_extmarks(buf, display_entries)
