@@ -132,7 +132,8 @@ end
 ---@param is_dir    boolean   whether the entry is a directory
 ---@return boolean
 local function matches_ignore(full_path, name, patterns, is_dir)
-  if not patterns or #patterns == 0 then return false end
+  _p_start("matches_ignore")
+  if not patterns or #patterns == 0 then _p_end() return false end
   local matched = false
   for _, pat in ipairs(patterns) do
     -- Compile glob → Lua pattern once, then cache on the object
@@ -164,6 +165,7 @@ local function matches_ignore(full_path, name, patterns, is_dir)
       end
     end
   end
+  _p_end()
   return matched
 end
 
@@ -281,6 +283,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   local output = vim.fn.system(cmd)
   _p_end() -- read_dir
 
+  _p_start("parse_find_output")
   -- Parse the flat listing into a parent→children map.
   -- Use pure-Lua dirname/basename to avoid the Lua→VimL→C boundary
   -- crossing that vim.fn.fnamemodify imposes on every single entry.
@@ -315,7 +318,9 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
       lst[#lst + 1] = entry
     end
   end
+  _p_end() -- parse_find_output
 
+  _p_start("sort_children")
   -- Sort children within each parent: dirs first, then links, then files;
   -- case-insensitive alphabetical within each group.
   -- Skip sort for single-element directories (common case in sparse trees).
@@ -332,6 +337,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
       end)
     end
   end
+  _p_end() -- sort_children
 
   -- Mutable stack of active ignore patterns.  Patterns are pushed when
   -- entering a directory (reading its .ignore/.gitignore) and popped
@@ -343,6 +349,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
     end
   end
 
+  _p_start("setup_ignore")
   -- Read the root directory's own .ignore / .gitignore before descending.
   -- Uses the already-populated by_parent map instead of fs_stat to avoid
   -- synchronous stat syscalls — find(1) already listed these files.
@@ -361,6 +368,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
     end
   end
 
+  _p_end() -- setup_ignore
   -- DFS traversal: build the flat result list with indent levels,
   -- reading .ignore/.gitignore files on the way down and tagging
   -- hidden entries using the active pattern stack.
@@ -437,7 +445,9 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
     end
   end
 
+  _p_start("dfs_emit")
   emit_children(dir, current_depth)
+  _p_end() -- dfs_emit
 
   _p_end()
   return result
