@@ -209,7 +209,7 @@ end
 --- Filter entries based on the current show_hidden config.
 --- Returns only the entries that should be visible in the buffer.
 --- When show_hidden is true, all entries are returned (hidden ones
---- will be dimmed via apply_hidden_extmarks).  When false, entries
+--- will be dimmed via apply_extmarks).  When false, entries
 --- tagged is_hidden are excluded, along with all descendants of
 --- hidden directories (so .git/contents don't leak into the tree).
 ---@param entries table[]  flat list from read_dir_recursive
@@ -943,6 +943,12 @@ end
 --- marks without disturbing others.
 local git_ns = vim.api.nvim_create_namespace("filebuf-git")
 
+--- Namespace and highlight groups for hidden-file extmarks.
+local hidden_ns = vim.api.nvim_create_namespace("filebuf-hidden")
+
+--- Namespace for directory-name extmarks.
+local dir_ns = vim.api.nvim_create_namespace("filebuf-dir")
+
 --- Define highlight groups for git statuses.  `default = true` ensures
 --- user overrides in their colorscheme take precedence.
 local function define_git_highlights()
@@ -1068,7 +1074,7 @@ local function get_entry_git_status(entry, status_map)
   -- Direct match: the entry's path appears verbatim in git status.
   -- Directories only appear in rare cases (e.g. untracked dirs); for
   -- those we still show the status indicator but don't change the name
-  -- color (handled in apply_git_extmarks).
+  -- color (handled in apply_extmarks).
   local s = status_map[entry.path]
   if s then
     return porcelain_to_display(s)
@@ -1077,56 +1083,117 @@ local function get_entry_git_status(entry, status_map)
   return nil
 end
 
---- Apply git-status extmarks to every entry in `buf`.  Entries with
---- no git status are left unadorned.  Existing git extmarks are
---- cleared before re-applying.
+--- Apply git, dir, and hidden extmarks to visible lines in a single pass.
+--- Only processes lines outside closed folds to avoid wasting API calls on
+--- entries the user cannot see.  Supports incremental range updates for
+--- lazy fold-open application via handle_enter.
+---
+--- Uses display_entries (1:1 with buffer lines — entries[lnum] is the
+--- entry on line lnum) which carry name, type, path, indent, is_hidden.
+--- For git extmarks: matches entry.path against the git status map.
+--- The status map tells us which paths have changes; display_entries
+--- tells us which buffer line each path lives on.  No parse_buffer needed.
 ---@param buf     number
----@param root    string  root directory (used to run git status)
----@param entries? table[] pre-parsed buffer entries (avoids redundant parse)
-local function apply_git_extmarks(buf, root, entries)
-  _p_start("apply_git_extmarks")
-  vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
+---@param entries table[]  display_entries (1:1 with buffer lines)
+---@param opts?   table    { status_map?, line_start?, line_end? }
+local function apply_extmarks(buf, entries, opts)
+  _p_start("apply_extmarks")
+  opts = opts or {}
+  local line_start = opts.line_start or 1
+  local line_end = opts.line_end or #entries
+  local is_full = opts.line_start == nil -- full-buffer refresh
 
-  if not M.config.git_status then
-    _p_end() return
+  -- Clear all three namespaces for the target range
+  if is_full then
+    vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
+    vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
+    vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
+  else
+    local clear_start = line_start - 1
+    vim.api.nvim_buf_clear_namespace(buf, git_ns, clear_start, line_end)
+    vim.api.nvim_buf_clear_namespace(buf, dir_ns, clear_start, line_end)
+    vim.api.nvim_buf_clear_namespace(buf, hidden_ns, clear_start, line_end)
   end
 
-  local status_map = get_git_status_map(root)
-  if not status_map then
-    _p_end() return
+  -- Resolve git status map: explicit > cached > nil
+  local status_map = opts.status_map
+  if status_map == nil and M.config.git_status then
+    status_map = vim.b[buf].filebuf_git_status
+  end
+  local show_hidden = M.config.show_hidden
+
+  -- Pre-compute indent helpers (avoids #indent_str allocation per entry)
+  local use_tabs = not vim.go.expandtab
+  local iw = indent_width()
+
+  -- Build visible-line set using foldclosedend() jumps, so we skip
+  -- entire closed-fold regions in one step.
+  local visible = {}
+  local lnum = line_start
+  while lnum <= line_end do
+    local fold_end = vim.fn.foldclosedend(lnum)
+    if fold_end ~= -1 then
+      lnum = math.max(lnum + 1, fold_end + 1)
+    else
+      visible[lnum] = true
+      lnum = lnum + 1
+    end
   end
 
-  entries = entries or parse_buffer(buf)
-  for _, entry in ipairs(entries) do
-    local char, hl = get_entry_git_status(entry, status_map)
-    if char then
-      -- Column range covering the filename portion of the line.
-      -- Use indent_str to convert depth-level to actual character offset.
-      local name_start = #indent_str(entry.indent)
+  -- Single pass over visible lines: apply dir, hidden, and git extmarks.
+  -- Priorities: dir (10) > hidden (5) > git (0).  This preserves the
+  -- existing behaviour where Directory highlight wins over dimming, and
+  -- dimming wins over git-status coloring.
+  for lnum = line_start, line_end do
+    if visible[lnum] then
+      local entry = entries[lnum]
+      if not entry then goto continue end
+
+      local name_start = use_tabs and entry.indent or (entry.indent * iw)
       local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
       local name_end = name_start + #entry.name + suffix
 
-      -- For directories we only add the status indicator as virtual
-      -- text; the name itself keeps its Directory coloring.  For files
-      -- and links the name is colored with the git status highlight.
-      local extmark_opts = {
-        virt_text = { { " " .. char, hl } },
-      }
-      if entry.type ~= "dir" then
-        extmark_opts.end_col = name_end
-        extmark_opts.hl_group = hl
+      -- Directory (priority 10 — highest)
+      if entry.type == "dir" then
+        vim.api.nvim_buf_set_extmark(buf, dir_ns, lnum - 1, name_start, {
+          end_col = name_end,
+          hl_group = "Directory",
+          priority = 10,
+        })
       end
-      vim.api.nvim_buf_set_extmark(buf, git_ns, entry.lnum - 1, name_start, extmark_opts)
+
+      -- Hidden / dimmed (priority 5 — overrides git color, under dir)
+      if show_hidden and entry.is_hidden then
+        local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
+        vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
+          end_col = name_end,
+          hl_group = hl,
+          priority = 5,
+        })
+      end
+
+      -- Git status (priority 0 — lowest; dirs get virt_text only, no name color)
+      if status_map then
+        local char, hl = get_entry_git_status(entry, status_map)
+        if char then
+          local extmark_opts = {
+            virt_text = { { " " .. char, hl } },
+            priority = 0,
+          }
+          if entry.type ~= "dir" then
+            extmark_opts.end_col = name_end
+            extmark_opts.hl_group = hl
+          end
+          vim.api.nvim_buf_set_extmark(buf, git_ns, lnum - 1, name_start, extmark_opts)
+        end
+      end
+
+      ::continue::
     end
   end
+
   _p_end()
 end
-
---- Namespace and highlight groups for hidden-file extmarks.
-local hidden_ns = vim.api.nvim_create_namespace("filebuf-hidden")
-
---- Namespace for directory-name extmarks.
-local dir_ns = vim.api.nvim_create_namespace("filebuf-dir")
 
 local function define_hidden_highlights()
   local groups = {
@@ -1171,121 +1238,6 @@ local function define_filebuf_highlights()
   end
 end
 
---- Apply extmarks to color directory entry names.
---- Works with entries from either read_dir_recursive (sequential, no lnum)
---- or parse_buffer (may have gaps, has lnum field).
---- Only applies extmarks to visible lines (outside closed folds).
----@param buf     number
----@param entries table[]  flat list (from read_dir_recursive or parse_buffer)
-local function apply_dir_extmarks(buf, entries)
-  _p_start("apply_dir_extmarks")
-  vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
-
-  -- Pre-compute indent width multiplier (avoids #indent_str allocation).
-  local use_tabs = not vim.go.expandtab
-  local iw = indent_width()
-
-  -- Build a set of visible buffer lines using foldclosedend() jumps,
-  -- so we skip entries buried inside closed folds.
-  local visible = {}
-  local line_count = vim.api.nvim_buf_line_count(buf)
-  local lnum = 1
-  while lnum <= line_count do
-    local fold_end = vim.fn.foldclosedend(lnum)
-    if fold_end ~= -1 then
-      lnum = math.max(lnum + 1, fold_end + 1)
-    else
-      visible[lnum] = true
-      lnum = lnum + 1
-    end
-  end
-
-  for idx, entry in ipairs(entries) do
-    if entry.type == "dir" then
-      -- parse_buffer provides lnum; display entries are 1:1 with buffer lines.
-      local line = entry.lnum or idx
-      if visible[line] then
-        local name_start = use_tabs and entry.indent or (entry.indent * iw)
-        local name_end = name_start + #entry.name + 1 -- trailing "/"
-        vim.api.nvim_buf_set_extmark(buf, dir_ns, line - 1, name_start, {
-          end_col = name_end,
-          hl_group = "Directory",
-          priority = 10,
-        })
-      end
-    end
-  end
-  _p_end()
-end
-
---- Apply dimmed highlighting to hidden file and directory names.
---- Only applies extmarks to visible lines (outside closed folds) to avoid
---- thousands of API calls for entries the user cannot see.  Lines inside
---- closed folds are skipped — handle_enter re-applies extmarks lazily
---- when a directory fold is opened via <CR>.
----@param buf       number
----@param entries   table[]  flat list from read_dir_recursive (with is_hidden,
----                          indent, name, type fields), 1:1 with buffer lines
----@param line_start? number  first buffer line to process (1-indexed, default 1)
----@param line_end?   number  last  buffer line to process (1-indexed, default #entries)
-local function apply_hidden_extmarks(buf, entries, line_start, line_end)
-  _p_start("apply_hidden_extmarks")
-
-  -- Early exit: when hidden files are not shown, no entry in the buffer
-  -- can have is_hidden set, so there are no extmarks to apply.
-  if not M.config.show_hidden then
-    vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
-    _p_end()
-    return
-  end
-
-  line_start = line_start or 1
-  line_end = line_end or #entries
-
-  -- Pre-compute indent width multiplier (avoids #indent_str allocation per entry).
-  -- indent_str uses string.rep(" ", level * indent_width()) — its #length is
-  -- level * indent_width() for spaces, or just level for tabs.
-  local use_tabs = not vim.go.expandtab
-  local iw = indent_width()
-
-  -- Walk the buffer using foldclosedend() to skip entire closed-fold
-  -- regions in one step.  A visible[lnum]=true set is built for the
-  -- requested line range; lines inside closed folds are absent from it.
-  local visible = {}
-  local lnum = line_start
-  while lnum <= line_end do
-    local fold_end = vim.fn.foldclosedend(lnum)
-    if fold_end ~= -1 then
-      lnum = math.max(lnum + 1, fold_end + 1)
-    else
-      visible[lnum] = true
-      lnum = lnum + 1
-    end
-  end
-
-  -- Clear only the line range we are about to repopulate, so extmarks on
-  -- other lines (outside the range) survive — important for incremental
-  -- handle_enter updates.
-  vim.api.nvim_buf_clear_namespace(buf, hidden_ns, line_start - 1, line_end)
-
-  for lnum = line_start, line_end do
-    if visible[lnum] then
-      local entry = entries[lnum]
-      if entry and entry.is_hidden then
-        local name_start = use_tabs and entry.indent or (entry.indent * iw)
-        local suffix = entry.type == "dir" and 1 or 0
-        local name_end = name_start + #entry.name + suffix
-        local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
-        vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
-          end_col = name_end,
-          hl_group = hl,
-        })
-      end
-    end
-  end
-  _p_end()
-end
-
 ----------------------------------------------------------------------
 -- <CR> handler
 ----------------------------------------------------------------------
@@ -1325,14 +1277,12 @@ local function handle_enter(buf)
     local fold_end = vim.fn.foldclosedend(lnum)
     if fold_end ~= -1 then
       vim.cmd("normal! zo")
-      -- Lazily apply hidden-extmark dimming to the newly visible lines.
-      -- This avoids the up-front cost of dimming entries inside closed
-      -- folds (which is the vast majority on large trees).
-      if M.config.show_hidden then
-        local display_entries = vim.b[buf].filebuf_display_entries
-        if display_entries then
-          apply_hidden_extmarks(buf, display_entries, lnum, fold_end)
-        end
+      -- Lazily apply all extmark types (git, dir, hidden) to the newly
+      -- visible lines.  Uses cached display_entries and git status so
+      -- there is no redundant parse_buffer or git-status subprocess.
+      local display_entries = vim.b[buf].filebuf_display_entries
+      if display_entries then
+        apply_extmarks(buf, display_entries, { line_start = lnum, line_end = fold_end })
       end
     else
       vim.cmd("normal! zc")
@@ -1397,11 +1347,12 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   -- on the next :Filebuf.
   save_fold_state(buf, dir, buf_entries)
 
-  -- 4. Store display entries and refresh extmarks.
+  -- 4. Store display entries, cache git status, and refresh extmarks
+  --    in a single pass over visible lines.
   vim.b[buf].filebuf_display_entries = entries
-  apply_git_extmarks(buf, dir, buf_entries)
-  apply_hidden_extmarks(buf, entries)
-  apply_dir_extmarks(buf, entries)
+  local status_map = get_git_status_map(dir)
+  vim.b[buf].filebuf_git_status = status_map
+  apply_extmarks(buf, entries, { status_map = status_map })
 
   vim.bo[buf].modified = false
 
@@ -1641,28 +1592,18 @@ function M.open(dir)
     end
   end
 
-  -- Apply git-status extmarks after the buffer is fully populated.
-  -- Store display entries so handle_enter can lazily apply hidden
-  -- extmarks when directory folds are opened via <CR>.
+  -- Cache git status and apply all extmark types (git, dir, hidden)
+  -- in a single pass over visible lines.  display_entries are 1:1 with
+  -- buffer lines so handle_enter can lazily apply extmarks when a
+  -- directory fold is opened via <CR>.
+  local status_map = get_git_status_map(dir)
   vim.b[buf].filebuf_display_entries = display_entries
-  apply_git_extmarks(buf, dir, open_entries)
-  apply_hidden_extmarks(buf, display_entries)
-  apply_dir_extmarks(buf, display_entries)
+  vim.b[buf].filebuf_git_status = status_map
+  apply_extmarks(buf, display_entries, { status_map = status_map })
 
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
-
-  -- Re-apply extmarks whenever the user edits the buffer so that
-  -- stale indicators don't linger on deleted or moved lines.
-  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
-    group = group,
-    buffer = buf,
-    callback = function()
-      apply_git_extmarks(buf, dir)
-      apply_dir_extmarks(buf, parse_buffer(buf))
-    end,
-  })
 
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
