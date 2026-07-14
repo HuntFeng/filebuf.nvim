@@ -470,6 +470,179 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
   return result
 end
 
+----------------------------------------------------------------------
+-- fd-based scanner (fast path) — respects .gitignore/.ignore and skips
+-- hidden entries natively, so we never walk .git/node_modules/ignored
+-- trees.  Falls back to read_dir_recursive when fd is unavailable.
+----------------------------------------------------------------------
+
+--- Cached fd executable name ("fd" or "fdfind"); false when absent.
+local _fd_cmd
+local function fd_cmd()
+  if _fd_cmd == nil then
+    if vim.fn.executable("fd") == 1 then
+      _fd_cmd = "fd"
+    elseif vim.fn.executable("fdfind") == 1 then
+      _fd_cmd = "fdfind"
+    else
+      _fd_cmd = false
+    end
+  end
+  return _fd_cmd or nil
+end
+
+--- Run fd under `dir` with the given extra flags and return a list of
+--- full paths.  Trailing slashes (fd appends them to directories) are
+--- stripped so paths are uniform.  A list-form command avoids shell
+--- escaping.  systemlist() is used (newline-separated) rather than -0,
+--- because vim.fn.system() drops NUL bytes — matching the find fallback,
+--- which also splits on newlines (filenames containing newlines are not
+--- supported by either scanner).
+---@param dir   string
+---@param flags string[]
+---@return string[]
+local function fd_paths(dir, flags)
+  local cmd = { fd_cmd(), "--color", "never" }
+  vim.list_extend(cmd, flags)
+  cmd[#cmd + 1] = "." -- pattern: match every entry
+  cmd[#cmd + 1] = dir
+  local out = vim.fn.systemlist(cmd)
+  local paths = {}
+  if type(out) == "table" then
+    for _, p in ipairs(out) do
+      if p ~= "" then
+        if p:sub(-1) == "/" then p = p:sub(1, -2) end
+        paths[#paths + 1] = p
+      end
+    end
+  end
+  return paths
+end
+
+--- Sort a child list in place: dirs, then links, then files;
+--- case-insensitive alphabetical within each group.
+local ENTRY_PRIO = { dir = 1, link = 2, file = 3, error = 4 }
+local function sort_children(children)
+  if #children > 1 then
+    table.sort(children, function(a, b)
+      local pa = ENTRY_PRIO[a.type] or 5
+      local pb = ENTRY_PRIO[b.type] or 5
+      if pa ~= pb then return pa < pb end
+      return a.name:lower() < b.name:lower()
+    end)
+  end
+end
+
+--- Scan `dir` with fd, returning a flat DFS-ordered entry list with the
+--- same shape read_dir_recursive produces: { name, type, path, indent,
+--- is_hidden? }.  fd applies ignore/hidden rules itself, so no Lua-side
+--- ignore engine runs here.
+---@param dir         string
+---@param show_hidden boolean
+---@param visited?    table   realpath set for symlink cycle detection
+---@param depth?      number  starting indent (0 for the root call)
+---@return table[]
+local function scan_fd(dir, show_hidden, visited, depth)
+  _p_start("scan_fd")
+  visited = visited or {}
+  depth = depth or 0
+
+  local real = vim.loop.fs_realpath(dir) or dir
+  if visited[real] then
+    _p_end()
+    return {}
+  end
+  visited[real] = true
+
+  -- Flags: show_hidden reveals dotfiles + ignored (-H -I); otherwise
+  -- honour respect_ignore (only -I when the user disabled ignore).
+  local flags
+  if show_hidden then
+    flags = { "-H", "-I" }
+  elseif not M.config.respect_ignore then
+    flags = { "-I" }
+  else
+    flags = {}
+  end
+
+  -- Three typed passes give the type with no stat call.  The sets are
+  -- disjoint: fd does not follow symlinks, so a symlink-to-dir stays
+  -- type "l".
+  local by_parent = {}
+  local function add(path, type_label)
+    local parent, name = path:match("^(.*)/([^/]+)$")
+    if not parent then return end
+    local lst = by_parent[parent]
+    if not lst then
+      lst = {}
+      by_parent[parent] = lst
+    end
+    lst[#lst + 1] = { name = name, type = type_label, path = path }
+  end
+  local function typed(t)
+    local tf = {}
+    vim.list_extend(tf, flags)
+    tf[#tf + 1] = "-t"
+    tf[#tf + 1] = t
+    return tf
+  end
+  for _, p in ipairs(fd_paths(dir, typed("d"))) do add(p, "dir") end
+  for _, p in ipairs(fd_paths(dir, typed("f"))) do add(p, "file") end
+  for _, p in ipairs(fd_paths(dir, typed("l"))) do add(p, "link") end
+
+  for _, children in pairs(by_parent) do
+    sort_children(children)
+  end
+
+  -- When showing hidden entries, compute the "normally visible" set so
+  -- hidden ones can be dimmed.  Only needed in show_hidden mode.
+  local visible_set
+  if show_hidden then
+    visible_set = {}
+    local vflags = M.config.respect_ignore and {} or { "-I" }
+    for _, p in ipairs(fd_paths(dir, vflags)) do
+      visible_set[p] = true
+    end
+  end
+
+  local result = {}
+  local function emit(parent, d)
+    local children = by_parent[parent]
+    if not children then return end
+    for _, e in ipairs(children) do
+      e.indent = d
+      if visible_set and not visible_set[e.path] then
+        e.is_hidden = true
+      end
+      result[#result + 1] = e
+      if e.type == "dir" then
+        emit(e.path, d + 1)
+      elseif e.type == "link" then
+        -- fd does not descend symlinks; follow dir targets ourselves.
+        local lr = vim.loop.fs_realpath(e.path)
+        if lr and vim.fn.isdirectory(lr) == 1 and not visited[lr] then
+          vim.list_extend(result, scan_fd(lr, show_hidden, visited, d + 1))
+        end
+      end
+    end
+  end
+  emit(dir, depth)
+
+  _p_end()
+  return result
+end
+
+--- Dispatch to the fd scanner when available, else the find fallback.
+--- Both return the same flat entry-list shape.
+---@param dir string
+---@return table[]
+local function scan_tree(dir)
+  if fd_cmd() then
+    return scan_fd(dir, M.config.show_hidden)
+  end
+  return read_dir_recursive(dir)
+end
+
 --- Build the display line for an entry. Directories get a trailing slash.
 ---@param entry  table  { name, type, path, indent? }
 ---@return string
@@ -1099,21 +1272,44 @@ end
 local function apply_extmarks(buf, entries, opts)
   _p_start("apply_extmarks")
   opts = opts or {}
-  local line_start = opts.line_start or 1
-  local line_end = opts.line_end or #entries
-  local is_full = opts.line_start == nil -- full-buffer refresh
 
-  -- Clear all three namespaces for the target range
-  if is_full then
-    vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
-    vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
-    vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
+  -- Determine which buffer lines to (re)mark.  Callers may pass an
+  -- explicit `lines` list of the lines actually visible on screen — this
+  -- is required in the presence of folds, where a single closed fold
+  -- collapses many buffer lines into one screen line, so the visible set
+  -- is not a contiguous range.  Otherwise fall back to the contiguous
+  -- [line_start, line_end] range.
+  local lines = opts.lines
+  local clear_start, clear_end
+  if lines then
+    if #lines == 0 then
+      _p_end()
+      return
+    end
+    clear_start = lines[1] - 1
+    clear_end = lines[#lines]
   else
-    local clear_start = line_start - 1
-    vim.api.nvim_buf_clear_namespace(buf, git_ns, clear_start, line_end)
-    vim.api.nvim_buf_clear_namespace(buf, dir_ns, clear_start, line_end)
-    vim.api.nvim_buf_clear_namespace(buf, hidden_ns, clear_start, line_end)
+    local line_start = opts.line_start or 1
+    local line_end = math.min(opts.line_end or #entries, #entries)
+    if line_end < line_start then
+      _p_end()
+      return
+    end
+    lines = {}
+    for l = line_start, line_end do
+      lines[#lines + 1] = l
+    end
+    clear_start = line_start - 1
+    clear_end = line_end
   end
+
+  -- Clear the enclosing range, then re-mark only the visible lines.
+  -- Callers apply marks to the visible viewport only (see
+  -- refresh_viewport_extmarks), so this stays O(screen) regardless of
+  -- how large the buffer is.
+  vim.api.nvim_buf_clear_namespace(buf, git_ns, clear_start, clear_end)
+  vim.api.nvim_buf_clear_namespace(buf, dir_ns, clear_start, clear_end)
+  vim.api.nvim_buf_clear_namespace(buf, hidden_ns, clear_start, clear_end)
 
   -- Resolve git status map: explicit > cached > nil
   local status_map = opts.status_map
@@ -1126,73 +1322,113 @@ local function apply_extmarks(buf, entries, opts)
   local use_tabs = not vim.go.expandtab
   local iw = indent_width()
 
-  -- Build visible-line set using foldclosedend() jumps, so we skip
-  -- entire closed-fold regions in one step.
-  local visible = {}
-  local lnum = line_start
-  while lnum <= line_end do
+  -- Single pass over the range: apply dir, hidden, and git extmarks.
+  -- Priorities: dir (10) > hidden (5) > git (0).  This preserves the
+  -- existing behaviour where Directory highlight wins over dimming, and
+  -- dimming wins over git-status coloring.
+  for _, lnum in ipairs(lines) do
+    local entry = entries[lnum]
+    if not entry then goto continue end
+
+    local name_start = use_tabs and entry.indent or (entry.indent * iw)
+    local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
+    local name_end = name_start + #entry.name + suffix
+
+    -- Directory (priority 10 — highest)
+    if entry.type == "dir" then
+      vim.api.nvim_buf_set_extmark(buf, dir_ns, lnum - 1, name_start, {
+        end_col = name_end,
+        hl_group = "Directory",
+        priority = 10,
+      })
+    end
+
+    -- Hidden / dimmed (priority 5 — overrides git color, under dir)
+    if show_hidden and entry.is_hidden then
+      local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
+      vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
+        end_col = name_end,
+        hl_group = hl,
+        priority = 5,
+      })
+    end
+
+    -- Git status (priority 0 — lowest; dirs get virt_text only, no name color)
+    if status_map then
+      local char, hl = get_entry_git_status(entry, status_map)
+      if char then
+        local extmark_opts = {
+          virt_text = { { " " .. char, hl } },
+          priority = 0,
+        }
+        if entry.type ~= "dir" then
+          extmark_opts.end_col = name_end
+          extmark_opts.hl_group = hl
+        end
+        vim.api.nvim_buf_set_extmark(buf, git_ns, lnum - 1, name_start, extmark_opts)
+      end
+    end
+
+    ::continue::
+  end
+
+  _p_end()
+end
+
+--- Remove all filebuf extmarks from the buffer (used before a full
+--- rebuild; per-viewport refreshes only clear their own range).
+---@param buf number
+local function clear_extmarks(buf)
+  vim.api.nvim_buf_clear_namespace(buf, git_ns, 0, -1)
+  vim.api.nvim_buf_clear_namespace(buf, dir_ns, 0, -1)
+  vim.api.nvim_buf_clear_namespace(buf, hidden_ns, 0, -1)
+end
+
+--- Apply extmarks to just the lines currently visible in the window
+--- showing `buf`.  This keeps highlighting O(screen) no matter how many
+--- lines the buffer has — essential when show_hidden reveals huge trees
+--- (.git objects, node_modules).  Driven on render, on fold toggle, and
+--- on WinScrolled (which fires when `/` search scrolls to a match).
+---@param buf    number
+---@param winid? number  window to measure (defaults to the buffer's window)
+local function refresh_viewport_extmarks(buf, winid)
+  local entries = vim.b[buf].filebuf_display_entries
+  if not entries then return end
+  winid = winid or vim.fn.bufwinid(buf)
+  if winid == -1 then return end
+
+  local top = vim.fn.line("w0", winid)
+  local bot = vim.fn.line("w$", winid)
+  if top < 1 then top = 1 end
+  if bot > #entries then bot = #entries end
+  if bot < top then return end
+
+  -- Collect the buffer lines actually displayed on screen.  Because a
+  -- closed fold collapses arbitrarily many buffer lines into a single
+  -- screen line, the buffer-line span [top, bot] can be far larger than
+  -- one window-height — the old contiguous clamp truncated `bot` and left
+  -- the genuinely-visible lines below a fold unhighlighted.  Instead, walk
+  -- the range and skip over the interior of every closed fold (only its
+  -- first line is displayed), so we mark exactly the lines the user sees.
+  --
+  -- foldclosedend() reads the current window's fold state; refresh is
+  -- always driven from the window showing `buf`, matching the assumption
+  -- already made by save_fold_state / refresh_buffer.
+  local height = vim.api.nvim_win_get_height(winid)
+  local lines = {}
+  local lnum = top
+  -- Cap at one window-height of visible lines so cost stays O(screen).
+  while lnum <= bot and #lines <= height + 2 do
+    lines[#lines + 1] = lnum
     local fold_end = vim.fn.foldclosedend(lnum)
     if fold_end ~= -1 then
-      lnum = math.max(lnum + 1, fold_end + 1)
+      lnum = fold_end + 1
     else
-      visible[lnum] = true
       lnum = lnum + 1
     end
   end
 
-  -- Single pass over visible lines: apply dir, hidden, and git extmarks.
-  -- Priorities: dir (10) > hidden (5) > git (0).  This preserves the
-  -- existing behaviour where Directory highlight wins over dimming, and
-  -- dimming wins over git-status coloring.
-  for lnum = line_start, line_end do
-    if visible[lnum] then
-      local entry = entries[lnum]
-      if not entry then goto continue end
-
-      local name_start = use_tabs and entry.indent or (entry.indent * iw)
-      local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
-      local name_end = name_start + #entry.name + suffix
-
-      -- Directory (priority 10 — highest)
-      if entry.type == "dir" then
-        vim.api.nvim_buf_set_extmark(buf, dir_ns, lnum - 1, name_start, {
-          end_col = name_end,
-          hl_group = "Directory",
-          priority = 10,
-        })
-      end
-
-      -- Hidden / dimmed (priority 5 — overrides git color, under dir)
-      if show_hidden and entry.is_hidden then
-        local hl = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile"
-        vim.api.nvim_buf_set_extmark(buf, hidden_ns, lnum - 1, name_start, {
-          end_col = name_end,
-          hl_group = hl,
-          priority = 5,
-        })
-      end
-
-      -- Git status (priority 0 — lowest; dirs get virt_text only, no name color)
-      if status_map then
-        local char, hl = get_entry_git_status(entry, status_map)
-        if char then
-          local extmark_opts = {
-            virt_text = { { " " .. char, hl } },
-            priority = 0,
-          }
-          if entry.type ~= "dir" then
-            extmark_opts.end_col = name_end
-            extmark_opts.hl_group = hl
-          end
-          vim.api.nvim_buf_set_extmark(buf, git_ns, lnum - 1, name_start, extmark_opts)
-        end
-      end
-
-      ::continue::
-    end
-  end
-
-  _p_end()
+  apply_extmarks(buf, entries, { lines = lines })
 end
 
 local function define_hidden_highlights()
@@ -1248,7 +1484,9 @@ end
 ---@param entries? table[] pre-parsed buffer entries (avoids redundant parse)
 local function save_fold_state(buf, root, entries)
   M._fold_closed[root] = {}
-  entries = entries or parse_buffer(buf)
+  -- Use the cached display entries (1:1 with buffer lines, each carrying
+  -- lnum) — no need to re-parse the buffer text for a read-only scan.
+  entries = entries or vim.b[buf].filebuf_display_entries or {}
   for _, e in ipairs(entries) do
     if e.type == "dir" and vim.fn.foldclosed(e.lnum) ~= -1 then
       M._fold_closed[root][e.path] = true
@@ -1260,30 +1498,22 @@ end
 local function handle_enter(buf)
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
 
-  -- Parse the buffer on demand to resolve the entry at the cursor.
-  local entries = parse_buffer(buf)
-  local entry = nil
-  for _, e in ipairs(entries) do
-    if e.lnum == lnum then
-      entry = e
-      break
-    end
-  end
+  -- Resolve the entry at the cursor from the cached display entries
+  -- (1:1 with buffer lines) — no need to re-parse the buffer text.
+  local entries = vim.b[buf].filebuf_display_entries
+  local entry = entries and entries[lnum]
   if not entry then return end
 
   if entry.type == "dir" then
-    -- Toggle the indent-based fold at this line.
+    -- Toggle the indent-based fold at this line.  Extmarks already cover
+    -- every line (see apply_extmarks), so no lazy re-application is needed
+    -- when the fold opens.
     vim.api.nvim_win_set_cursor(0, { lnum, 0 })
     local fold_end = vim.fn.foldclosedend(lnum)
     if fold_end ~= -1 then
       vim.cmd("normal! zo")
-      -- Lazily apply all extmark types (git, dir, hidden) to the newly
-      -- visible lines.  Uses cached display_entries and git status so
-      -- there is no redundant parse_buffer or git-status subprocess.
-      local display_entries = vim.b[buf].filebuf_display_entries
-      if display_entries then
-        apply_extmarks(buf, display_entries, { line_start = lnum, line_end = fold_end })
-      end
+      -- Colour the lines the fold just revealed in the viewport.
+      refresh_viewport_extmarks(buf)
     else
       vim.cmd("normal! zc")
     end
@@ -1319,6 +1549,13 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   local dir = vim.b[buf].filebuf_root
   if not dir then return end
 
+  -- The entries are 1:1 with buffer lines; stamp each with its line
+  -- number so folds, fold-state, and extmarks can use them directly
+  -- without a redundant parse_buffer pass.
+  for i, entry in ipairs(entries) do
+    entry.lnum = i
+  end
+
   -- 1. Rebuild buffer lines from entries
   local fresh_lines = {}
   for _, entry in ipairs(entries) do
@@ -1326,16 +1563,16 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   end
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, fresh_lines)
 
-  -- 2. Parse once, then reuse for folds, open-dir restoration, and extmarks.
-  local buf_entries = parse_buffer(buf)
-  vim.b[buf].filebuf_buf_entries = buf_entries
+  -- 2. Cache the entries so read-only navigation reuses them.
+  vim.b[buf].filebuf_buf_entries = entries
+  vim.b[buf].filebuf_display_entries = entries
 
   -- 3. Rebuild folds — create_folds produces closed folds for every
   --    directory.  Then re-open only the directories that were open
   --    before the refresh.
   vim.cmd("silent! normal! zE")
-  create_folds(buf, buf_entries)
-  for _, e in ipairs(buf_entries) do
+  create_folds(buf, entries)
+  for _, e in ipairs(entries) do
     if e.type == "dir" and open_dirs and open_dirs[e.path] then
       vim.cmd(string.format("silent! %dfoldopen", e.lnum))
     end
@@ -1345,14 +1582,13 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
   -- otherwise newly-revealed directories (e.g. hidden dirs after
   -- a toggle) are missing from the closed set and would all open
   -- on the next :Filebuf.
-  save_fold_state(buf, dir, buf_entries)
+  save_fold_state(buf, dir, entries)
 
-  -- 4. Store display entries, cache git status, and refresh extmarks
-  --    in a single pass over visible lines.
-  vim.b[buf].filebuf_display_entries = entries
+  -- 4. Cache git status and apply extmarks to the visible viewport only.
   local status_map = get_git_status_map(dir)
   vim.b[buf].filebuf_git_status = status_map
-  apply_extmarks(buf, entries, { status_map = status_map })
+  clear_extmarks(buf)
+  refresh_viewport_extmarks(buf)
 
   vim.bo[buf].modified = false
 
@@ -1374,7 +1610,7 @@ local function refresh_buffer(buf)
   --    persists the closed set so fold preferences survive buffer close.
   save_fold_state(buf, dir)
   local open_dirs = {}
-  local pre_entries = parse_buffer(buf)
+  local pre_entries = vim.b[buf].filebuf_display_entries or {}
   for _, e in ipairs(pre_entries) do
     if e.type == "dir" and vim.fn.foldclosed(e.lnum) == -1 then
       open_dirs[e.path] = true
@@ -1382,8 +1618,9 @@ local function refresh_buffer(buf)
   end
 
   -- 2. Re-read the tree from disk (all entries, unfiltered) and cache it.
-  local all_entries = read_dir_recursive(dir)
+  local all_entries = scan_tree(dir)
   vim.b[buf].filebuf_all_entries = all_entries
+  vim.b[buf].filebuf_has_hidden = M.config.show_hidden
 
   -- 3. Filter for display and rebuild the buffer.
   rebuild_buffer_display(buf, filter_visible(all_entries), open_dirs)
@@ -1409,14 +1646,8 @@ local function toggle_hidden(buf)
   -- Capture the entry under the cursor before refreshing so we can
   -- restore the cursor to the same entry after the toggle.
   local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
-  local cursor_entry_path = nil
-  local pre_entries = parse_buffer(buf)
-  for _, e in ipairs(pre_entries) do
-    if e.lnum == cursor_lnum then
-      cursor_entry_path = e.path
-      break
-    end
-  end
+  local pre_entries = vim.b[buf].filebuf_display_entries or {}
+  local cursor_entry_path = pre_entries[cursor_lnum] and pre_entries[cursor_lnum].path
 
   -- Capture which directories are currently open so we can restore
   -- the same state after the toggle.
@@ -1431,15 +1662,22 @@ local function toggle_hidden(buf)
 
   M.config.show_hidden = not M.config.show_hidden
 
-  -- Re-filter from cached in-memory entries (no filesystem I/O).
-  -- Fall back to a full disk refresh if the cache is missing (should
-  -- not happen in normal operation, but guards against edge cases).
+  -- Decide whether we can re-filter the cached list in memory or must
+  -- re-scan.  filter_visible(full_set) yields the correct view for
+  -- either state (it drops hidden entries when show_hidden is false), so:
+  --   * hiding            → always re-filter the cache (no scan)
+  --   * showing, cache has hidden already → re-filter (no scan)
+  --   * showing, cache lacks hidden       → scan once with -H -I, then cache
+  -- The heavy hidden scan (which includes .git objects etc.) therefore
+  -- runs at most once, not on every toggle.
   local all_entries = vim.b[buf].filebuf_all_entries
-  if all_entries then
-    rebuild_buffer_display(buf, filter_visible(all_entries), open_dirs)
-  else
-    refresh_buffer(buf)
+  if M.config.show_hidden and not vim.b[buf].filebuf_has_hidden then
+    all_entries = scan_tree(dir)
+    vim.b[buf].filebuf_all_entries = all_entries
+    vim.b[buf].filebuf_has_hidden = true
   end
+  all_entries = all_entries or scan_tree(dir)
+  rebuild_buffer_display(buf, filter_visible(all_entries), open_dirs)
 
   -- Re-locate the same entry in the refreshed buffer and move the
   -- cursor to its new line.  This naturally accounts for any entries
@@ -1504,9 +1742,17 @@ function M.open(dir)
   -- Populate the buffer with the full recursive tree.
   -- Cache the unfiltered list so toggle_hidden() can re-filter
   -- from memory instead of re-walking the filesystem.
-  local all_entries = read_dir_recursive(dir)
+  local all_entries = scan_tree(dir)
   vim.b[buf].filebuf_all_entries = all_entries
+  -- Track whether the cached list already contains hidden entries, so
+  -- toggle_hidden knows if it can re-filter from memory or must re-scan.
+  vim.b[buf].filebuf_has_hidden = M.config.show_hidden
   local display_entries = filter_visible(all_entries)
+  -- Entries are 1:1 with buffer lines; stamp line numbers so all
+  -- subsequent read-only navigation reuses them without re-parsing.
+  for i, e in ipairs(display_entries) do
+    e.lnum = i
+  end
   if #display_entries > 0 then
     insert_entries(buf, display_entries, 0)
   end
@@ -1530,8 +1776,9 @@ function M.open(dir)
   local fc = vim.wo.fillchars or ""
   vim.wo.fillchars = fc .. "foldopen:▼,foldclose:▶,fold: "
 
-  -- Parse once and reuse for create_folds and fold-state restoration.
-  local open_entries = parse_buffer(buf)
+  -- Reuse the 1:1 display entries (already carrying lnum) for
+  -- create_folds and fold-state restoration — no parse needed.
+  local open_entries = display_entries
   create_folds(buf, open_entries)
 
   -- Restore saved fold state, or close everything on first open.
@@ -1557,7 +1804,7 @@ function M.open(dir)
     and vim.startswith(current_file, dir .. "/")
   then
     local target = vim.fn.resolve(current_file)
-    local focus_entries = parse_buffer(buf)
+    local focus_entries = display_entries
     local target_lnum, target_indent = nil, nil
     for _, e in ipairs(focus_entries) do
       if vim.fn.resolve(e.path) == target then
@@ -1592,18 +1839,28 @@ function M.open(dir)
     end
   end
 
-  -- Cache git status and apply all extmark types (git, dir, hidden)
-  -- in a single pass over visible lines.  display_entries are 1:1 with
-  -- buffer lines so handle_enter can lazily apply extmarks when a
-  -- directory fold is opened via <CR>.
+  -- Cache git status and apply extmarks to the visible viewport only.
+  -- display_entries are 1:1 with buffer lines, so read-only navigation
+  -- (handle_enter, fold state) reuses them directly.
   local status_map = get_git_status_map(dir)
   vim.b[buf].filebuf_display_entries = display_entries
   vim.b[buf].filebuf_git_status = status_map
-  apply_extmarks(buf, display_entries, { status_map = status_map })
+  clear_extmarks(buf)
+  refresh_viewport_extmarks(buf)
 
   -- BufWriteCmd parses the buffer, diffs against the filesystem,
   -- validates, and applies changes.
   local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
+
+  -- Re-colour the viewport when the view scrolls — notably when `/`
+  -- search jumps to (and opens a fold onto) a match deep in the tree.
+  vim.api.nvim_create_autocmd("BufModifiedSet", {
+    group = group,
+    buffer = buf,
+    callback = function()
+      refresh_viewport_extmarks(buf)
+    end,
+  })
 
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     group = group,
@@ -1616,7 +1873,7 @@ function M.open(dir)
         -- 2. Use cached in-memory entries as the baseline disk state
         --    when available (avoids a redundant find call).  Falls
         --    back to a fresh read if the cache is missing.
-        local all_disk_entries = vim.b[buf].filebuf_all_entries or read_dir_recursive(dir)
+        local all_disk_entries = vim.b[buf].filebuf_all_entries or scan_tree(dir)
         -- Only consider entries that are visible in the buffer, so
         -- hidden files on disk don't appear as "deleted".
         local disk_entries = filter_visible(all_disk_entries)
