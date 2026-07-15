@@ -1449,7 +1449,6 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
             end_col = -1
 					}
 					if entry.type ~= "dir" then
-						-- extmark_opts.end_col = name_end
 						extmark_opts.hl_group = hl
 					end
 					vim.api.nvim_buf_set_extmark(bufnr, deco_ns, lnum - 1, name_start, extmark_opts)
@@ -1976,12 +1975,6 @@ function M.setup(opts)
 	vim.api.nvim_set_decoration_provider(deco_ns, {
 		on_start = deco_on_start,
 		on_win = deco_on_win,
-    on_range = function(_, winid, bufnr, start_row, start_col, end_row, end_col)
-      vim.print("on_range")
-      -- vim.print("winid: ", winid, "bufnr", bufnr)
-      -- vim.print("start_row", start_row, "start_col", start_col)
-      -- vim.print("end_row", end_row, "end_col", end_col)
-    end
 	})
 
 	vim.api.nvim_create_user_command("Filebuf", function()
