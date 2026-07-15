@@ -1366,14 +1366,40 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 		return false
 	end
 
-	local entries = vim.b[bufnr].filebuf_display_entries
+	-- Resolve entries for visible lines.  Normally the cached
+	-- display list (1:1 with buffer lines) is reused, but when
+	-- the buffer has been edited the cache is stale — a re-parse
+	-- of the buffer text produces a fresh lnum→entry map instead.
+	-- is_hidden is recovered from the full-entry cache so dimming
+	-- still works during edits.
+	local entries
+	if vim.bo[bufnr].modified then
+		local parsed = parse_buffer(bufnr)
+		entries = {}
+		for _, e in ipairs(parsed) do
+			entries[e.lnum] = e
+		end
+		-- Recover is_hidden from the full-entry cache (not in buffer text).
+		local all = vim.b[bufnr].filebuf_all_entries
+		if all then
+			local by_path = {}
+			for _, e in ipairs(all) do
+				by_path[e.path] = e
+			end
+			for _, e in pairs(entries) do
+				local cached = by_path[e.path]
+				if cached then
+					e.is_hidden = cached.is_hidden
+				end
+			end
+		end
+	else
+		entries = vim.b[bufnr].filebuf_display_entries
+	end
 	if not entries then
 		return false
 	end
 
-	-- Compute visible buffer lines (fold-aware).  We derive the range
-	-- from the window viewport rather than using toprow/botrow because
-	-- those are screen-grid positions and don't account for folds.
 
 	-- Pre-compute helpers reused across every visible line.
 	local height = vim.api.nvim_win_get_height(winid)
@@ -1382,9 +1408,9 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 	local status_map = M.config.git_status and vim.b[bufnr].filebuf_git_status or nil
 
 	-- Walk visible buffer lines, skipping the interior of closed folds.
-	local lnum = toprow
+	local lnum = toprow + 1  -- toprow is 0-indexed, entries is 1-indexed
 	local count = 0
-	while lnum <= botrow and count <= height + 2 do
+	while lnum <= botrow + 1 and count <= height + 2 do
 		local entry = entries[lnum]
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
