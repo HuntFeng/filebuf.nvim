@@ -1374,17 +1374,6 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 	-- Compute visible buffer lines (fold-aware).  We derive the range
 	-- from the window viewport rather than using toprow/botrow because
 	-- those are screen-grid positions and don't account for folds.
-	local top = vim.fn.line("w0", winid)
-	local bot = vim.fn.line("w$", winid)
-	if top < 1 then
-		top = 1
-	end
-	if bot > #entries then
-		bot = #entries
-	end
-	if bot < top then
-		return false
-	end
 
 	-- Pre-compute helpers reused across every visible line.
 	local height = vim.api.nvim_win_get_height(winid)
@@ -1393,9 +1382,9 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 	local status_map = M.config.git_status and vim.b[bufnr].filebuf_git_status or nil
 
 	-- Walk visible buffer lines, skipping the interior of closed folds.
-	local lnum = top
+	local lnum = toprow
 	local count = 0
-	while lnum <= bot and count <= height + 2 do
+	while lnum <= botrow and count <= height + 2 do
 		local entry = entries[lnum]
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
@@ -1431,9 +1420,10 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 						virt_text = { { " " .. char, hl } },
 						priority = 0,
 						ephemeral = true,
+            end_col = -1
 					}
 					if entry.type ~= "dir" then
-						extmark_opts.end_col = name_end
+						-- extmark_opts.end_col = name_end
 						extmark_opts.hl_group = hl
 					end
 					vim.api.nvim_buf_set_extmark(bufnr, deco_ns, lnum - 1, name_start, extmark_opts)
@@ -1960,6 +1950,12 @@ function M.setup(opts)
 	vim.api.nvim_set_decoration_provider(deco_ns, {
 		on_start = deco_on_start,
 		on_win = deco_on_win,
+    on_range = function(_, winid, bufnr, start_row, start_col, end_row, end_col)
+      vim.print("on_range")
+      -- vim.print("winid: ", winid, "bufnr", bufnr)
+      -- vim.print("start_row", start_row, "start_col", start_col)
+      -- vim.print("end_row", end_row, "end_col", end_col)
+    end
 	})
 
 	vim.api.nvim_create_user_command("Filebuf", function()
