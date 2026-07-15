@@ -316,7 +316,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
 		vim.fn.shellescape(dir),
 		find_depth
 	)
-	local output = vim.fn.system(cmd)
+	local lines = vim.fn.systemlist(cmd)
 	_p_end() -- read_dir
 
 	_p_start("parse_find_output")
@@ -325,7 +325,7 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
 	-- path decomposition is needed per entry.
 	local by_parent = {} -- parent_path → { entry, ... }
 	local TYPE_MAP = { d = "dir", l = "link", f = "file" }
-	for line in output:gmatch("[^\r\n]+") do
+	for _, line in ipairs(lines) do
 		local type_char, parent, name = line:match("^(.)\t(.+)\t(.+)$")
 		if type_char and parent and name then
 			local type_label = TYPE_MAP[type_char]
@@ -535,36 +535,6 @@ local function fd_cmd()
 	return _fd_cmd or nil
 end
 
---- Run fd under `dir` with the given extra flags and return a list of
---- full paths.  Trailing slashes (fd appends them to directories) are
---- stripped so paths are uniform.  A list-form command avoids shell
---- escaping.  systemlist() is used (newline-separated) rather than -0,
---- because vim.fn.system() drops NUL bytes — matching the find fallback,
---- which also splits on newlines (filenames containing newlines are not
---- supported by either scanner).
----@param dir   string
----@param flags string[]
----@return string[]
-local function fd_paths(dir, flags)
-	local cmd = { fd_cmd(), "--color", "never" }
-	vim.list_extend(cmd, flags)
-	cmd[#cmd + 1] = "." -- pattern: match every entry
-	cmd[#cmd + 1] = dir
-	local out = vim.fn.systemlist(cmd)
-	local paths = {}
-	if type(out) == "table" then
-		for _, p in ipairs(out) do
-			if p ~= "" then
-				if p:sub(-1) == "/" then
-					p = p:sub(1, -2)
-				end
-				paths[#paths + 1] = p
-			end
-		end
-	end
-	return paths
-end
-
 --- Sort a child list in place: dirs, then links, then files;
 --- case-insensitive alphabetical within each group.
 local ENTRY_PRIO = { dir = 1, link = 2, file = 3, error = 4 }
@@ -583,8 +553,9 @@ end
 
 --- Scan `dir` with fd, returning a flat DFS-ordered entry list with the
 --- same shape read_dir_recursive produces: { name, type, path, indent,
---- is_hidden? }.  fd applies ignore/hidden rules itself, so no Lua-side
---- ignore engine runs here.
+--- is_hidden? }.  fd natively skips .git/ contents and respects
+--- .gitignore/.ignore, so we never traverse giant ignored subtrees.
+--- A single fd pass replaces the old find + fd dual scan.
 ---@param dir         string
 ---@param show_hidden boolean
 ---@param visited?    table   realpath set for symlink cycle detection
@@ -602,65 +573,102 @@ local function scan_fd(dir, show_hidden, visited, depth)
 	end
 	visited[real] = true
 
-	-- Flags: show_hidden reveals dotfiles + ignored (-H -I); otherwise
-	-- honour respect_ignore (only -I when the user disabled ignore).
-	local flags
+	-- Build fd flags.  fd natively skips .git/ contents (hardcoded ignore).
+	-- -H includes hidden (dot) files and directories.
+	-- -I disables .gitignore/.ignore filtering — needed when show_hidden is
+	--    true (so .venv/, node_modules/ etc. appear as dimmed entries) or
+	--    when the user has set respect_ignore = false.
+	local fd_flags = { "--color", "never" }
 	if show_hidden then
-		flags = { "-H", "-I" }
-	elseif not M.config.respect_ignore then
-		flags = { "-I" }
-	else
-		flags = {}
+		fd_flags[#fd_flags + 1] = "-H"
+	end
+	if show_hidden or not M.config.respect_ignore then
+		fd_flags[#fd_flags + 1] = "-I"
 	end
 
-	-- Three typed passes give the type with no stat call.  The sets are
-	-- disjoint: fd does not follow symlinks, so a symlink-to-dir stays
-	-- type "l".
+	-- Main scan: get all entries.  fd appends "/" to directories so
+	-- we can infer type without a separate stat call.
+	_p_start("fd_scan")
+	local main_cmd = { fd_cmd() }
+	vim.list_extend(main_cmd, fd_flags)
+	main_cmd[#main_cmd + 1] = "."
+	main_cmd[#main_cmd + 1] = dir
+	local fd_out = vim.fn.systemlist(main_cmd)
+	_p_end() -- fd_scan
+
+	-- Symlink scan: fd -t l lists only symlinks.  We build a set so
+	-- emit() can tag them as type "link" and follow dir targets.
+	_p_start("fd_scan_links")
+	local symlink_set = {}
+	local link_cmd = { fd_cmd() }
+	vim.list_extend(link_cmd, fd_flags)
+	link_cmd[#link_cmd + 1] = "-t"
+	link_cmd[#link_cmd + 1] = "l"
+	link_cmd[#link_cmd + 1] = "."
+	link_cmd[#link_cmd + 1] = dir
+	local link_out = vim.fn.systemlist(link_cmd)
+	if type(link_out) == "table" then
+		for _, p in ipairs(link_out) do
+			if p ~= "" then
+				if p:sub(-1) == "/" then
+					p = p:sub(1, -2)
+				end
+				symlink_set[p] = true
+			end
+		end
+	end
+	_p_end() -- fd_scan_links
+
+	_p_start("parse_fd_output")
 	local by_parent = {}
-	local function add(path, type_label)
-		local parent, name = path:match("^(.*)/([^/]+)$")
-		if not parent then
-			return
-		end
-		local lst = by_parent[parent]
-		if not lst then
-			lst = {}
-			by_parent[parent] = lst
-		end
-		lst[#lst + 1] = { name = name, type = type_label, path = path }
-	end
-	local function typed(t)
-		local tf = {}
-		vim.list_extend(tf, flags)
-		tf[#tf + 1] = "-t"
-		tf[#tf + 1] = t
-		return tf
-	end
-	for _, p in ipairs(fd_paths(dir, typed("d"))) do
-		add(p, "dir")
-	end
-	for _, p in ipairs(fd_paths(dir, typed("f"))) do
-		add(p, "file")
-	end
-	for _, p in ipairs(fd_paths(dir, typed("l"))) do
-		add(p, "link")
-	end
+	if type(fd_out) == "table" then
+		for _, raw in ipairs(fd_out) do
+			if raw == "" then
+				goto next_entry
+			end
+			local is_dir = raw:sub(-1) == "/"
+			local full = is_dir and raw:sub(1, -2) or raw
 
+			-- Infer type: symlink set wins, else dir by trailing /, else file.
+			local etype
+			if symlink_set[full] then
+				etype = "link"
+			elseif is_dir then
+				etype = "dir"
+			else
+				etype = "file"
+			end
+
+			-- Split full path into parent dir and basename.
+			-- e.g. /root/src/main.lua -> parent=/root/src, name=main.lua
+			local parent, name = full:match("^(.*)/(.+)$")
+			if not parent then
+				parent = dir
+				name = full
+			end
+
+			local lst = by_parent[parent]
+			if not lst then
+				lst = {}
+				by_parent[parent] = lst
+			end
+			lst[#lst + 1] = { name = name, type = etype, path = full }
+			::next_entry::
+		end
+	end
+	_p_end() -- parse_fd_output
+
+	_p_start("sort_children")
 	for _, children in pairs(by_parent) do
 		sort_children(children)
 	end
+	_p_end() -- sort_children
 
-	-- When showing hidden entries, compute the "normally visible" set so
-	-- hidden ones can be dimmed.  Only needed in show_hidden mode.
-	local visible_set
-	if show_hidden then
-		visible_set = {}
-		local vflags = M.config.respect_ignore and {} or { "-I" }
-		for _, p in ipairs(fd_paths(dir, vflags)) do
-			visible_set[p] = true
-		end
-	end
-
+	-- Tag hidden entries: an entry is hidden when its name starts with
+	-- ".".  Since fd already filters gitignored entries (when
+	-- respect_ignore is true), no per-entry ignore-pattern matching is
+	-- needed here.  No second fd call -- the old visible_set approach is
+	-- gone.
 	local result = {}
 	local function emit(parent, d)
 		local children = by_parent[parent]
@@ -669,14 +677,13 @@ local function scan_fd(dir, show_hidden, visited, depth)
 		end
 		for _, e in ipairs(children) do
 			e.indent = d
-			if visible_set and not visible_set[e.path] then
+			if show_hidden and e.name:sub(1, 1) == "." then
 				e.is_hidden = true
 			end
 			result[#result + 1] = e
 			if e.type == "dir" then
 				emit(e.path, d + 1)
 			elseif e.type == "link" then
-				-- fd does not descend symlinks; follow dir targets ourselves.
 				local lr = vim.loop.fs_realpath(e.path)
 				if lr and vim.fn.isdirectory(lr) == 1 and not visited[lr] then
 					vim.list_extend(result, scan_fd(lr, show_hidden, visited, d + 1))
@@ -762,48 +769,65 @@ local function parse_buffer(buf)
 
 		local indent = indent_level(line)
 
-		-- Split name on "/" so that "dir/subfile" expands into a synthetic
-		-- dir entry and a child entry.  Intermediate segments are always
-		-- directories; only the final segment inherits the trailing-slash
-		-- flag from the line.
-		local name_parts = {}
-		for part in name:gmatch("[^/]+") do
-			table.insert(name_parts, part)
-		end
-		if #name_parts == 0 then
-			goto continue
-		end
-
-		for i, part in ipairs(name_parts) do
-			-- Only the last segment keeps the original is_dir flag;
-			-- intermediate segments are always directories.
-			local part_is_dir = (i < #name_parts) or is_dir
-			-- First segment keeps the line's original indent; subsequent
-			-- segments nest one level deeper.
-			local part_indent = indent + (i - 1)
-
-			-- Pop entries that are at or deeper than the current indent.
-			while #stack > 0 and stack[#stack].indent >= part_indent do
+		-- Fast path: most entries have no "/" in their name.
+		-- Avoid the gmatch split and multi-part loop for the common case.
+		if not name:find("/", 1, true) then
+			while #stack > 0 and stack[#stack].indent >= indent do
 				table.remove(stack)
 			end
 
 			local parent = #stack > 0 and stack[#stack].path or root
-			local part_path = parent .. "/" .. part
+			local part_path = parent .. "/" .. name
 
-			if part_is_dir then
-				table.insert(stack, { indent = part_indent, path = part_path })
+			if is_dir then
+				table.insert(stack, { indent = indent, path = part_path })
 			end
 
 			table.insert(entries, {
-				name = part,
-				type = part_is_dir and "dir" or "file",
+				name = name,
+				type = is_dir and "dir" or "file",
 				path = part_path,
-				indent = part_indent,
+				indent = indent,
 				lnum = lnum,
 			})
-		end
+		else
+			-- Split name on "/" so that "dir/subfile" expands into a synthetic
+			-- dir entry and a child entry.  Intermediate segments are always
+			-- directories; only the final segment inherits the trailing-slash
+			-- flag from the line.
+			local name_parts = {}
+			for part in name:gmatch("[^/]+") do
+				name_parts[#name_parts + 1] = part
+			end
+			if #name_parts == 0 then
+				goto continue
+			end
 
-		::continue::
+			for i, part in ipairs(name_parts) do
+				local part_is_dir = (i < #name_parts) or is_dir
+				local part_indent = indent + (i - 1)
+
+				while #stack > 0 and stack[#stack].indent >= part_indent do
+					table.remove(stack)
+				end
+
+				local parent = #stack > 0 and stack[#stack].path or root
+				local part_path = parent .. "/" .. part
+
+				if part_is_dir then
+					table.insert(stack, { indent = part_indent, path = part_path })
+				end
+
+				table.insert(entries, {
+					name = part,
+					type = part_is_dir and "dir" or "file",
+					path = part_path,
+					indent = part_indent,
+					lnum = lnum,
+				})
+			end
+		end
+	::continue::
 	end
 
 	_p_end()
