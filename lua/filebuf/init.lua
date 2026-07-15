@@ -280,22 +280,14 @@ end
 ---@param dir string
 ---@param max_depth number|nil
 ---@param current_depth number
----@param visited table|nil  set of real paths already visited (cycle detection)
+--- Symlinks are never followed — they appear as atomic entries (type "link").
 ---@param ancestor_patterns? table[]  { raw, source_dir } patterns from parents
 ---@return table[]  list of { name, type, path, indent, is_hidden? }
-local function read_dir_recursive(dir, max_depth, current_depth, visited, ancestor_patterns)
+local function read_dir_recursive(dir, max_depth, current_depth, ancestor_patterns)
 	_p_start("read_dir_recursive")
 	current_depth = current_depth or 0
 	max_depth = max_depth or 20
-	visited = visited or {}
 
-	-- Cycle detection via real path
-	local real = vim.loop.fs_realpath(dir) or dir
-	if visited[real] or current_depth > max_depth then
-		_p_end()
-		return {}
-	end
-	visited[real] = true
 
 	-- Compute remaining depth budget for find (+1 because
 	-- current_depth starts at 0 for the root but -mindepth 1
@@ -488,20 +480,6 @@ local function read_dir_recursive(dir, max_depth, current_depth, visited, ancest
 					end
 					active_patterns[#active_patterns] = nil
 				end
-			elseif entry.type == "link" then
-				-- Follow symlinks that point to directories.
-				-- Each symlink target requires its own find call, which is
-				-- fine because symlinks-to-dirs are rare in practice.
-				local link_real = vim.loop.fs_realpath(entry.path)
-				if
-					link_real
-					and vim.fn.isdirectory(link_real) == 1
-					and not visited[vim.loop.fs_realpath(link_real) or link_real]
-				then
-					local linked_children =
-						read_dir_recursive(link_real, max_depth, depth + 1, visited, active_patterns)
-					vim.list_extend(result, linked_children)
-				end
 			end
 		end
 	end
@@ -556,22 +534,14 @@ end
 --- is_hidden? }.  fd natively skips .git/ contents and respects
 --- .gitignore/.ignore, so we never traverse giant ignored subtrees.
 --- A single fd pass replaces the old find + fd dual scan.
+--- Symlinks are never followed — they appear as atomic entries (type "link").
 ---@param dir         string
 ---@param show_hidden boolean
----@param visited?    table   realpath set for symlink cycle detection
 ---@param depth?      number  starting indent (0 for the root call)
 ---@return table[]
-local function scan_fd(dir, show_hidden, visited, depth)
+local function scan_fd(dir, show_hidden, depth)
 	_p_start("scan_fd")
-	visited = visited or {}
 	depth = depth or 0
-
-	local real = vim.loop.fs_realpath(dir) or dir
-	if visited[real] then
-		_p_end()
-		return {}
-	end
-	visited[real] = true
 
 	-- Build fd flags.  fd natively skips .git/ contents (hardcoded ignore).
 	-- -H includes hidden (dot) files and directories.
@@ -683,12 +653,8 @@ local function scan_fd(dir, show_hidden, visited, depth)
 			result[#result + 1] = e
 			if e.type == "dir" then
 				emit(e.path, d + 1)
-			elseif e.type == "link" then
-				local lr = vim.loop.fs_realpath(e.path)
-				if lr and vim.fn.isdirectory(lr) == 1 and not visited[lr] then
-					vim.list_extend(result, scan_fd(lr, show_hidden, visited, d + 1))
-				end
 			end
+			-- Symlinks are never followed — they appear as atomic entries.
 		end
 	end
 	emit(dir, depth)
@@ -713,7 +679,7 @@ end
 ---@return string
 local function format_line(entry)
 	local prefix = indent_str(entry.indent or 0)
-	local suffix = entry.type == "dir" and "/" or ""
+	local suffix = entry.type == "dir" and "/" or (entry.type == "link" and "@" or "")
 	-- Escape control characters so nvim_buf_set_lines doesn't reject the line.
 	-- Uses shell $'...' notation so the original name can be recovered.
 	local name = entry.name:gsub("[\n\r\t]", function(c)
@@ -722,19 +688,22 @@ local function format_line(entry)
 	return prefix .. name .. suffix
 end
 
---- Parse a display line: strip leading whitespace, detect trailing-slash dir marker.
+--- Parse a display line: strip leading whitespace, detect trailing-slash dir
+--- marker and trailing-@ symlink marker.
 ---@param line string
----@return string name      cleaned name (no indent, no trailing slash)
+---@return string name      cleaned name (no indent, no trailing / or @)
 ---@return boolean is_dir   true if the line ends with "/"
+---@return boolean is_link  true if the line ends with "@"
 local function parse_line(line)
 	local name = line:match("^%s*(.+)") or ""
 	local is_dir = name:sub(-1) == "/"
-	if is_dir then
+	local is_link = name:sub(-1) == "@" and not is_dir
+	if is_dir or is_link then
 		name = name:sub(1, -2)
 	end
 	-- Reverse the $'...' escaping applied in format_line.
 	name = name:gsub("%$'\\n'", "\n"):gsub("%$'\\r'", "\r"):gsub("%$'\\t'", "\t")
-	return name, is_dir
+	return name, is_dir, is_link
 end
 
 ----------------------------------------------------------------------
@@ -762,7 +731,7 @@ local function parse_buffer(buf)
 			goto continue
 		end
 
-		local name, is_dir = parse_line(line)
+		local name, is_dir, is_link = parse_line(line)
 		if name == "" then
 			goto continue
 		end
@@ -785,7 +754,7 @@ local function parse_buffer(buf)
 
 			table.insert(entries, {
 				name = name,
-				type = is_dir and "dir" or "file",
+				type = is_dir and "dir" or (is_link and "link" or "file"),
 				path = part_path,
 				indent = indent,
 				lnum = lnum,
@@ -820,7 +789,7 @@ local function parse_buffer(buf)
 
 				table.insert(entries, {
 					name = part,
-					type = part_is_dir and "dir" or "file",
+					type = part_is_dir and "dir" or (is_link and "link" or "file"),
 					path = part_path,
 					indent = part_indent,
 					lnum = lnum,
@@ -1438,7 +1407,7 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 		local entry = entries[lnum]
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
-			local suffix = entry.type == "dir" and 1 or 0 -- trailing "/"
+			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0 -- trailing "/" or "@"
 			local name_end = name_start + #entry.name + suffix
 
 			-- Directory highlight (priority 10 — highest).
@@ -1447,6 +1416,16 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 					end_col = name_end,
 					hl_group = "Directory",
 					priority = 10,
+					ephemeral = true,
+				})
+			end
+
+			-- Symlink highlight (priority 8 — under dir, above hidden/git).
+			if entry.type == "link" then
+				vim.api.nvim_buf_set_extmark(bufnr, deco_ns, lnum - 1, name_start, {
+					end_col = name_end,
+					hl_group = "FilebufLink",
+					priority = 8,
 					ephemeral = true,
 				})
 			end
@@ -1492,10 +1471,11 @@ local function deco_on_win(_, winid, bufnr, toprow, botrow)
 	return false -- no on_line / on_range needed; all work is done here
 end
 
-local function define_hidden_highlights()
+local function define_filebuf_type_highlights()
 	local groups = {
 		FilebufHiddenFile = { fg = "#5c6370" },
 		FilebufHiddenDir = { fg = "#5c6370" },
+			FilebufLink = { fg = "#56b6c2" }, -- cyan to distinguish from Directory (blue)
 	}
 	for name, def in pairs(groups) do
 		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
@@ -1586,9 +1566,12 @@ local function handle_enter(buf)
 		-- close / reopen and subsequent saves.
 		save_fold_state(buf, vim.b[buf].filebuf_root)
 	else
-		-- File or symlink — resolve the real path and open.
+		-- File, symlink->file: open for editing. Symlink->dir: open new filebuf.
 		local target = vim.loop.fs_realpath(entry.path) or entry.path
-		if vim.fn.filereadable(target) == 1 then
+		if entry.type == "link" and vim.fn.isdirectory(target) == 1 then
+			-- Symlink to directory: open a new filebuf at the target.
+			M.open(target)
+		elseif vim.fn.filereadable(target) == 1 then
 			vim.cmd("edit " .. vim.fn.fnameescape(target))
 		else
 			vim.notify("Cannot read: " .. entry.path, vim.log.levels.WARN)
@@ -1990,7 +1973,7 @@ function M.setup(opts)
 	-- Ensure highlight groups exist so users can override them in their
 	-- colorscheme before the first buffer is opened.
 	define_git_highlights()
-	define_hidden_highlights()
+	define_filebuf_type_highlights()
 	define_filebuf_highlights()
 
 	-- Register the decoration provider once, globally.  Neovim calls the
