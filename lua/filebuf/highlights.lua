@@ -14,6 +14,7 @@ local GROUPS = {
 	FilebufHiddenFile = { fg = "#5c6370" },
 	FilebufHiddenDir = { fg = "#5c6370" },
 	FilebufLink = { fg = "#56b6c2" }, -- cyan, to distinguish from Directory (blue)
+	FilebufLazyDir = { fg = "#5c6370", italic = true }, -- dimmed + italic for unloaded dirs
 }
 
 --- Create FilebufFoldLine = Directory's fg on Normal's bg, used by

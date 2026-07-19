@@ -45,6 +45,7 @@ local function entries_for(bufnr)
 			local cached = by_path[e.path]
 			if cached then
 				e.is_hidden = cached.is_hidden
+				e.lazy = cached.lazy
 			end
 		end
 	end
@@ -93,7 +94,14 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 				})
 			end
 
-			if entry.is_hidden then
+			if entry.lazy then
+				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
+					end_col = name_end,
+					hl_group = "FilebufLazyDir",
+					priority = 6,
+					ephemeral = true,
+				})
+			elseif entry.is_hidden then
 				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
 					end_col = name_end,
 					hl_group = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile",

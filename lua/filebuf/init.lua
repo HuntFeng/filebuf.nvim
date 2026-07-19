@@ -91,7 +91,8 @@ local function open_dirs_of(entries)
 	return open
 end
 
---- Re-read the tree from disk and refresh the buffer, preserving fold state.
+--- Re-read the tree from disk and refresh the buffer, preserving fold state
+--- and any previously-expanded lazy directories.
 ---@param buf number
 local function refresh_buffer(buf)
 	local dir = vim.b[buf].filebuf_root
@@ -102,9 +103,39 @@ local function refresh_buffer(buf)
 	folds.save_fold_state(buf, dir)
 	local open_dirs = open_dirs_of(vim.b[buf].filebuf_display_entries or {})
 
-	local all_entries = scan.scan_tree(dir)
+	-- Capture which lazy dirs were expanded before the refresh.
+	local previously_expanded = vim.b[buf].filebuf_lazy_expanded or {}
+	vim.b[buf].filebuf_lazy_expanded = {}
+
+	local all_entries, by_parent = scan.scan_tree(dir)
 	vim.b[buf].filebuf_all_entries = all_entries
-	vim.b[buf].filebuf_has_hidden = config.show_hidden
+	vim.b[buf].filebuf_by_parent = by_parent
+
+	-- Re-expand lazy dirs that were expanded before the refresh.
+	-- Must operate on the all_entries list in a forward pass so that splices
+	-- don't shift positions we haven't reached yet.
+	local i = 1
+	while i <= #all_entries do
+		local entry = all_entries[i]
+		if entry.lazy and previously_expanded[entry.path] then
+			local children = scan.scan_dir_children(entry.path, by_parent)
+			local parent_indent = entry.indent
+			for _, child in ipairs(children) do
+				child.indent = parent_indent + 1
+			end
+			-- Splice children into all_entries after entry.
+			for j = #children, 1, -1 do
+				table.insert(all_entries, i + 1, children[j])
+			end
+			entry.lazy = nil
+			local exp_rb = vim.b[buf].filebuf_lazy_expanded or {}
+			exp_rb[entry.path] = true
+			vim.b[buf].filebuf_lazy_expanded = exp_rb
+			vim.b[buf].filebuf_all_entries = all_entries
+			i = i + #children
+		end
+		i = i + 1
+	end
 
 	rebuild_buffer_display(buf, scan.filter_visible(all_entries), open_dirs)
 end
@@ -114,8 +145,9 @@ end
 ----------------------------------------------------------------------
 
 --- Toggle show_hidden and refresh, preserving the cursor entry and fold state.
---- Refuses when there are unsaved changes.  The heavy -H hidden scan runs at
---- most once (cached via filebuf_has_hidden); later toggles re-filter memory.
+--- Refuses when there are unsaved changes.  With hybrid mode, hidden entries
+--- are already cached as lazy placeholders in filebuf_all_entries, so toggling
+--- is just a re-filter — no heavy re-scan is ever needed.
 ---@param buf number
 local function toggle_hidden(buf)
 	if vim.bo[buf].modified then
@@ -133,15 +165,15 @@ local function toggle_hidden(buf)
 
 	config.show_hidden = not config.show_hidden
 
-	-- filter_visible(full_set) yields the right view for either state, so we
-	-- only need a fresh scan when revealing hidden entries not yet cached.
+	-- Hidden entries are already in filebuf_all_entries (as lazy placeholders),
+	-- so toggling is a pure re-filter.  Re-scan only if the cache is missing.
 	local all_entries = vim.b[buf].filebuf_all_entries
-	if config.show_hidden and not vim.b[buf].filebuf_has_hidden then
-		all_entries = scan.scan_tree(dir)
+	if not all_entries then
+		local entries, by_parent = scan.scan_tree(dir)
+		all_entries = entries
 		vim.b[buf].filebuf_all_entries = all_entries
-		vim.b[buf].filebuf_has_hidden = true
+		vim.b[buf].filebuf_by_parent = by_parent
 	end
-	all_entries = all_entries or scan.scan_tree(dir)
 	rebuild_buffer_display(buf, scan.filter_visible(all_entries), open_dirs)
 
 	-- Restore the cursor to the same entry (accounts for shifted line numbers).
@@ -157,6 +189,170 @@ local function toggle_hidden(buf)
 	vim.notify("filebuf: hidden files " .. (config.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
 end
 
+--- Find the index of an entry in a list (reference equality).
+---@param entries table[]
+---@param target  table
+---@return number|nil
+local function find_entry_index(entries, target)
+	for i, e in ipairs(entries) do
+		if e == target then
+			return i
+		end
+	end
+	return nil
+end
+
+--- Expand a lazy directory: scan its immediate children, insert them into the
+--- buffer and both entry caches, rebuild folds, and open the fold.
+--- Idempotent — if the entry is no longer lazy (already expanded), this is a
+--- no-op to prevent duplicate children.
+---@param buf        number
+---@param lazy_entry table  the lazy directory entry
+local function expand_lazy_dir(buf, lazy_entry)
+	-- Ensure the expanded-set table exists (may be nil if buffer state
+	-- was lost), and mark this path expanded BEFORE doing any work so
+	-- that a failure mid-way cannot lead to double-expansion.
+	local expanded = vim.b[buf].filebuf_lazy_expanded
+	if not expanded then
+		expanded = {}
+		vim.b[buf].filebuf_lazy_expanded = expanded
+	end
+	if not lazy_entry.lazy or expanded[lazy_entry.path] then
+		return -- already expanded, nothing to do
+	end
+	expanded[lazy_entry.path] = true
+	vim.b[buf].filebuf_lazy_expanded = expanded
+
+	-- vim.b returns a snapshot, not a live reference — always re-read
+	-- after writing back so we operate on the freshest copy.
+	local display = vim.b[buf].filebuf_display_entries
+	local all_entries = vim.b[buf].filebuf_all_entries
+	local by_parent = vim.b[buf].filebuf_by_parent
+
+	-- 1. Scan immediate children.
+	local children = scan.scan_dir_children(lazy_entry.path, by_parent)
+
+	-- 2. Set indent (parent indent + 1).
+	local parent_indent = lazy_entry.indent
+	for _, child in ipairs(children) do
+		child.indent = parent_indent + 1
+	end
+
+	-- 3. Splice children into filebuf_all_entries (diff baseline).
+	--    Use reference equality first; fall back to path match because
+	--    display and all_entries may hold different objects after a
+	--    re-scan (refresh_buffer creates brand-new entry tables).
+	local all_pos = find_entry_index(all_entries, lazy_entry)
+	if not all_pos then
+		for i, e in ipairs(all_entries) do
+			if e.path == lazy_entry.path then
+				all_pos = i
+				break
+			end
+		end
+	end
+	if all_pos then
+		for i = #children, 1, -1 do
+			table.insert(all_entries, all_pos + 1, children[i])
+		end
+		vim.b[buf].filebuf_all_entries = all_entries
+	end
+
+	-- Snapshot which dirs are open BEFORE we modify anything, since
+	-- line insertion and zE both affect fold state.
+	local open_dirs = open_dirs_of(display)
+	open_dirs[lazy_entry.path] = true -- ensure expanded dir ends up open
+
+	-- 4. Destroy existing folds BEFORE inserting lines.  If we insert first,
+	-- Neovim may try to adjust manual fold ranges, which can corrupt state.
+	vim.cmd("silent! normal! zE")
+
+	-- 5. Insert only visible children into display entries + buffer text.
+	local visible_children = scan.filter_visible(children)
+	local child_lines = {}
+	for i, child in ipairs(visible_children) do
+		child_lines[i] = line_mod.format_line(child)
+	end
+
+	if #child_lines > 0 then
+		local insert_lnum = lazy_entry.lnum -- insert after the parent line
+		vim.api.nvim_buf_set_lines(buf, insert_lnum, insert_lnum, false, child_lines)
+
+		for i = #visible_children, 1, -1 do
+			table.insert(display, insert_lnum + 1, visible_children[i])
+		end
+	end
+
+	-- 6. Re-stamp lnum on all display entries.
+	for i = 1, #display do
+		display[i].lnum = i
+	end
+
+	-- 7. Clear lazy flag on every reference to this entry (display and
+	-- all_entries may hold different objects after a re-scan).
+	lazy_entry.lazy = nil
+	for _, e in ipairs(all_entries) do
+		if e.path == lazy_entry.path then
+			e.lazy = nil
+		end
+	end
+	vim.b[buf].filebuf_display_entries = display
+	vim.b[buf].filebuf_all_entries = all_entries
+
+
+	-- 8. Rebuild folds and restore previously-open directories.
+	folds.create_folds(buf, display)
+	for _, e in ipairs(display) do
+		if e.type == "dir" and open_dirs[e.path] then
+			vim.cmd(string.format("silent! %dfoldopen", e.lnum))
+		end
+	end
+
+  -- Mark the buffer modified: we inserted lines (expanding a lazy dir
+  -- changes what's displayed), even though nothing on disk changed yet.
+  vim.bo[buf].modified = false
+end
+
+--- Recursively expand a lazy directory and all nested lazy dirs within it.
+---@param buf        number
+---@param lazy_entry table
+local function expand_lazy_dir_recursive(buf, lazy_entry)
+	if not lazy_entry.lazy then
+		return -- already expanded
+	end
+	expand_lazy_dir(buf, lazy_entry)
+	-- Collect lazy child paths first (expansion shifts indices, so we
+	-- can't safely iterate while expanding).
+	local display = vim.b[buf].filebuf_display_entries
+	local start = lazy_entry.lnum
+	local finish = #display
+	for i = start + 1, #display do
+		if display[i].indent <= lazy_entry.indent then
+			finish = i - 1
+			break
+		end
+	end
+	local lazy_paths = {}
+	local expanded = vim.b[buf].filebuf_lazy_expanded or {}
+	for i = start + 1, finish do
+		if display[i].lazy and not expanded[display[i].path] then
+			lazy_paths[#lazy_paths + 1] = display[i].path
+		end
+	end
+	for _, path in ipairs(lazy_paths) do
+		-- Re-read display each iteration: expand_lazy_dir (called
+		-- recursively) writes back to vim.b, which returns snapshots.
+		display = vim.b[buf].filebuf_display_entries
+		expanded = vim.b[buf].filebuf_lazy_expanded or {}
+		for _, e in ipairs(display) do
+			if e.path == path and e.lazy and not expanded[e.path] then
+				expand_lazy_dir_recursive(buf, e)
+				break
+			end
+		end
+	end
+end
+
 --- Handle <CR>: toggle a directory fold, or open a file / follow a symlink.
 ---@param buf number
 local function handle_enter(buf)
@@ -168,6 +364,11 @@ local function handle_enter(buf)
 	end
 
 	if entry.type == "dir" then
+		-- Only expand if truly lazy AND not already expanded (double guard).
+		if entry.lazy and not (vim.b[buf].filebuf_lazy_expanded or {})[entry.path] then
+			expand_lazy_dir(buf, entry)
+			return
+		end
 		vim.api.nvim_win_set_cursor(0, { lnum, 0 })
 		vim.cmd(vim.fn.foldclosedend(lnum) ~= -1 and "normal! zo" or "normal! zc")
 		folds.save_fold_state(buf, vim.b[buf].filebuf_root)
@@ -215,11 +416,66 @@ function M.open(dir)
 		toggle_hidden(buf)
 	end, { buffer = buf, desc = "Toggle hidden files" })
 
+	-- Native fold commands: expand lazy dirs before opening folds.
+	vim.keymap.set("n", "zo", function()
+		local lnum = vim.api.nvim_win_get_cursor(0)[1]
+		local entries = vim.b[buf].filebuf_display_entries
+		local entry = entries and entries[lnum]
+		if entry and entry.lazy and not (vim.b[buf].filebuf_lazy_expanded or {})[entry.path] then
+			expand_lazy_dir(buf, entry)
+		else
+			vim.cmd("normal! zo")
+		end
+	end, { buffer = buf, desc = "Open fold / expand lazy dir" })
+	vim.keymap.set("n", "za", function()
+		local lnum = vim.api.nvim_win_get_cursor(0)[1]
+		local entries = vim.b[buf].filebuf_display_entries
+		local entry = entries and entries[lnum]
+		if entry and entry.lazy and not (vim.b[buf].filebuf_lazy_expanded or {})[entry.path] then
+			expand_lazy_dir(buf, entry)
+
+		elseif entry and entry.type == "dir" then
+			vim.cmd("normal! za")
+		end
+	end, { buffer = buf, desc = "Toggle fold / expand lazy dir" })
+	vim.keymap.set("n", "zO", function()
+		local lnum = vim.api.nvim_win_get_cursor(0)[1]
+		local entries = vim.b[buf].filebuf_display_entries
+		local entry = entries and entries[lnum]
+		if entry and entry.lazy and not (vim.b[buf].filebuf_lazy_expanded or {})[entry.path] then
+			expand_lazy_dir_recursive(buf, entry)
+		else
+			vim.cmd("normal! zO")
+		end
+	end, { buffer = buf, desc = "Recursively open folds / expand lazy dir" })
+	vim.keymap.set("n", "zR", function()
+		local entries = vim.b[buf].filebuf_display_entries
+		if entries then
+			-- Collect lazy paths first; expanding mutates the list.
+			local lazy_paths = {}
+			for _, e in ipairs(entries) do
+				if e.lazy and not (vim.b[buf].filebuf_lazy_expanded or {})[e.path] then
+					lazy_paths[#lazy_paths + 1] = e.path
+				end
+			end
+			for _, path in ipairs(lazy_paths) do
+				for _, e in ipairs(vim.b[buf].filebuf_display_entries or {}) do
+					if e.path == path and e.lazy and not (vim.b[buf].filebuf_lazy_expanded or {})[e.path] then
+						expand_lazy_dir(buf, e)
+						break
+					end
+				end
+			end
+		end
+		vim.cmd("normal! zR")
+	end, { buffer = buf, desc = "Open all folds / expand all lazy dirs" })
+
 	-- Populate with the full tree; cache the unfiltered list so toggle_hidden
 	-- can re-filter from memory instead of re-walking the filesystem.
-	local all_entries = scan.scan_tree(dir)
+	local all_entries, by_parent = scan.scan_tree(dir)
 	vim.b[buf].filebuf_all_entries = all_entries
-	vim.b[buf].filebuf_has_hidden = config.show_hidden
+	vim.b[buf].filebuf_by_parent = by_parent
+	vim.b[buf].filebuf_lazy_expanded = {}
 
 	local display_entries = scan.filter_visible(all_entries)
 	local lines = {}
@@ -301,7 +557,10 @@ function M.open(dir)
 				local buf_entries = buffer.parse_buffer(buf)
 				-- Use the cached list as the disk baseline (avoids a re-scan);
 				-- filter to visible so hidden files aren't seen as "deleted".
-				local all_disk = vim.b[buf].filebuf_all_entries or scan.scan_tree(dir)
+				local all_disk = vim.b[buf].filebuf_all_entries
+				if not all_disk then
+					all_disk = scan.scan_tree(dir)
+				end
 				local ops = diff.compute_diff(buf_entries, scan.filter_visible(all_disk))
 
 				if #ops.errors > 0 then
