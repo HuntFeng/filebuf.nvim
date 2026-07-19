@@ -394,13 +394,19 @@ end
 ---@param dir string|nil
 function M.open(dir)
 	dir = (dir or vim.fn.getcwd()):gsub("/$", "") -- normalize trailing slash
-  -- If a filebuf for this directory already exists, switch to it and refresh.
-  local existing_buf = vim.fn.bufnr("Filebuf")
-  if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
-    vim.api.nvim_set_current_buf(existing_buf)
-    refresh_buffer(existing_buf)
-    return
-  end
+
+	-- If a filebuf for this directory already exists and is a real filebuf
+	-- (not a hollow session-restored shell), switch to it and refresh.
+	local existing_buf = vim.fn.bufnr("Filebuf")
+	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
+		if vim.b[existing_buf].filebuf_root then
+			vim.api.nvim_set_current_buf(existing_buf)
+			refresh_buffer(existing_buf)
+			return
+		end
+		-- Stale session-restored buffer: wipe so we create a fresh one below.
+		pcall(vim.api.nvim_buf_delete, existing_buf, { force = true })
+	end
 
 	-- Capture the file being edited so we can auto-focus it once the tree exists.
 	local current_file = vim.api.nvim_buf_get_name(0)
