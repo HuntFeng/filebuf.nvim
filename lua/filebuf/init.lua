@@ -394,16 +394,24 @@ end
 ---@param dir string|nil
 function M.open(dir)
 	dir = (dir or vim.fn.getcwd()):gsub("/$", "") -- normalize trailing slash
+  -- If a filebuf for this directory already exists, switch to it and refresh.
+  local existing_buf = vim.fn.bufnr("Filebuf")
+  if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
+    vim.api.nvim_set_current_buf(existing_buf)
+    refresh_buffer(existing_buf)
+    return
+  end
 
 	-- Capture the file being edited so we can auto-focus it once the tree exists.
 	local current_file = vim.api.nvim_buf_get_name(0)
 
 	local buf = vim.api.nvim_create_buf(true, true)
-	vim.api.nvim_buf_set_name(buf, "filebuf://" .. dir) -- so :w triggers BufWriteCmd
+	vim.api.nvim_buf_set_name(buf, "Filebuf") -- so :w triggers BufWriteCmd
 	vim.b[buf].filebuf_root = dir
 	vim.bo[buf].filetype = "filebuf"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].buftype = "acwrite"
+	vim.bo[buf].buflisted = false
 
 	vim.keymap.set("n", "<CR>", function()
 		handle_enter(buf)
