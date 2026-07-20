@@ -122,6 +122,9 @@ local function refresh_buffer(buf)
 			local parent_indent = entry.indent
 			for _, child in ipairs(children) do
 				child.indent = parent_indent + 1
+				-- Subentries inherit parent's hidden / ignored status.
+				if entry.is_hidden then child.is_hidden = true end
+				if entry.is_ignored then child.is_ignored = true end
 			end
 			-- Splice children into all_entries after entry.
 			for j = #children, 1, -1 do
@@ -232,10 +235,12 @@ local function expand_lazy_dir(buf, lazy_entry)
 	-- 1. Scan immediate children.
 	local children = scan.scan_dir_children(lazy_entry.path, by_parent)
 
-	-- 2. Set indent (parent indent + 1).
+	-- 2. Set indent (parent indent + 1) and inherit hidden/ignored flags.
 	local parent_indent = lazy_entry.indent
 	for _, child in ipairs(children) do
 		child.indent = parent_indent + 1
+		if lazy_entry.is_hidden then child.is_hidden = true end
+		if lazy_entry.is_ignored then child.is_ignored = true end
 	end
 
 	-- 3. Splice children into filebuf_all_entries (diff baseline).

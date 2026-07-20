@@ -4,7 +4,7 @@
 -- placeholders whose children are loaded on demand.
 -- fd fast path when available, else a find(1) fallback; both return the
 -- same flat DFS-ordered entry shape:
---   { name, type, path, indent, is_hidden?, lazy? }  (type = dir|link|file)
+--   { name, type, path, indent, is_hidden?, is_ignored?, lazy? }  (type = dir|link|file)
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
@@ -33,9 +33,9 @@ end
 ----------------------------------------------------------------------
 
 --- Return only the entries that should appear in the buffer.  When
---- show_hidden is true, all entries are returned (hidden ones are dimmed
---- by the decoration provider).  When false, is_hidden entries are dropped
---- along with everything inside hidden directories.
+--- show_hidden is true, all entries are returned (hidden/ignored ones are dimmed
+--- by the decoration provider).  When false, is_hidden / is_ignored entries are
+--- dropped along with everything inside hidden/ignored directories.
 ---@param entries table[]  flat DFS list
 ---@return table[]
 function M.filter_visible(entries)
@@ -43,18 +43,19 @@ function M.filter_visible(entries)
 		return entries
 	end
 	local visible = {}
-	-- Indent levels of hidden directories we're currently inside.  Entries
-	-- are in DFS order, so we push on entering a hidden dir and pop once the
-	-- indent returns to (or above) its level.
+	-- Indent levels of hidden/ignored directories we're currently inside.  Entries
+	-- are in DFS order, so we push on entering a hidden/ignored dir and pop once
+	-- the indent returns to (or above) its level.
 	local hidden_stack = {}
 	for _, entry in ipairs(entries) do
 		while #hidden_stack > 0 and entry.indent <= hidden_stack[#hidden_stack] do
 			table.remove(hidden_stack)
 		end
-		if entry.is_hidden and entry.type == "dir" then
+		local dimmed = entry.is_hidden or entry.is_ignored
+		if dimmed and entry.type == "dir" then
 			hidden_stack[#hidden_stack + 1] = entry.indent
 		end
-		if not entry.is_hidden and #hidden_stack == 0 then
+		if not dimmed and #hidden_stack == 0 then
 			visible[#visible + 1] = entry
 		end
 	end
@@ -152,18 +153,19 @@ local function read_dir_recursive(dir)
 
 	-- DFS: build the flat result, tagging hidden entries via the pattern stack.
 	local result = {}
-	local function emit_children(parent_path, depth, inside_hidden)
+	local function emit_children(parent_path, depth, inside_ignored)
 		for _, entry in ipairs(by_parent[parent_path] or {}) do
 			entry.indent = depth
 
-			-- Tag hidden entries; .ignore itself is never hidden.
+			-- Tag hidden / ignored entries; .ignore itself is never tagged.
 			if entry.name ~= ".ignore" then
-				if inside_hidden then
-					entry.is_hidden = true -- whole subtree inherits, skip matching
+				if inside_ignored then
+					entry.is_ignored = true -- whole subtree inherits, skip matching
 				elseif entry.name:sub(1, 1) == "." then
 					entry.is_hidden = true -- dotfiles are always hidden
-				elseif
-					config.respect_ignore
+				end
+				if not entry.is_hidden and not entry.is_ignored
+					and config.respect_ignore
 					and #active_patterns > 0
 					and ignore.matches_ignore(
 						entry.path,
@@ -173,20 +175,20 @@ local function read_dir_recursive(dir)
 						active_negate_count
 					)
 				then
-					entry.is_hidden = true
+					entry.is_ignored = true
 				end
 			end
 
 			result[#result + 1] = entry
 
 			if entry.type == "dir" then
-				if entry.is_hidden then
+				if entry.is_hidden or entry.is_ignored then
 					-- Hidden/ignored directory: mark lazy, don't recurse.
 					-- Children stay in by_parent for on-demand expansion.
 					entry.lazy = true
 				else
 					local pushed = push_ignore(entry.path)
-					emit_children(entry.path, depth + 1, inside_hidden)
+					emit_children(entry.path, depth + 1, inside_ignored or entry.is_ignored)
 					pop_ignore(pushed)
 				end
 			end
@@ -319,26 +321,29 @@ local function scan_fd(dir)
 			end
 			if ftype == "directory" then
 				-- All directories found here were excluded by fd (either
-				-- dot-prefixed or gitignored); tag them hidden so
-				-- filter_visible hides them when show_hidden is off.
+				-- dot-prefixed or gitignored); tag them so filter_visible
+				-- hides them when show_hidden is off.
+				local is_dotfile = name:sub(1, 1) == "."
 				lazy[#lazy + 1] = {
 					name = name,
 					type = "dir",
 					path = parent_path .. "/" .. name,
-					is_hidden = true,
+					is_hidden = is_dotfile or nil,
+					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 					lazy = true,
 				}
 			else
 				-- Hidden/ignored file/link that fd excluded.  Always
-				-- collect them (with is_hidden = true) so toggling
-				-- show_hidden is a pure re-filter of the cached list.
-				-- filter_visible handles hiding them when appropriate.
+				-- collect them so toggling show_hidden is a pure re-filter
+				-- of the cached list.
 				local etype = ftype == "link" and "link" or "file"
+				local is_dotfile = name:sub(1, 1) == "."
 				lazy[#lazy + 1] = {
 					name = name,
 					type = etype,
 					path = parent_path .. "/" .. name,
-					is_hidden = true,
+					is_hidden = is_dotfile or nil,
+					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 				}
 			end
 			::continue::
@@ -415,6 +420,9 @@ function M.scan_dir_children(dir, by_parent_cache)
 			if e.is_hidden then
 				entry.is_hidden = true
 			end
+			if e.is_ignored then
+				entry.is_ignored = true
+			end
 			children[#children + 1] = entry
 		end
 		sort_children(children)
@@ -464,15 +472,16 @@ function M.scan_dir_children(dir, by_parent_cache)
 			-- All subdirectories are lazy when expanding on demand: we only
 			-- load one level, so their children haven't been scanned yet.
 			entry.lazy = true
-			-- Hidden (dot-prefix or gitignored).
-			local is_hidden = name:sub(1, 1) == "."
-				or (
-					config.respect_ignore
-					and #active_patterns > 0
-					and ignore.matches_ignore(child_path, name, active_patterns, true, active_negate_count)
-				)
-			if is_hidden then
-				entry.is_hidden = name:sub(1, 1) == "."
+			-- Hidden (dot-prefix) or ignored (gitignore match).
+			local is_dotfile = name:sub(1, 1) == "."
+			local is_ignored = config.respect_ignore
+				and #active_patterns > 0
+				and ignore.matches_ignore(child_path, name, active_patterns, true, active_negate_count)
+			if is_dotfile then
+				entry.is_hidden = true
+			end
+			if is_ignored then
+				entry.is_ignored = true
 			end
 		elseif ftype == "link" then
 			entry.type = "link"
@@ -481,8 +490,16 @@ function M.scan_dir_children(dir, by_parent_cache)
 		end
 
 		-- Tag dot-prefixed files/links as hidden.
-		if not entry.is_hidden and name:sub(1, 1) == "." then
+		if name:sub(1, 1) == "." then
 			entry.is_hidden = true
+		end
+		-- Check gitignore for files/links too (directories handled above).
+		if not entry.is_ignored
+			and config.respect_ignore
+			and #active_patterns > 0
+			and ignore.matches_ignore(child_path, name, active_patterns, false, active_negate_count)
+		then
+			entry.is_ignored = true
 		end
 
 		children[#children + 1] = entry

@@ -34,7 +34,8 @@ local function entries_for(bufnr)
 	for _, e in ipairs(buffer.parse_buffer(bufnr)) do
 		entries[e.lnum] = e
 	end
-	-- is_hidden isn't in the buffer text; recover it from the full cache.
+	-- is_hidden/is_ignored aren't in the buffer text; recover them from the full
+	-- cache.
 	local all = vim.b[bufnr].filebuf_all_entries
 	if all then
 		local by_path = {}
@@ -45,6 +46,7 @@ local function entries_for(bufnr)
 			local cached = by_path[e.path]
 			if cached then
 				e.is_hidden = cached.is_hidden
+				e.is_ignored = cached.is_ignored
 				e.lazy = cached.lazy
 			end
 		end
@@ -78,7 +80,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0 -- "/" or "@"
 			local name_end = name_start + #entry.name + suffix
 
-			if entry.type == "dir" then
+			if entry.type == "dir" and not entry.is_hidden and not entry.is_ignored then
 				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
 					end_col = name_end,
 					hl_group = "Directory",
@@ -94,14 +96,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 				})
 			end
 
-			if entry.lazy then
-				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
-					end_col = name_end,
-					hl_group = "FilebufLazyDir",
-					priority = 6,
-					ephemeral = true,
-				})
-			elseif entry.is_hidden then
+			if entry.is_hidden or entry.is_ignored then
 				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
 					end_col = name_end,
 					hl_group = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile",

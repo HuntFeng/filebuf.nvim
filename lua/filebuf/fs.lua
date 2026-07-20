@@ -45,7 +45,7 @@ function M.read_dir(dir, ignore_patterns)
   -- The .ignore file itself is never filtered; .gitignore is hidden
   -- like other dotfiles (but its patterns are still read from disk).
   -- When show_hidden is true, ignore patterns are also bypassed.
-  -- Hidden entries are tagged with is_hidden for later highlighting.
+  -- Hidden/ignored entries are tagged for later highlighting.
   local filtered = {}
   for _, entry in ipairs(entries) do
     if entry.name ~= ".ignore" then
@@ -54,11 +54,14 @@ function M.read_dir(dir, ignore_patterns)
           and ignore_patterns
           and #ignore_patterns > 0
           and ignore.matches_ignore(entry.path, entry.name, ignore_patterns, entry.type == "dir")
-      if is_dotfile or is_ignored then
+      if is_dotfile then
         entry.is_hidden = true
-        if not state.config.show_hidden then
-          goto skip_entry
-        end
+      end
+      if is_ignored then
+        entry.is_ignored = true
+      end
+      if (is_dotfile or is_ignored) and not state.config.show_hidden then
+        goto skip_entry
       end
     end
     table.insert(filtered, entry)

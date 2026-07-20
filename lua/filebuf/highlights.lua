@@ -14,29 +14,30 @@ local GROUPS = {
 	FilebufHiddenFile = { fg = "#5c6370" },
 	FilebufHiddenDir = { fg = "#5c6370" },
 	FilebufLink = { fg = "#56b6c2" }, -- cyan, to distinguish from Directory (blue)
-	FilebufLazyDir = { fg = "#5c6370", italic = true }, -- dimmed + italic for unloaded dirs
 }
 
---- Create FilebufFoldLine = Directory's fg on Normal's bg, used by
---- winhighlight to override the Folded group.  A plain link to Directory
---- leaks Folded's background (Directory usually sets only fg), so we resolve
---- both attributes at setup time and set them explicitly.
+--- Create FilebufFoldLine = Normal's fg on Normal's bg, used by winhighlight
+--- to override the Folded group.  We intentionally do NOT use Directory's fg
+--- here — extmarks on directory names (Directory / FilebufHiddenDir) provide
+--- the correct per-entry coloring even on folded lines, and a neutral fold
+--- line ensures the extmark color isn't overridden.
 local function define_fold_line()
-	if not pcall(vim.api.nvim_get_hl, 0, { name = "Normal" }) then
-		vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Directory", default = true })
-		return
-	end
-	local function attr(name, key)
-		local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name })
-		return ok and hl and hl[key] or nil
-	end
-	local dir_fg = attr("Directory", "fg")
-	local normal_bg = attr("Normal", "bg")
-	if dir_fg or normal_bg then
-		vim.api.nvim_set_hl(0, "FilebufFoldLine", { fg = dir_fg, bg = normal_bg, default = true })
-	else
-		vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Directory", default = true })
-	end
+	-- if not pcall(vim.api.nvim_get_hl, 0, { name = "Normal" }) then
+	-- 	vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Normal", default = true })
+	-- 	return
+	-- end
+	-- local function attr(name, key)
+	-- 	local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = name })
+	-- 	return ok and hl and hl[key] or nil
+	-- end
+	-- -- local normal_fg = attr("Directory", "fg")
+	-- local normal_fg = attr("Directory", "fg")
+	-- local normal_bg = attr("Directory", "bg")
+	-- if normal_fg or normal_bg then
+	-- 	vim.api.nvim_set_hl(0, "FilebufFoldLine", { fg = normal_fg, bg = normal_bg, default = true })
+	-- else
+	-- 	vim.api.nvim_set_hl(0, "FilebufFoldLine", { link = "Directory", default = true })
+	-- end
 end
 
 --- Define every filebuf highlight group.  Called from setup().

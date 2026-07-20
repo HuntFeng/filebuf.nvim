@@ -76,7 +76,15 @@ function _G.FilebufFoldText()
 	local line = vim.fn.getline(vim.v.foldstart)
 	local indent_ws = line:match("^(%s*)") or ""
 	local name = line:match("^%s*(.-)%s*$") or line
-	return string.rep(" ", vim.fn.strdisplaywidth(indent_ws)) .. name
+	local buf = vim.api.nvim_get_current_buf()
+	local entries = vim.b[buf].filebuf_display_entries
+	local entry = entries[vim.v.foldstart]
+	local text = string.rep(" ", vim.fn.strdisplaywidth(indent_ws)) .. name
+	local hl = "Directory"
+	if entry.is_hidden or entry.is_ignored then
+		hl = "FilebufHiddenDir"
+	end
+	return { { text, hl } }
 end
 
 return M
