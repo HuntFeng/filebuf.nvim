@@ -3,8 +3,6 @@ local parser = require("filebuf.parser")
 local fs = require("filebuf.fs")
 local buffer = require("filebuf.buffer")
 local git = require("filebuf.git")
-local highlight = require("filebuf.highlight")
-
 local M = {}
 
 --- Persist the closed-fold set for `dir` by scanning the current buffer.
@@ -87,11 +85,8 @@ function M.load_directory(buf, entry)
   vim.api.nvim_win_set_cursor(0, { lnum, 0 })
   vim.cmd("normal! zo")
 
-  -- Re-apply extmarks
+  -- Re-apply git extmarks
   git.apply_git_extmarks(buf, root)
-  local updated_entries = parser.parse_buffer(buf)
-  highlight.apply_dir_extmarks(buf, updated_entries)
-  highlight.apply_hidden_extmarks(buf, updated_entries)
 
   -- Loading children into the buffer is a view operation, not a user
   -- edit — the buffer should not appear modified.

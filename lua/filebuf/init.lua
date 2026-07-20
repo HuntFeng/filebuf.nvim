@@ -512,9 +512,7 @@ function M.open(dir)
 	vim.wo.foldenable = true
 	vim.wo.foldcolumn = "auto:9"
 	vim.wo.foldtext = "v:lua.FilebufFoldText()"
-	-- Override Folded's background (FilebufFoldLine fully replaces it — see
-	-- highlights.lua for why a plain link to Directory leaks the background).
-	vim.wo.winhighlight = "Folded:FilebufFoldLine"
+  vim.wo.winhighlight = "Folded:FilebufFoldLine"
 	vim.wo.fillchars = (vim.wo.fillchars or "") .. "foldopen:▼,foldclose:▶,fold: "
 
 	folds.create_folds(buf, display_entries)
