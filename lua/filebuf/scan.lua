@@ -126,8 +126,7 @@ local function read_dir_recursive(dir)
 		for _, child in ipairs(by_parent[parent_path] or {}) do
 			if child.name == ".ignore" or child.name == ".gitignore" then
 				for _, p in ipairs(ignore.parse_ignore_file(child.path)) do
-					active_patterns[#active_patterns + 1] =
-						{ raw = p.raw, negate = p.negate, source_dir = parent_path }
+					active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = parent_path }
 					if p.negate then
 						active_negate_count = active_negate_count + 1
 					end
@@ -319,20 +318,21 @@ local function scan_fd(dir)
 				goto continue
 			end
 			if ftype == "directory" then
-				-- Only dot-prefixed dirs are "hidden"; gitignored dirs like
-				-- node_modules/ are not hidden in the dotfile sense, but
-				-- still get lazy-loaded.
+				-- All directories found here were excluded by fd (either
+				-- dot-prefixed or gitignored); tag them hidden so
+				-- filter_visible hides them when show_hidden is off.
 				lazy[#lazy + 1] = {
 					name = name,
 					type = "dir",
 					path = parent_path .. "/" .. name,
-					is_hidden = name:sub(1, 1) == ".",
+					is_hidden = true,
 					lazy = true,
 				}
-			elseif show_hidden then
-				-- Hidden/ignored file/link that fd excluded; show it when
-				-- show_hidden is on (e.g. a gitignored file when -I wasn't
-				-- passed but the user wants hidden entries visible).
+			else
+				-- Hidden/ignored file/link that fd excluded.  Always
+				-- collect them (with is_hidden = true) so toggling
+				-- show_hidden is a pure re-filter of the cached list.
+				-- filter_visible handles hiding them when appropriate.
 				local etype = ftype == "link" and "link" or "file"
 				lazy[#lazy + 1] = {
 					name = name,
@@ -436,7 +436,9 @@ function M.scan_dir_children(dir, by_parent_cache)
 			if fstat and fstat.type == "file" then
 				for _, p in ipairs(ignore.parse_ignore_file(ipath)) do
 					active_patterns[#active_patterns + 1] = {
-						raw = p.raw, negate = p.negate, source_dir = dir,
+						raw = p.raw,
+						negate = p.negate,
+						source_dir = dir,
 					}
 					if p.negate then
 						active_negate_count = active_negate_count + 1
@@ -467,9 +469,7 @@ function M.scan_dir_children(dir, by_parent_cache)
 				or (
 					config.respect_ignore
 					and #active_patterns > 0
-					and ignore.matches_ignore(
-						child_path, name, active_patterns, true, active_negate_count
-					)
+					and ignore.matches_ignore(child_path, name, active_patterns, true, active_negate_count)
 				)
 			if is_hidden then
 				entry.is_hidden = name:sub(1, 1) == "."
