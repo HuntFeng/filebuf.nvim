@@ -86,8 +86,12 @@ local function refresh_buffer(buf)
 		return
 	end
 
-	actions.save_fold_state(buf, dir)
+  -- save to restore cursor pos and everything later
+  local win_info = vim.fn.winsaveview()
+
 	local display_entries = vim.b[buf].filebuf_display_entries
+
+	actions.save_fold_state(buf, dir)
 	local open_dirs = {}
 	if display_entries then
 		for _, e in ipairs(display_entries) do
@@ -138,6 +142,8 @@ local function refresh_buffer(buf)
 	end
 
 	rebuild_buffer_display(buf, scan.filter_visible(new_all_entries), open_dirs)
+
+  vim.fn.winrestview(win_info)
 end
 
 ----------------------------------------------------------------------
@@ -201,11 +207,11 @@ local function setup_keymaps(buf, dir)
 
 	-- Uniform entry-action keymaps: resolve cursor entry, call an actions function.
 	local ENTRY_KEYMAPS = {
-		fold_open           = { actions.fold_open,           "filebuf: open fold" },
-		fold_close          = { actions.fold_close,          "filebuf: close fold" },
-		fold_toggle         = { actions.fold_toggle,         "filebuf: toggle fold" },
+		fold_open = { actions.fold_open, "filebuf: open fold" },
+		fold_close = { actions.fold_close, "filebuf: close fold" },
+		fold_toggle = { actions.fold_toggle, "filebuf: toggle fold" },
 		fold_open_recursive = { actions.fold_open_recursive, "filebuf: recursively open folds" },
-		open_or_toggle      = { actions.open_or_toggle,      "filebuf: open file / toggle dir" },
+		open_or_toggle = { actions.open_or_toggle, "filebuf: open file / toggle dir" },
 	}
 	for name, def in pairs(ENTRY_KEYMAPS) do
 		local key = km[name]
@@ -223,7 +229,7 @@ local function setup_keymaps(buf, dir)
 
 	-- Buffer-wide action keymaps (no entry resolution needed).
 	local BUF_KEYMAPS = {
-		fold_open_all  = { actions.fold_open_all,  "filebuf: open all folds" },
+		fold_open_all = { actions.fold_open_all, "filebuf: open all folds" },
 		fold_close_all = { actions.fold_close_all, "filebuf: close all folds" },
 	}
 	for name, def in pairs(BUF_KEYMAPS) do
