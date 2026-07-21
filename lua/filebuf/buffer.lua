@@ -68,4 +68,24 @@ function M.parse_buffer(buf)
 	return entries
 end
 
+--- Execute fn with undo recording disabled for buf.  Restores the
+--- original undolevels even if fn raises an error.
+---@param buf number
+---@param fn  fun()
+function M.without_undo(buf, fn)
+	local saved = vim.bo[buf].undolevels
+	vim.bo[buf].undolevels = -1
+	local ok, err = pcall(fn)
+	vim.bo[buf].undolevels = saved
+	if not ok then
+		error(err)
+	end
+end
+
+--- Clear all undo history for a buffer.
+---@param buf number
+function M.clear_undo(buf)
+	pcall(vim.api.nvim_buf_clear_undo, buf)
+end
+
 return M

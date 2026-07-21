@@ -257,7 +257,9 @@ function M.expand_dir(buf, lazy_entry)
 
 	if #child_lines > 0 then
 		local insert_lnum = lazy_entry.lnum -- insert after the parent line
-		vim.api.nvim_buf_set_lines(buf, insert_lnum, insert_lnum, false, child_lines)
+		buffer.without_undo(buf, function()
+			vim.api.nvim_buf_set_lines(buf, insert_lnum, insert_lnum, false, child_lines)
+		end)
 
 		for i = #visible_children, 1, -1 do
 			table.insert(display, insert_lnum + 1, visible_children[i])

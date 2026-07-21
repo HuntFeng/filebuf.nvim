@@ -57,7 +57,10 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
 		entry.lnum = i
 		lines[i] = line_mod.format_line(entry)
 	end
-	vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	buffer.without_undo(buf, function()
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	end)
+	buffer.clear_undo(buf)
 
 	vim.b[buf].filebuf_display_entries = entries
 
@@ -309,7 +312,10 @@ function M.open(dir)
 		lines[i] = line_mod.format_line(e)
 	end
 	if #lines > 0 then
-		vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
+		buffer.without_undo(buf, function()
+			vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
+		end)
+		buffer.clear_undo(buf)
 	end
 
 	-- Manual folding: each directory + descendants form a fold, closed initially.
