@@ -164,7 +164,9 @@ local function read_dir_recursive(dir)
 				elseif entry.name:sub(1, 1) == "." then
 					entry.is_hidden = true -- dotfiles are always hidden
 				end
-				if not entry.is_hidden and not entry.is_ignored
+				if
+					not entry.is_hidden
+					and not entry.is_ignored
 					and config.respect_ignore
 					and #active_patterns > 0
 					and ignore.matches_ignore(
@@ -494,7 +496,8 @@ function M.scan_dir_children(dir, by_parent_cache)
 			entry.is_hidden = true
 		end
 		-- Check gitignore for files/links too (directories handled above).
-		if not entry.is_ignored
+		if
+			not entry.is_ignored
 			and config.respect_ignore
 			and #active_patterns > 0
 			and ignore.matches_ignore(child_path, name, active_patterns, false, active_negate_count)

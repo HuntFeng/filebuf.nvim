@@ -6,7 +6,6 @@ local prof = require("filebuf.profiler")
 
 local M = {}
 
-
 -- porcelain code → { display char, highlight group }.  Worktree status is
 -- preferred over index status (it reflects the current on-disk state).
 local CODE_DISPLAY = {
