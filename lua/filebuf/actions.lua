@@ -161,6 +161,38 @@ local function entry_at_cursor(buf)
 	return entries and entries[lnum]
 end
 
+--- Find the nearest parent directory for `entry` by walking backward through
+--- display entries until a dir with strictly lower indent is found.
+---@param buf   number
+---@param entry table
+---@return table|nil
+local function find_parent_dir(buf, entry)
+	local display = vim.b[buf].filebuf_display_entries
+	if not display then
+		return nil
+	end
+	local target = entry.indent or 0
+	for i = entry.lnum - 1, 1, -1 do
+		local e = display[i]
+		if e and e.type == "dir" and (e.indent or 0) < target then
+			return e
+		end
+	end
+	return nil
+end
+
+--- Resolve a foldable directory from an arbitrary entry: if `entry` is already
+--- a directory, return it; otherwise walk up to the nearest parent dir.
+---@param buf   number
+---@param entry table
+---@return table|nil
+local function resolve_dir_entry(buf, entry)
+	if entry.type == "dir" then
+		return entry
+	end
+	return find_parent_dir(buf, entry)
+end
+
 --- Check whether a lazy directory has already been expanded.
 ---@param buf number
 ---@param entry table
@@ -365,7 +397,8 @@ end
 ---@param buf   number
 ---@param entry table
 function M.fold_open(buf, entry)
-	if entry.type ~= "dir" then
+	entry = resolve_dir_entry(buf, entry)
+	if not entry then
 		return
 	end
 
@@ -383,7 +416,8 @@ end
 ---@param buf   number
 ---@param entry table
 function M.fold_close(buf, entry)
-	if entry.type ~= "dir" then
+	entry = resolve_dir_entry(buf, entry)
+	if not entry then
 		return
 	end
 
@@ -396,7 +430,8 @@ end
 ---@param buf   number
 ---@param entry table
 function M.fold_toggle(buf, entry)
-	if entry.type ~= "dir" then
+	entry = resolve_dir_entry(buf, entry)
+	if not entry then
 		return
 	end
 
@@ -415,7 +450,8 @@ end
 ---@param buf   number
 ---@param entry table
 function M.fold_open_recursive(buf, entry)
-	if entry.type ~= "dir" then
+	entry = resolve_dir_entry(buf, entry)
+	if not entry then
 		return
 	end
 
