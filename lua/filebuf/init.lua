@@ -4,7 +4,7 @@
 -- The whole non-hidden tree is rendered into one buffer with indent-based
 -- folding; edits are diffed against disk and applied on :w.  This file wires
 -- the modules together and exposes the public API; the heavy lifting lives in:
---   scan / buffer / diff / apply / git / folds / decoration / highlights
+--   scan / buffer / sync / git / actions / decoration
 --   actions (public fold & lazy-expand API)
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
@@ -12,11 +12,8 @@ local prof = require("filebuf.profiler")
 local line_mod = require("filebuf.line")
 local scan = require("filebuf.scan")
 local buffer = require("filebuf.buffer")
-local diff = require("filebuf.diff")
-local apply = require("filebuf.apply")
+local sync = require("filebuf.sync")
 local git = require("filebuf.git")
-local folds = require("filebuf.folds")
-local highlights = require("filebuf.highlights")
 local decoration = require("filebuf.decoration")
 local actions = require("filebuf.actions")
 
@@ -68,7 +65,7 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
 	actions.rebuild_folds(buf, entries, open_dirs)
 
 	-- Persist after folds are rebuilt so newly-revealed dirs default to closed.
-	folds.save_fold_state(buf, dir, entries)
+	actions.save_fold_state(buf, dir, entries)
 
 	-- Cache git status for the decoration provider's next redraw.
 	vim.b[buf].filebuf_git_status = git.get_status_map(dir)
@@ -89,7 +86,7 @@ local function refresh_buffer(buf)
 		return
 	end
 
-	folds.save_fold_state(buf, dir)
+	actions.save_fold_state(buf, dir)
 	local display_entries = vim.b[buf].filebuf_display_entries
 	local open_dirs = {}
 	if display_entries then
@@ -163,7 +160,7 @@ local function toggle_hidden(buf)
 	local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
 	local cursor_path = pre_entries[cursor_lnum] and pre_entries[cursor_lnum].path
 
-	folds.save_fold_state(buf, dir, pre_entries)
+	actions.save_fold_state(buf, dir, pre_entries)
 	local open_dirs = {}
 	for _, e in ipairs(pre_entries) do
 		if e.type == "dir" and vim.fn.foldclosed(e.lnum) == -1 then
@@ -202,81 +199,53 @@ end
 local function setup_keymaps(buf, dir)
 	local km = config.keymaps
 
-	-- fold_open
-	if km.fold_open then
-		vim.keymap.set("n", km.fold_open, function()
-			local entry = actions.get_entry_at_cursor(buf)
-			if entry then
-				actions.fold_open(buf, entry)
-			end
-		end, { buffer = buf, desc = "filebuf: open fold" })
+	-- Uniform entry-action keymaps: resolve cursor entry, call an actions function.
+	local ENTRY_KEYMAPS = {
+		fold_open           = { actions.fold_open,           "filebuf: open fold" },
+		fold_close          = { actions.fold_close,          "filebuf: close fold" },
+		fold_toggle         = { actions.fold_toggle,         "filebuf: toggle fold" },
+		fold_open_recursive = { actions.fold_open_recursive, "filebuf: recursively open folds" },
+		open_or_toggle      = { actions.open_or_toggle,      "filebuf: open file / toggle dir" },
+	}
+	for name, def in pairs(ENTRY_KEYMAPS) do
+		local key = km[name]
+		if key then
+			local fn = def[1]
+			local desc = def[2]
+			vim.keymap.set("n", key, function()
+				local entry = actions.get_entry_at_cursor(buf)
+				if entry then
+					fn(buf, entry)
+				end
+			end, { buffer = buf, desc = desc })
+		end
 	end
 
-	-- fold_close
-	if km.fold_close then
-		vim.keymap.set("n", km.fold_close, function()
-			local entry = actions.get_entry_at_cursor(buf)
-			if entry then
-				actions.fold_close(buf, entry)
-			end
-		end, { buffer = buf, desc = "filebuf: close fold" })
+	-- Buffer-wide action keymaps (no entry resolution needed).
+	local BUF_KEYMAPS = {
+		fold_open_all  = { actions.fold_open_all,  "filebuf: open all folds" },
+		fold_close_all = { actions.fold_close_all, "filebuf: close all folds" },
+	}
+	for name, def in pairs(BUF_KEYMAPS) do
+		local key = km[name]
+		if key then
+			vim.keymap.set("n", key, function()
+				def[1](buf)
+			end, { buffer = buf, desc = def[2] })
+		end
 	end
 
-	-- fold_toggle
-	if km.fold_toggle then
-		vim.keymap.set("n", km.fold_toggle, function()
-			local entry = actions.get_entry_at_cursor(buf)
-			if entry then
-				actions.fold_toggle(buf, entry)
-			end
-		end, { buffer = buf, desc = "filebuf: toggle fold" })
-	end
-
-	-- fold_open_recursive
-	if km.fold_open_recursive then
-		vim.keymap.set("n", km.fold_open_recursive, function()
-			local entry = actions.get_entry_at_cursor(buf)
-			if entry then
-				actions.fold_open_recursive(buf, entry)
-			end
-		end, { buffer = buf, desc = "filebuf: recursively open folds" })
-	end
-
-	-- fold_open_all
-	if km.fold_open_all then
-		vim.keymap.set("n", km.fold_open_all, function()
-			actions.fold_open_all(buf)
-		end, { buffer = buf, desc = "filebuf: open all folds" })
-	end
-
-	-- fold_close_all
-	if km.fold_close_all then
-		vim.keymap.set("n", km.fold_close_all, function()
-			actions.fold_close_all(buf)
-		end, { buffer = buf, desc = "filebuf: close all folds" })
-	end
-
-	-- open_or_toggle
-	if km.open_or_toggle then
-		vim.keymap.set("n", km.open_or_toggle, function()
-			local entry = actions.get_entry_at_cursor(buf)
-			if entry then
-				actions.open_or_toggle(buf, entry)
-			end
-		end, { buffer = buf, desc = "filebuf: open file / toggle dir" })
-	end
-
-	-- toggle_hidden
+	-- toggle_hidden (custom — toggles config.show_hidden)
 	if km.toggle_hidden then
 		vim.keymap.set("n", km.toggle_hidden, function()
 			toggle_hidden(buf)
 		end, { buffer = buf, desc = "filebuf: toggle hidden files" })
 	end
 
-	-- close_filebuf
+	-- close_filebuf (custom — persists folds before deleting buffer)
 	if km.close_filebuf then
 		vim.keymap.set("n", km.close_filebuf, function()
-			folds.save_fold_state(buf, dir)
+			actions.save_fold_state(buf, dir)
 			vim.api.nvim_buf_delete(buf, { force = true })
 		end, { buffer = buf, desc = "filebuf: close" })
 	end
@@ -346,14 +315,14 @@ function M.open(dir)
 	vim.wo.winhighlight = "Folded:FilebufFoldLine"
 	vim.wo.fillchars = (vim.wo.fillchars or "") .. "foldopen:▼,foldclose:▶,fold: "
 
-	folds.create_folds(buf, display_entries)
+	actions.create_folds(buf, display_entries)
 
 	-- Restore saved fold state, or close everything on first open.
-	if folds.closed[dir] then
+	if actions.closed[dir] then
 		-- create_folds already closed every dir; open only the ones the user
 		-- had expanded, so newly-revealed dirs default to closed.
 		for _, e in ipairs(display_entries) do
-			if e.type == "dir" and not folds.closed[dir][e.path] then
+			if e.type == "dir" and not actions.closed[dir][e.path] then
 				vim.cmd(string.format("silent! %dfoldopen", e.lnum))
 			end
 		end
@@ -409,15 +378,15 @@ function M.open(dir)
 				if not all_disk then
 					all_disk = scan.scan_tree(dir)
 				end
-				local ops = diff.compute_diff(buf_entries, scan.filter_visible(all_disk))
+				local ops = sync.compute_diff(buf_entries, scan.filter_visible(all_disk))
 
 				if #ops.errors > 0 then
-					apply.report_errors(buf, ops.errors)
+					sync.report_errors(buf, ops.errors)
 					error("filebuf: validation failed")
 				end
 				vim.diagnostic.reset(nil, buf)
 
-				apply.apply_ops(ops)
+				sync.apply_ops(ops)
 				refresh_buffer(buf)
 				vim.notify("filebuf: saved", vim.log.levels.INFO)
 			end)
@@ -443,7 +412,7 @@ function M.setup(opts)
 		config[k] = v -- mutate in place so all modules see the update
 	end
 
-	highlights.define()
+	config.define_highlights()
 
 	-- Register the decoration provider once; it refreshes extmarks on redraw.
 	vim.api.nvim_set_decoration_provider(decoration.ns, {

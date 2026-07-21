@@ -6,11 +6,97 @@
 -- internally — the caller resolves the cursor to an entry first so
 -- the functions can be called from arbitrary keymaps or scripts.
 ----------------------------------------------------------------------
+local prof = require("filebuf.profiler")
+local buffer = require("filebuf.buffer")
 local scan = require("filebuf.scan")
 local line_mod = require("filebuf.line")
-local folds = require("filebuf.folds")
 
 local M = {}
+
+--- Persisted fold-closed state, keyed by root directory.  Each value is a
+--- set of paths whose folds were closed; survives buffer close/reopen so
+--- the user's fold preferences stick.
+M.closed = {}
+
+----------------------------------------------------------------------
+-- Fold creation & persistence (internal machinery)
+----------------------------------------------------------------------
+
+--- Create a fold spanning each directory and its descendants (nested dirs get
+--- their own inner folds).  Single O(n) stack pass: directories are pushed
+--- when seen and their fold emitted when an entry at ≤ indent arrives.  The
+--- LIFO order emits inner folds before outer ones, as Neovim requires.
+---@param buf number
+---@param entries? table[]  pre-parsed entries (avoids a redundant parse)
+function M.create_folds(buf, entries)
+	prof.start("create_folds")
+	entries = entries or buffer.parse_buffer(buf)
+	if #entries == 0 then
+		prof.stop()
+		return
+	end
+
+	local stack = {} -- { lnum, indent }
+	local prev -- last entry seen (fold endpoint)
+	local cmds = {}
+
+	local function close_dir(d)
+		if prev and prev.indent > d.indent and prev.lnum > d.lnum then
+			cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev.lnum)
+		end
+	end
+
+	for _, e in ipairs(entries) do
+		-- Pop directories whose subtree has ended (current indent back at or
+		-- above theirs); prev is that subtree's last line.
+		while #stack > 0 and stack[#stack].indent >= e.indent do
+			close_dir(table.remove(stack))
+		end
+		if e.type == "dir" then
+			stack[#stack + 1] = { lnum = e.lnum, indent = e.indent }
+		end
+		prev = e
+	end
+	while #stack > 0 do
+		close_dir(table.remove(stack))
+	end
+
+	if #cmds > 0 then
+		vim.cmd(table.concat(cmds, "|"))
+	end
+	prof.stop()
+end
+
+--- Persist the closed-fold set for `root` from the current buffer.
+---@param buf number
+---@param root string
+---@param entries? table[]  pre-parsed display entries (each carrying lnum)
+function M.save_fold_state(buf, root, entries)
+	M.closed[root] = {}
+	entries = entries or vim.b[buf].filebuf_display_entries or {}
+	for _, e in ipairs(entries) do
+		if e.type == "dir" and vim.fn.foldclosed(e.lnum) ~= -1 then
+			M.closed[root][e.path] = true
+		end
+	end
+end
+
+--- Fold-text callback (v:lua.FilebufFoldText).  Shows the entry name with
+--- its indent converted to spaces so it aligns regardless of tabstop.
+function _G.FilebufFoldText()
+	local line = vim.fn.getline(vim.v.foldstart)
+	local indent_ws = line:match("^(%s*)") or ""
+	local name = line:match("^%s*(.-)%s*$") or line
+	local buf = vim.api.nvim_get_current_buf()
+	local entries = vim.b[buf].filebuf_display_entries
+	local entry = entries[vim.v.foldstart]
+	local text = string.rep(" ", vim.fn.strdisplaywidth(indent_ws)) .. name
+	local hl = "Directory"
+	if entry.is_hidden or entry.is_ignored then
+		hl = "FilebufHiddenDir"
+	end
+	return { { text, hl } }
+end
 
 ----------------------------------------------------------------------
 -- Internal helpers
@@ -77,7 +163,7 @@ end
 ---@param open_dirs table    set of dir paths to keep open
 function M.rebuild_folds(buf, entries, open_dirs)
 	vim.cmd("silent! normal! zE")
-	folds.create_folds(buf, entries)
+	M.create_folds(buf, entries)
 	for _, e in ipairs(entries) do
 		if e.type == "dir" and open_dirs and open_dirs[e.path] then
 			vim.cmd(string.format("silent! %dfoldopen", e.lnum))
@@ -177,7 +263,7 @@ function M.expand_dir(buf, lazy_entry)
 	vim.b[buf].filebuf_all_entries = all_entries
 
 	-- 9. Rebuild folds and restore previously-open directories.
-	folds.create_folds(buf, display)
+	M.create_folds(buf, display)
 	for _, e in ipairs(display) do
 		if e.type == "dir" and open_dirs[e.path] then
 			vim.cmd(string.format("silent! %dfoldopen", e.lnum))
@@ -271,7 +357,7 @@ function M.fold_open(buf, entry)
 
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	vim.cmd("normal! zo")
-	folds.save_fold_state(buf, vim.b[buf].filebuf_root)
+	M.save_fold_state(buf, vim.b[buf].filebuf_root)
 end
 
 --- Close a fold at `entry` and persist fold state.
@@ -284,7 +370,7 @@ function M.fold_close(buf, entry)
 
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	vim.cmd("normal! zc")
-	folds.save_fold_state(buf, vim.b[buf].filebuf_root)
+	M.save_fold_state(buf, vim.b[buf].filebuf_root)
 end
 
 --- Toggle a fold at `entry`.  Expands lazy dirs before toggling.
@@ -303,7 +389,7 @@ function M.fold_toggle(buf, entry)
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	local is_closed = vim.fn.foldclosedend(entry.lnum) ~= -1
 	vim.cmd(is_closed and "normal! zo" or "normal! zc")
-	folds.save_fold_state(buf, vim.b[buf].filebuf_root)
+	M.save_fold_state(buf, vim.b[buf].filebuf_root)
 end
 
 --- Recursively open folds at `entry` (zO).  Expands lazy dirs recursively first.
@@ -321,7 +407,7 @@ function M.fold_open_recursive(buf, entry)
 
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	vim.cmd("normal! zO")
-	folds.save_fold_state(buf, vim.b[buf].filebuf_root)
+	M.save_fold_state(buf, vim.b[buf].filebuf_root)
 end
 
 --- Open all folds (zR).  Expands all lazy dirs first, then opens all folds.
@@ -329,14 +415,14 @@ end
 function M.fold_open_all(buf)
 	M.expand_all_dirs(buf)
 	vim.cmd("normal! zR")
-	folds.save_fold_state(buf, vim.b[buf].filebuf_root)
+	M.save_fold_state(buf, vim.b[buf].filebuf_root)
 end
 
 --- Close all folds (zM) and persist state.
 ---@param buf number
 function M.fold_close_all(buf)
 	vim.cmd("normal! zM")
-	folds.save_fold_state(buf, vim.b[buf].filebuf_root)
+	M.save_fold_state(buf, vim.b[buf].filebuf_root)
 end
 
 ----------------------------------------------------------------------

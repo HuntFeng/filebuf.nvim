@@ -28,9 +28,31 @@ local config = {
 		-- Entry actions
 		open_or_toggle = "<CR>", -- toggle dir fold OR open file
 		-- Buffer actions
-		toggle_hidden = "H",
+		toggle_hidden = "gh",
 		close_filebuf = "q",
 	},
 }
+
+--- Git status colors + hidden/link entry colors.
+---@type table<string, table>
+local HIGHLIGHTS = {
+	FilebufGitAdded = { fg = "#98c379" },
+	FilebufGitModified = { fg = "#e5c07b" },
+	FilebufGitDeleted = { fg = "#e06c75" },
+	FilebufGitUntracked = { fg = "#61afef" },
+	FilebufGitConflict = { fg = "#c678dd" },
+	FilebufGitRenamed = { fg = "#56b6c2" },
+	FilebufHiddenFile = { fg = "#5c6370" },
+	FilebufHiddenDir = { fg = "#5c6370" },
+	FilebufLink = { fg = "#56b6c2" },
+	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
+}
+
+--- Define every filebuf highlight group.  Called from setup().
+function config.define_highlights()
+	for name, def in pairs(HIGHLIGHTS) do
+		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
+	end
+end
 
 return config
