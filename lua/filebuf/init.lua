@@ -390,14 +390,32 @@ function M.open(dir)
 					sync.report_errors(buf, ops.errors)
 					error("filebuf: validation failed")
 				end
-				vim.diagnostic.reset(nil, buf)
+				-- Clear any stale diagnostics on successful validation (safe-wrapped).
+				pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 
 				sync.apply_ops(ops)
 				refresh_buffer(buf)
 				vim.notify("filebuf: saved", vim.log.levels.INFO)
 			end)
 			if not ok and not tostring(result):match("validation failed") then
-				vim.notify("filebuf: save error – " .. tostring(result), vim.log.levels.ERROR)
+				-- Unexpected error: extract a clean one-line message from the
+				-- traceback so the user isn't faced with a wall of paths.
+				local msg = tostring(result)
+				-- Take the last meaningful line (the actual error), skipping
+				-- stack-trace lines that start with a tab or "./".
+				for line in msg:gmatch("[^\n]+") do
+					local trimmed = line:match("^%s*(.*)%s*$")
+					if not trimmed:match("^[\t%.]") and not trimmed:match("^%[C]") then
+						msg = trimmed
+					end
+				end
+				vim.notify(
+					string.format(
+						"filebuf: save error — %s\nNothing was saved; your files are unchanged.",
+						msg
+					),
+					vim.log.levels.ERROR
+				)
 			end
 		end,
 	})

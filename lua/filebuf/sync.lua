@@ -7,6 +7,11 @@ local config = require("filebuf.config")
 
 local M = {}
 
+--- Dedicated diagnostic namespace so error signs don't collide with other
+--- plugins and won't throw "namespace: expected number, got nil" on older
+--- Neovim versions that reject a nil namespace.
+M.diag_ns = vim.api.nvim_create_namespace("filebuf-diag")
+
 --- Compare the buffer's desired state with the filesystem.  Rename detection
 --- is name-based: an unmatched buffer entry pairs with an unmatched disk entry
 --- of the same name, preferring the same parent directory.
@@ -30,16 +35,19 @@ function M.compute_diff(buf_entries, disk_entries)
 		local de = disk_by_path[be.path]
 		if de then
 			if (de.type == "dir") ~= (be.type == "dir") then
-				-- Type mismatch, e.g. a stray or missing trailing "/".
-				local detail = be.type == "dir" and " (extra trailing '/')" or " (missing trailing '/')"
+				-- Type mismatch: user made a file into a folder or vice versa.
+				-- Give a clear message with line number and reassurance.
 				errors[#errors + 1] = {
 					lnum = be.lnum,
 					message = string.format(
-						"'%s' is a %s on disk but shown as %s in buffer%s",
+						"Line %d: '%s' is a %s on disk, but you changed it to a %s. "
+							.. "A %s cannot become a %s — nothing was saved.",
+						be.lnum,
 						be.name,
 						de.type,
 						be.type,
-						detail
+						de.type,
+						be.type
 					),
 				}
 			end
@@ -86,7 +94,9 @@ function M.compute_diff(buf_entries, disk_entries)
 				errors[#errors + 1] = {
 					lnum = be.lnum,
 					message = string.format(
-						"'%s' rename changes type: %s on disk -> %s in buffer",
+						"Line %d: Renaming '%s' would change a %s (on disk) into a %s. "
+							.. "Type changes are not allowed — nothing was saved.",
+						be.lnum,
 						be.name,
 						best.type,
 						be.type
@@ -111,11 +121,14 @@ function M.compute_diff(buf_entries, disk_entries)
 	return { unchanged = unchanged, renamed = renamed, created = created, deleted = deleted, errors = errors }
 end
 
---- Report validation errors as inline diagnostics plus one notify summary.
+--- Report validation errors as inline diagnostic signs at the offending lines
+--- plus a summary notification.  Diagnostic calls are wrapped in pcall so a
+--- Neovim version mismatch in the diagnostic API can never crash the save.
 ---@param buf number
 ---@param errors table[]  { lnum, message }
 function M.report_errors(buf, errors)
-	vim.diagnostic.reset(nil, buf)
+	-- Clear previous diagnostics (safe-wrapped — nil ns can throw on older Neovim).
+	pcall(vim.diagnostic.reset, M.diag_ns, buf)
 	if #errors == 0 then
 		return
 	end
@@ -129,8 +142,12 @@ function M.report_errors(buf, errors)
 			source = "filebuf",
 		}
 	end
-	vim.diagnostic.set(nil, buf, diags)
-	vim.notify(string.format("filebuf: %d error(s) — fix and save again", #errors), vim.log.levels.ERROR)
+	-- Place error signs at the offending lines (safe-wrapped).
+	pcall(vim.diagnostic.set, M.diag_ns, buf, diags)
+	vim.notify(
+		string.format("filebuf: %d error(s) — nothing was saved; fix the marked lines and try again", #errors),
+		vim.log.levels.ERROR
+	)
 end
 
 --- Depth of a path, measured by "/" count (for create/delete ordering).
