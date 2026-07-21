@@ -10,6 +10,7 @@ local prof = require("filebuf.profiler")
 local buffer = require("filebuf.buffer")
 local scan = require("filebuf.scan")
 local line_mod = require("filebuf.line")
+local git = require("filebuf.git")
 
 local M = {}
 
@@ -83,6 +84,8 @@ end
 
 --- Fold-text callback (v:lua.FilebufFoldText).  Shows the entry name with
 --- its indent converted to spaces so it aligns regardless of tabstop.
+--- When the directory has git status (aggregated from descendants), the
+--- status chars are appended with per-char highlighting.
 function _G.FilebufFoldText()
 	local line = vim.fn.getline(vim.v.foldstart)
 	local indent_ws = line:match("^(%s*)") or ""
@@ -92,9 +95,23 @@ function _G.FilebufFoldText()
 	local entry = entries[vim.v.foldstart]
 	local text = string.rep(" ", vim.fn.strdisplaywidth(indent_ws)) .. name
 	local hl = "Directory"
-	if entry.is_hidden or entry.is_ignored then
+	if entry and (entry.is_hidden or entry.is_ignored) then
 		hl = "FilebufHiddenDir"
 	end
+
+	-- Append git status so closed folders still show what happened inside.
+	local status_map = vim.b[buf].filebuf_git_status
+	if status_map and entry then
+		local segments = git.dir_status(entry, status_map)
+		if segments then
+			local result = { { text, hl }, { " ", nil } }
+			for _, seg in ipairs(segments) do
+				result[#result + 1] = { seg.char, seg.hl }
+			end
+			return result
+		end
+	end
+
 	return { { text, hl } }
 end
 
