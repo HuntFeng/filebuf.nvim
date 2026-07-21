@@ -444,6 +444,11 @@ function M.setup(opts)
 
 	config.define_highlights()
 
+	-- Hijack netrw so directory opens use filebuf instead.
+	if config.hijack_netrw then
+		require("filebuf.hijack").setup()
+	end
+
 	-- Register the decoration provider once; it refreshes extmarks on redraw.
 	vim.api.nvim_set_decoration_provider(decoration.ns, {
 		on_start = decoration.on_start,

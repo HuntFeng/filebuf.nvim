@@ -13,6 +13,10 @@ local config = {
 	git_status = true,
 	show_hidden = false,
 	respect_ignore = true,
+	--- When true (default), filebuf disables netrw and intercepts directory
+	--- opens so `nvim <dir>` and `:e <dir>` open filebuf instead of netrw.
+	--- Set to false if you need netrw for remote file editing (scp://, etc.).
+	hijack_netrw = true,
 
 	--- Customizable keymaps.  Set any value to a key string to override,
 	--- or to `false` to disable the binding entirely.
