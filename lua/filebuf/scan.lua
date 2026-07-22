@@ -12,11 +12,60 @@ local ignore = require("filebuf.ignore")
 
 local M = {}
 
---- Sort a child list in place: dirs, then links, then files;
---- case-insensitive alphabetical within each group.
+--- Sort a child list in place according to the configured sort method.
+--- "type"     — dirs, then links, then files; alpha within each group.
+--- "name"     — case-insensitive alphabetical.
+--- "modified" — most recently modified first; ties broken alphabetically.
+--- "created"  — most recently created first (birthtime or mtime fallback).
 local ENTRY_PRIO = { dir = 1, link = 2, file = 3, error = 4 }
-local function sort_children(children)
-	if #children > 1 then
+local function sort_children(children, sort_method)
+	if #children <= 1 then
+		return
+	end
+	sort_method = sort_method or config.sort_method
+
+	if sort_method == "name" then
+		table.sort(children, function(a, b)
+			return a.name:lower() < b.name:lower()
+		end)
+	elseif sort_method == "modified" then
+		-- Stat entries to get mtime; cache on entry so repeated sorts are free.
+		for _, e in ipairs(children) do
+			if not e._stat then
+				e._stat = vim.loop.fs_stat(e.path)
+			end
+		end
+		table.sort(children, function(a, b)
+			local ta = (a._stat and a._stat.mtime and a._stat.mtime.sec) or 0
+			local tb = (b._stat and b._stat.mtime and b._stat.mtime.sec) or 0
+			if ta ~= tb then
+				return ta > tb -- newest first
+			end
+			return a.name:lower() < b.name:lower()
+		end)
+	elseif sort_method == "created" then
+		for _, e in ipairs(children) do
+			if not e._stat then
+				e._stat = vim.loop.fs_stat(e.path)
+			end
+		end
+		table.sort(children, function(a, b)
+			local function btime_sec(entry)
+				local st = entry._stat
+				if not st then
+					return 0
+				end
+				local bt = st.birthtime or st.mtime
+				return bt and bt.sec or 0
+			end
+			local ba = btime_sec(a)
+			local bb = btime_sec(b)
+			if ba ~= bb then
+				return ba > bb -- newest first
+			end
+			return a.name:lower() < b.name:lower()
+		end)
+	else -- "type" (default)
 		table.sort(children, function(a, b)
 			local pa = ENTRY_PRIO[a.type] or 5
 			local pb = ENTRY_PRIO[b.type] or 5

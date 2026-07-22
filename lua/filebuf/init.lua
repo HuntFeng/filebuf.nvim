@@ -153,6 +153,8 @@ end
 -- Commands
 ----------------------------------------------------------------------
 
+local SORT_METHODS = { "type", "name", "modified", "created" }
+
 --- Toggle show_hidden and refresh, preserving the cursor entry and fold state.
 --- Refuses when there are unsaved changes.  With hybrid mode, hidden entries
 --- are already cached as lazy placeholders in filebuf_all_entries, so toggling
@@ -466,6 +468,24 @@ function M.setup(opts)
 			vim.notify("filebuf: not in a filebuf buffer", vim.log.levels.WARN)
 		end
 	end, { desc = "Toggle visibility of hidden (dot) files in filebuf" })
+	vim.api.nvim_create_user_command("FilebufSortMethod", function(args)
+		local buf = vim.api.nvim_get_current_buf()
+		if not vim.b[buf] or not vim.b[buf].filebuf_root then
+			vim.notify("filebuf: not in a filebuf buffer", vim.log.levels.WARN)
+			return
+		end
+		local method = args.args and args.args:match("^%s*(%S+)%s*$")
+		if method and vim.tbl_contains(SORT_METHODS, method) then
+			config.sort_method = method
+			refresh_buffer(buf)
+			vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
+		else
+			vim.notify(
+				"filebuf: unknown sort method '" .. method .. "'. Valid: " .. table.concat(SORT_METHODS, ", "),
+				vim.log.levels.ERROR
+			)
+		end
+	end, { nargs = "?", desc = "Set or cycle sort method (type | name | modified | created)" })
 end
 
 return M
