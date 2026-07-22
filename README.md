@@ -17,31 +17,23 @@ Edit your filesystem as a Neovim buffer. The entire directory tree is rendered i
 
 ## Installation
 
+### Dependencies
+- git  (most linux machines has it)
+- find (most linux machines has it)
+- (Optional but recommand) [`fd`](https://github.com/sharkdp/fd)
+
 > [!TIP]
 > Install [`fd`](https://github.com/sharkdp/fd) for dramatically faster scanning on large repositories. The plugin detects it automatically and falls back to `find` if it's missing.
 
-### lazy.nvim
+### lazy.nvim / vim.pack
 
 ```lua
 {
-  "your-username/filebuf.nvim",
+  "HuntFeng/filebuf.nvim",
   config = function()
     require("filebuf").setup()
   end,
 }
-```
-
-### Neovim built-in packages
-
-```sh
-git clone https://github.com/your-username/filebuf.nvim.git \
-  ~/.local/share/nvim/site/pack/plugins/start/filebuf.nvim
-```
-
-Then add to your `init.lua`:
-
-```lua
-require("filebuf").setup()
 ```
 
 ## Usage
@@ -69,36 +61,36 @@ Pass options to `setup()`:
 
 ```lua
 require("filebuf").setup({
-  -- Move deleted files to a trash directory instead of removing them
-  permanent_delete = true,
+    -- Move deleted files to a /tmp/filebuf_trash directory instead of removing them
+    permanent_delete = false,
 
-  -- Auto-focus the file you were editing before opening filebuf
-  auto_focus_current_file = true,
+    -- Auto-focus the file you were editing before opening filebuf
+    auto_focus_current_file = true,
 
-  -- Show git status indicators
-  git_status = true,
+    -- Show git status indicators
+    git_status = true,
 
-  -- Show hidden (dot) files by default
-  show_hidden = false,
+    -- Show hidden (dot) files by default
+    show_hidden = false,
 
-  -- Respect .gitignore / .ignore patterns
-  respect_ignore = true,
+    -- Respect .gitignore / .ignore patterns
+    respect_ignore = true,
 
-  -- Use filebuf instead of netrw when opening directories
-  hijack_netrw = true,
+    -- Use filebuf instead of netrw when opening directories
+    hijack_netrw = true,
 
-  -- Customize or disable keymaps (set to false to disable)
-  keymaps = {
-    fold_open = "zo",
-    fold_close = "zc",
-    fold_toggle = "za",
-    fold_open_recursive = "zO",
-    fold_open_all = "zR",
-    fold_close_all = "zM",
-    open_or_toggle = "<CR>",
-    toggle_hidden = "gh",
-    close_filebuf = "q",
-  },
+    -- Customize or disable keymaps (set to false to disable)
+    keymaps = {
+        fold_open = "zo",
+        fold_close = "zc",
+        fold_toggle = "za",
+        fold_open_recursive = "zO",
+        fold_open_all = "zR",
+        fold_close_all = "zM",
+        open_or_toggle = "<CR>",
+        toggle_hidden = "gh",
+        close_filebuf = "q",
+    },
 })
 ```
 

@@ -8,7 +8,7 @@
 ---@field respect_ignore boolean  when true, .ignore/.gitignore patterns filter entries
 ---@field keymaps table  maps action names to key strings; set a value to false to disable
 local config = {
-	permanent_delete = true,
+	permanent_delete = false,
 	auto_focus_current_file = true,
 	git_status = true,
 	show_hidden = false,

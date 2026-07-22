@@ -180,7 +180,7 @@ function M.apply_ops(ops)
 	-- single timestamped recovery folder.
 	local trash_dir
 	if not config.permanent_delete and #to_delete > 0 then
-		trash_dir = string.format("/tmp/filebuf-trash/%s", os.date("%Y_%m_%d_%H_%M_%S"))
+		trash_dir = string.format("/tmp/filebuf_trash/%s", os.date("%Y_%m_%d_%H_%M_%S"))
 		vim.fn.mkdir(trash_dir, "p")
 	end
 
