@@ -209,16 +209,16 @@ describe("sync.lua", function()
 			-- keep.txt → unchanged
 			assert.equals(1, #ops.unchanged)
 			assert.equals("keep.txt", ops.unchanged[1].name)
-			-- move.txt → renamed
-			assert.equals(1, #ops.renamed)
+			-- move.txt → renamed (name-based), remove.txt → added.txt (same-parent)
+			assert.equals(2, #ops.renamed)
 			assert.equals("move.txt", ops.renamed[1].old.name)
 			assert.equals("/root/new/move.txt", ops.renamed[1].new.path)
-			-- added.txt → created
-			assert.equals(1, #ops.created)
-			assert.equals("added.txt", ops.created[1].name)
-			-- remove.txt → deleted
-			assert.equals(1, #ops.deleted)
-			assert.equals("remove.txt", ops.deleted[1].name)
+			assert.equals("remove.txt", ops.renamed[2].old.name)
+			assert.equals("/root/added.txt", ops.renamed[2].new.path)
+			-- No standalone creates or deletes: the remove+add pair was
+			-- consolidated into an in-place rename to preserve content.
+			assert.equals(0, #ops.created)
+			assert.equals(0, #ops.deleted)
 			assert.equals(0, #ops.errors)
 		end)
 

@@ -58,7 +58,7 @@ function M.compute_diff(buf_entries, disk_entries)
 		end
 	end
 
-	-- Phase 2: name-based rename matching.
+	-- Phase 2: name-based rename matching (same name, different parent).
 	local disk_by_name = {}
 	for _, de in ipairs(disk_entries) do
 		if not consumed[de.path] then
@@ -72,6 +72,7 @@ function M.compute_diff(buf_entries, disk_entries)
 	end
 
 	local renamed_disk = {} -- disk paths consumed by renames
+	local buf_unmatched2 = {} -- entries still unmatched after name-based matching
 	for _, be in ipairs(buf_unmatched) do
 		local candidates = disk_by_name[be.name]
 		local best
@@ -106,7 +107,59 @@ function M.compute_diff(buf_entries, disk_entries)
 			renamed[#renamed + 1] = { old = best, new = be }
 			renamed_disk[best.path] = true
 		else
-			created[#created + 1] = be
+			buf_unmatched2[#buf_unmatched2 + 1] = be
+		end
+	end
+
+	-- Phase 2.5: same-parent matching — detects in-place renames where the
+	-- name changed but the parent directory stayed the same.  Without this,
+	-- in-place renames would be treated as delete (old path) + create (new
+	-- empty file), losing the original content.
+	--
+	-- Directories are excluded: an in-place dir rename would conflict with
+	-- child renames already detected in Phase 2 (children's paths reference
+	-- the new parent name).  Directories carry no content to lose, so the
+	-- old create+delete approach (after moving children out) works correctly.
+	if #buf_unmatched2 > 0 then
+		local disk_by_parent = {}
+		for _, de in ipairs(disk_entries) do
+			if not consumed[de.path] and not renamed_disk[de.path] then
+				local parent = vim.fn.fnamemodify(de.path, ":h")
+				local list = disk_by_parent[parent]
+				if not list then
+					list = {}
+					disk_by_parent[parent] = list
+				end
+				list[#list + 1] = de
+			end
+		end
+		for _, be in ipairs(buf_unmatched2) do
+			-- Directories are excluded from same-parent matching (see above).
+			if be.type == "dir" then
+				created[#created + 1] = be
+				goto continue
+			end
+			local be_parent = vim.fn.fnamemodify(be.path, ":h")
+			local candidates = disk_by_parent[be_parent]
+			local best
+			if candidates then
+				-- Take the first available non-dir disk entry in the same
+				-- parent (dirs are left for Phase 3 deletion).
+				for i, de in ipairs(candidates) do
+					if not renamed_disk[de.path] and de.type ~= "dir" then
+						best = de
+						table.remove(candidates, i)
+						break
+					end
+				end
+			end
+			if best then
+				renamed[#renamed + 1] = { old = best, new = be }
+				renamed_disk[best.path] = true
+			else
+				created[#created + 1] = be
+			end
+			::continue::
 		end
 	end
 

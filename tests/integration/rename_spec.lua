@@ -39,9 +39,10 @@ describe("rename", function()
 
 		helpers.save_buffer(buf)
 
-		-- Old file is gone, new file exists.
+		-- Old file is gone, new file exists with content preserved.
 		assert.is_nil(helpers.fs_stat(tmpdir .. "/oldname.txt"))
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/newname.txt"))
+		assert.equals("content", helpers.read_file(tmpdir .. "/newname.txt"))
 	end)
 
 	it("renames a directory when its name is edited", function()
@@ -59,8 +60,9 @@ describe("rename", function()
 		-- Old dir is gone, new dir exists.
 		assert.is_nil(helpers.fs_stat(tmpdir .. "/mydir"))
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/renamed_dir"))
-		-- Children are preserved under the new name.
+		-- Children are preserved under the new name with content intact.
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/renamed_dir/nested.txt"))
+		assert.equals("inside", helpers.read_file(tmpdir .. "/renamed_dir/nested.txt"))
 	end)
 
 	it("moves a file to a different parent by changing its indent", function()
@@ -90,10 +92,38 @@ describe("rename", function()
 
 		helpers.save_buffer(buf)
 
-		-- File should now be under mydir, not sourcedir.
+		-- File should now be under mydir, not sourcedir, with content intact.
 		assert.is_nil(helpers.fs_stat(tmpdir .. "/sourcedir/move_me.txt"))
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/mydir/move_me.txt"))
+		assert.equals("movable", helpers.read_file(tmpdir .. "/mydir/move_me.txt"))
 	end)
+
+	it("preserves file content when renaming in-place", function()
+			-- Write a file with multiline content to ensure the full content survives.
+			local f = io.open(tmpdir .. "/multiline.txt", "w")
+			f:write("line one\nline two\nline three\n")
+			f:close()
+
+			-- Refresh the buffer to pick up the new file.
+			helpers.close_filebuf(buf)
+			buf = helpers.open_filebuf(tmpdir)
+
+			local lines = helpers.get_buffer_lines(buf)
+			for i, line in ipairs(lines) do
+				if line == "multiline.txt" then
+					lines[i] = "multiline_renamed.txt"
+					break
+				end
+			end
+			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+
+			helpers.save_buffer(buf)
+
+			-- Old file is gone, new file has the original multiline content.
+			assert.is_nil(helpers.fs_stat(tmpdir .. "/multiline.txt"))
+			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/multiline_renamed.txt"))
+			assert.equals("line one\nline two\nline three\n", helpers.read_file(tmpdir .. "/multiline_renamed.txt"))
+		end)
 
 	it("handles rename + create + delete in a single save", function()
 		local lines = helpers.get_buffer_lines(buf)
@@ -130,9 +160,10 @@ describe("rename", function()
 
 		helpers.save_buffer(buf)
 
-		-- Rename succeeded.
+		-- Rename succeeded with content preserved.
 		assert.is_nil(helpers.fs_stat(tmpdir .. "/oldname.txt"))
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/renamed.txt"))
+		assert.equals("content", helpers.read_file(tmpdir .. "/renamed.txt"))
 		-- Create succeeded.
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/brand_new.txt"))
 		-- Delete succeeded.
