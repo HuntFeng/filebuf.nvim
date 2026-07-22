@@ -1,26 +1,24 @@
 # filebuf.nvim
 
-Edit your filesystem in Neovim buffer. The directory tree is rendered into a single editable buffer with indent-based folding.
-
+A minimalistic, zero-dependencies, intuitive tree-based filesystem editor for neovim.
 
 https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
 
+:construction: Early stage plugin, expect changes :construction:
 
 ## Features
 
-- **Editable tree** - create, rename, and delete, search files/dirs by editing the buffer. Diffs are validated and applied on `:w`.
-- **Indent-based folding** - directories fold like code. Fold state is persisted across sessions.
+- **Editable tree** - create, rename, delete and search files/dirs in a buffer. Diffs are validated and applied on `:w`.
+- **Indent-based folding** - directories fold like code.
 - **Git status** - per-file and per-directory git indicators (added, modified, untracked,...).
 - **Diagnostics** - when wrong operations occur, buffer won't save and shows diagnostics.
-- **Respect .gitignore** - hidden and ignored directories are hidden by default and will loaded on demand when you expand them.
-- **Netrw hijack** - `nvim .` and `:e <dir>` open filebuf instead of netrw (configurable).
-- **Cursor-aware auto-focus** - when opening, the tree expands to reveal and center the file you were just editing.
-- **Configurable keymaps** - all bindings overrideable, standard vim-fold keys by default.
-- **Fast scanning** - uses `fd` when available for near-instant scans on large repos, with a `find` fallback.
+- **Respect .gitignore** - hidden and ignored directories are hidden by default and will be loaded on demand upon expansion.
+- **Netrw hijack** - `nvim .`, `:e <dir>` and `Ex .` etc opens filebuf instead of netrw (configurable).
 
 ## Installation
 
-### Dependencies
+### Requirements
+- neovim >= 0.12.0
 - git  (most linux machines has it)
 - find (most linux machines has it)
 - (Optional but recommand) [`fd`](https://github.com/sharkdp/fd)
@@ -28,14 +26,12 @@ https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
 > [!TIP]
 > Install [`fd`](https://github.com/sharkdp/fd) for dramatically faster scanning on large repositories. The plugin detects it automatically and falls back to `find` if it's missing.
 
-### lazy.nvim / vim.pack
-
+`lazy.nvim` or other similar package manager
 ```lua
 {
   "HuntFeng/filebuf.nvim",
-  config = function()
-    require("filebuf").setup()
-  end,
+  opts = {},
+  -- don't lazy load it if you want to hijack netrw
 }
 ```
 
