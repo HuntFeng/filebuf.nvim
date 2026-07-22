@@ -1,19 +1,22 @@
 # filebuf.nvim
 
-Edit your filesystem as a Neovim buffer. The entire directory tree is rendered into a single editable buffer with indent-based folding — rename, create, and delete files by editing lines, then `:w` to apply. No sidebars, no netrw. Just a buffer.
+Edit your filesystem in Neovim buffer. The directory tree is rendered into a single editable buffer with indent-based folding.
 
-> 📺 **[Demo video coming soon]**
+
+https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
+
 
 ## Features
 
-- **Editable tree** — create, rename, and delete files by editing the buffer. Diffs are validated and applied on `:w`.
-- **Indent-based folding** — directories fold like code. Fold state is persisted across sessions.
-- **Git status** — per-file and per-directory git indicators (added, modified, untracked, conflicted).
-- **Lazy loading** — hidden and ignored directories are loaded on demand when you expand them.
-- **Netrw hijack** — `nvim .` and `:e <dir>` open filebuf instead of netrw (configurable).
-- **Cursor-aware auto-focus** — when opening, the tree expands to reveal and center the file you were just editing.
-- **Configurable keymaps** — all bindings overrideable, standard vim-fold keys by default.
-- **Fast scanning** — uses `fd` when available for near-instant scans on large repos, with a `find` fallback.
+- **Editable tree** - create, rename, and delete, search files/dirs by editing the buffer. Diffs are validated and applied on `:w`.
+- **Indent-based folding** - directories fold like code. Fold state is persisted across sessions.
+- **Git status** - per-file and per-directory git indicators (added, modified, untracked,...).
+- **Diagnostics** - when wrong operations occur, buffer won't save and shows diagnostics.
+- **Respect .gitignore** - hidden and ignored directories are hidden by default and will loaded on demand when you expand them.
+- **Netrw hijack** - `nvim .` and `:e <dir>` open filebuf instead of netrw (configurable).
+- **Cursor-aware auto-focus** - when opening, the tree expands to reveal and center the file you were just editing.
+- **Configurable keymaps** - all bindings overrideable, standard vim-fold keys by default.
+- **Fast scanning** - uses `fd` when available for near-instant scans on large repos, with a `find` fallback.
 
 ## Installation
 
