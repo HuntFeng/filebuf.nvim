@@ -14,27 +14,6 @@ local config = {
 	show_hidden = false,
 	respect_ignore = true,
 
-	--- Directory names whose contents are never eagerly scanned.  These
-	--- directories still appear as lazy placeholders (collapsed by default)
-	--- and can be expanded on demand.  Each entry is a bare name, not a path.
-	---@type string[]
-	prune_dirs = {
-		".git",
-		"node_modules",
-		"__pycache__",
-		".venv",
-		"venv",
-		"build",
-		"dist",
-		".next",
-		".nuxt",
-		"target",
-		"coverage",
-		".pytest_cache",
-		".mypy_cache",
-		".ruff_cache",
-	},
-
 	--- When true (default), filebuf disables netrw and intercepts directory
 	--- opens so `nvim <dir>` and `:e <dir>` open filebuf instead of netrw.
 	--- Set to false if you need netrw for remote file editing (scp://, etc.).
@@ -79,20 +58,6 @@ function config.define_highlights()
 	for name, def in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
 	end
-end
-
---- Lazily-built set for O(1) prune-dir membership checks.
----@param name string  bare directory name
----@return boolean
-function config.is_pruned_dir(name)
-	if not config._prune_set or config._prune_version ~= #config.prune_dirs then
-		config._prune_set = {}
-		for _, d in ipairs(config.prune_dirs) do
-			config._prune_set[d] = true
-		end
-		config._prune_version = #config.prune_dirs
-	end
-	return config._prune_set[name] == true
 end
 
 return config

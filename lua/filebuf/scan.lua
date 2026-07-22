@@ -80,14 +80,22 @@ local function read_dir_recursive(dir)
 	-- %y = type char (d/f/l), %h = parent dir, %f = basename.  Letting find
 	-- split dirname/basename in C avoids per-entry Lua path decomposition.
 	prof.start("read_dir")
-	-- Build argv with -name ... -printf ... -prune for each prune-dir.
+	-- Build argv with -path ... -prune and -path expressions derived
 	-- -name is an O(1) basename comparison; -prune on the directory itself
 	-- prevents find from ever descending into it, so children are never
 	-- stat'd or printed.  Table-arg systemlist avoids shell escaping.
 	local argv = { "find", dir }
 	vim.list_extend(argv, { "-mindepth", "1", "-maxdepth", tostring(FIND_MAXDEPTH) })
-	for _, d in ipairs(config.prune_dirs) do
-		vim.list_extend(argv, { "(", "-name", d, "-printf", "%y\t%h\t%f\n", "-prune", ")", "-o" })
+	-- Expressions from .gitignore/.ignore ordered cheapest→most-expensive.
+	-- find's -path `*` wildcard crosses "/" (fnmatch without FNM_PATHNAME).
+	if config.respect_ignore then
+		local groups = ignore.extract_find_expressions(dir)
+		for _, group in ipairs(groups) do
+			for _, expr in ipairs(group) do
+				vim.list_extend(argv, expr.tokens)
+				argv[#argv + 1] = "-o"
+			end
+		end
 	end
 	argv[#argv + 1] = "-printf"
 	argv[#argv + 1] = "%y\t%h\t%f\n"
@@ -187,14 +195,6 @@ local function read_dir_recursive(dir)
 				end
 			end
 
-			-- Directories matched by prune_dirs are treated as ignored
-			-- so they are dimmed/hidden and lazy-loaded on demand.
-			if entry.type == "dir" and not entry.is_hidden and not entry.is_ignored then
-				if config.is_pruned_dir(entry.name) then
-					entry.is_ignored = true
-				end
-			end
-
 			result[#result + 1] = entry
 
 			if entry.type == "dir" then
@@ -257,13 +257,6 @@ local function scan_fd(dir)
 	if not config.respect_ignore then
 		flags[#flags + 1] = "-I"
 	end
-	-- Exclude prune-dirs so fd skips them regardless of -H/-I settings.
-	-- The fs_scandir cross-reference will still create lazy placeholders.
-	for _, d in ipairs(config.prune_dirs) do
-		flags[#flags + 1] = "--exclude"
-		flags[#flags + 1] = d
-	end
-
 	local function run(extra)
 		local argv = { fd_cmd() }
 		vim.list_extend(argv, flags)
@@ -351,7 +344,7 @@ local function scan_fd(dir)
 					type = "dir",
 					path = parent_path .. "/" .. name,
 					is_hidden = is_dotfile or nil,
-					is_ignored = (not is_dotfile and (config.respect_ignore or config.is_pruned_dir(name))) or nil,
+					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 					lazy = true,
 				}
 			else
