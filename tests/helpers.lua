@@ -150,4 +150,39 @@ function M.read_file(path)
 	return data
 end
 
+--- Run a shell command in `cwd` and return stdout as a string.
+---@param cmd    string   shell command
+---@param cwd    string   working directory
+---@return string  stdout
+function M.shell(cmd, cwd)
+	local full = cwd and ("cd " .. vim.fn.shellescape(cwd) .. " && " .. cmd) or cmd
+	local output = vim.fn.system(full)
+	return output
+end
+
+--- Initialize a git repository in `dir` and configure a dummy user.
+--- Returns true on success.
+---@param dir string
+---@return boolean
+function M.git_init(dir)
+	M.shell("git init", dir)
+	M.shell("git config user.email 'test@filebuf.test'", dir)
+	M.shell("git config user.name 'Filebuf Test'", dir)
+	return vim.fn.isdirectory(dir .. "/.git") == 1
+end
+
+--- Stage (git add) a file relative to the repo root.
+---@param dir     string  repo root
+---@param relpath string  file path relative to dir
+function M.git_add(dir, relpath)
+	M.shell("git add " .. vim.fn.shellescape(relpath), dir)
+end
+
+--- Commit all staged changes in the repo.
+---@param dir     string  repo root
+---@param message string  commit message
+function M.git_commit(dir, message)
+	M.shell("git commit -m " .. vim.fn.shellescape(message or "test commit"), dir)
+end
+
 return M
