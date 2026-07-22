@@ -1,6 +1,6 @@
 # filebuf.nvim
 
-A minimalistic, zero-dependencies, intuitive tree-based filesystem editor for neovim.
+A minimalistic, zero-dependency, intuitive tree-based filesystem editor for Neovim.
 
 https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
 
@@ -8,20 +8,20 @@ https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
 
 ## Features
 
-- **Editable tree** - create, rename, delete and search files/dirs in a buffer. Diffs are validated and applied on `:w`.
+- **Editable tree** - create, rename, delete and search files/dirs in a buffer, save with `:w`.
 - **Indent-based folding** - directories fold like code.
 - **Git status** - per-file and per-directory git indicators (added, modified, untracked,...).
 - **Diagnostics** - when wrong operations occur, buffer won't save and shows diagnostics.
-- **Respect .gitignore** - hidden and ignored directories are hidden by default and will be loaded on demand upon expansion.
-- **Netrw hijack** - `nvim .`, `:e <dir>` and `Ex .` etc opens filebuf instead of netrw (configurable).
+- **Respect .gitignore** - hidden & ignored entries are hidden by default and will be loaded upon expansion.
+- **Netrw hijack** - can open filebuf instead of netrw when `nvim .`, `:e <dir>` and `Ex .` etc.
 
 ## Installation
 
 ### Requirements
 - neovim >= 0.10.0
-- git  (most linux machines has it)
-- find (most linux machines has it)
-- (Optional but recommand) [`fd`](https://github.com/sharkdp/fd)
+- git  (preinsatlled on most linux distros)
+- find (preinsatlled on most linux distros)
+- (Optional but recommended) [`fd`](https://github.com/sharkdp/fd)
 
 > [!TIP]
 > Install [`fd`](https://github.com/sharkdp/fd) for dramatically faster scanning on large repositories. The plugin detects it automatically and falls back to `find` if it's missing.
