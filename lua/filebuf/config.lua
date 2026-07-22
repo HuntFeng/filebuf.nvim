@@ -6,6 +6,7 @@
 ---@field git_status boolean  when true, show git status indicators next to changed entries
 ---@field show_hidden boolean  when false, entries whose name starts with "." are hidden
 ---@field respect_ignore boolean  when true, .ignore/.gitignore patterns filter entries
+---@field sort_method string  sort order: "type" | "name" | "modified" | "created"
 ---@field keymaps table  maps action names to key strings; set a value to false to disable
 local config = {
 	permanent_delete = false,
@@ -18,6 +19,9 @@ local config = {
 	--- opens so `nvim <dir>` and `:e <dir>` open filebuf instead of netrw.
 	--- Set to false if you need netrw for remote file editing (scp://, etc.).
 	hijack_netrw = true,
+	--- Default sort order for entries within each directory.
+  --- You could change by FilebufSortMethod <method> on the fly
+	sort_method = "type",
 
 	--- Customizable keymaps.  Set any value to a key string to override,
 	--- or to `false` to disable the binding entirely.
