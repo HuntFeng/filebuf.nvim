@@ -80,12 +80,18 @@ local function read_dir_recursive(dir)
 	-- %y = type char (d/f/l), %h = parent dir, %f = basename.  Letting find
 	-- split dirname/basename in C avoids per-entry Lua path decomposition.
 	prof.start("read_dir")
-	local cmd = string.format(
-		"find %s -mindepth 1 -maxdepth %d -printf '%%y\t%%h\t%%f\n' 2>/dev/null",
-		vim.fn.shellescape(dir),
-		FIND_MAXDEPTH
-	)
-	local lines = vim.fn.systemlist(cmd)
+	-- Build argv with -name ... -printf ... -prune for each prune-dir.
+	-- -name is an O(1) basename comparison; -prune on the directory itself
+	-- prevents find from ever descending into it, so children are never
+	-- stat'd or printed.  Table-arg systemlist avoids shell escaping.
+	local argv = { "find", dir }
+	vim.list_extend(argv, { "-mindepth", "1", "-maxdepth", tostring(FIND_MAXDEPTH) })
+	for _, d in ipairs(config.prune_dirs) do
+		vim.list_extend(argv, { "(", "-name", d, "-printf", "%y\t%h\t%f\n", "-prune", ")", "-o" })
+	end
+	argv[#argv + 1] = "-printf"
+	argv[#argv + 1] = "%y\t%h\t%f\n"
+	local lines = vim.fn.systemlist(argv)
 	prof.stop() -- read_dir
 
 	prof.start("parse_find_output")
@@ -181,6 +187,14 @@ local function read_dir_recursive(dir)
 				end
 			end
 
+			-- Directories matched by prune_dirs are treated as ignored
+			-- so they are dimmed/hidden and lazy-loaded on demand.
+			if entry.type == "dir" and not entry.is_hidden and not entry.is_ignored then
+				if config.is_pruned_dir(entry.name) then
+					entry.is_ignored = true
+				end
+			end
+
 			result[#result + 1] = entry
 
 			if entry.type == "dir" then
@@ -242,6 +256,12 @@ local function scan_fd(dir)
 	end
 	if not config.respect_ignore then
 		flags[#flags + 1] = "-I"
+	end
+	-- Exclude prune-dirs so fd skips them regardless of -H/-I settings.
+	-- The fs_scandir cross-reference will still create lazy placeholders.
+	for _, d in ipairs(config.prune_dirs) do
+		flags[#flags + 1] = "--exclude"
+		flags[#flags + 1] = d
 	end
 
 	local function run(extra)
@@ -331,7 +351,7 @@ local function scan_fd(dir)
 					type = "dir",
 					path = parent_path .. "/" .. name,
 					is_hidden = is_dotfile or nil,
-					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
+					is_ignored = (not is_dotfile and (config.respect_ignore or config.is_pruned_dir(name))) or nil,
 					lazy = true,
 				}
 			else
