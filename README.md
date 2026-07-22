@@ -78,6 +78,9 @@ require("filebuf").setup({
     -- Use filebuf instead of netrw when opening directories
     hijack_netrw = true,
 
+    -- Default sort method, can change with FilebufSortMethod <method>
+    sort_method = "type",
+
     -- Customize or disable keymaps (set to false to disable)
     keymaps = {
         fold_open = "zo",
