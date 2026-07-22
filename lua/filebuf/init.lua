@@ -479,13 +479,11 @@ function M.setup(opts)
 			config.sort_method = method
 			refresh_buffer(buf)
 			vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
-		elseif method then
+		else
 			vim.notify(
 				"filebuf: unknown sort method '" .. method .. "'. Valid: " .. table.concat(SORT_METHODS, ", "),
 				vim.log.levels.ERROR
 			)
-		else
-			cycle_sort_method(buf)
 		end
 	end, { nargs = "?", desc = "Set or cycle sort method (type | name | modified | created)" })
 end
