@@ -112,7 +112,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 						virt_text = { { " " .. char, hl } },
 						priority = 0,
 						ephemeral = true,
-						end_col = -1,
+						end_col = name_end,
 					}
 					if entry.type ~= "dir" then
 						opts.hl_group = hl

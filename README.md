@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
 ## Installation
 
 ### Requirements
-- neovim >= 0.12.0
+- neovim >= 0.10.0
 - git  (most linux machines has it)
 - find (most linux machines has it)
 - (Optional but recommand) [`fd`](https://github.com/sharkdp/fd)
