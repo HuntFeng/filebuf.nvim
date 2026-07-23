@@ -20,6 +20,8 @@
 -- Regular files are never affected: the BufAdd handler returns immediately
 -- when the target is not a directory.
 ----------------------------------------------------------------------
+local prof = require("filebuf.profiler")
+
 local M = {}
 
 --- Disable netrw's plugin so its autocmds never load.  We must do this
@@ -57,12 +59,14 @@ end
 ---@param buf  number   the directory buffer to replace
 ---@param dir  string   absolute path to open in filebuf
 local function replace_with_filebuf(buf, dir)
+	prof.start("hijack.replace_with_filebuf")
 	vim.schedule(function()
 		if vim.api.nvim_buf_is_valid(buf) then
 			pcall(vim.api.nvim_buf_delete, buf, { force = true })
 		end
 		require("filebuf").open(dir)
 	end)
+	prof.stop()
 end
 
 --- BufAdd handler: when a buffer whose name is a directory is added to
@@ -70,13 +74,16 @@ end
 --- then open filebuf.  For non-directory buffers this returns immediately.
 ---@param args table  autocmd args (buf, file)
 local function on_buf_add(args)
+	prof.start("hijack.on_buf_add")
 	local name = vim.api.nvim_buf_get_name(args.buf)
 	if name == "" then
+		prof.stop()
 		return -- new scratch buffer, not a file
 	end
 
 	local full = resolve_path(name)
 	if not full or not is_directory(full) then
+		prof.stop()
 		return -- regular file — let Vim handle it normally
 	end
 
@@ -86,6 +93,7 @@ local function on_buf_add(args)
 	vim.bo[args.buf].buftype = "nofile"
 
 	replace_with_filebuf(args.buf, full)
+	prof.stop()
 end
 
 --- VimEnter handler: nvim <directory> from the command line.
@@ -151,6 +159,7 @@ end
 --- Set up all autocmds and command aliases.  Safe to call multiple
 --- times; clears any previous filebuf hijack autocmds first.
 function M.setup()
+	prof.start("hijack.setup")
 	disable_netrw()
 
 	local group = vim.api.nvim_create_augroup("FilebufHijackNetrw", { clear = true })
@@ -179,6 +188,7 @@ function M.setup()
 	for _, cmd in ipairs({ "Ex", "Explore", "Rexplore", "Vexplore", "Sexplore", "Texplore", "Hexplore" }) do
 		alias_explore_command(cmd)
 	end
+	prof.stop()
 end
 
 return M
