@@ -384,6 +384,7 @@ local function scan_fd(dir)
 			if regular_set[name] then
 				goto continue
 			end
+
 			local is_dotfile = name:sub(1, 1) == "."
 			if ftype == "directory" then
 				lazy[#lazy + 1] = {
@@ -394,7 +395,7 @@ local function scan_fd(dir)
 					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 					lazy = true,
 				}
-			elseif is_dotfile then
+			else
 				-- Dot-prefixed file/link that fd excluded (when -H is off).
 				-- Collected so toggling show_hidden is a pure re-filter.
 				local etype = ftype == "link" and "link" or "file"
@@ -402,7 +403,8 @@ local function scan_fd(dir)
 					name = name,
 					type = etype,
 					path = parent_path .. "/" .. name,
-					is_hidden = true,
+					is_hidden = is_dotfile or nil,
+					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 				}
 			end
 			-- else: gitignored regular file — skip it.  Collecting these
