@@ -23,7 +23,7 @@ function M.parse_buffer(buf)
 	local stack = {}
 
 	--- Append one entry and, when it's a directory, push it as an ancestor.
-	local function add(name, is_dir, is_link, indent, lnum)
+	local function add(name, is_dir, indent, lnum)
 		while #stack > 0 and stack[#stack].indent >= indent do
 			table.remove(stack)
 		end
@@ -34,7 +34,7 @@ function M.parse_buffer(buf)
 		end
 		entries[#entries + 1] = {
 			name = name,
-			type = is_dir and "dir" or (is_link and "link" or "file"),
+			type = is_dir and "dir" or "file",
 			path = path,
 			indent = indent,
 			lnum = lnum,
@@ -43,12 +43,12 @@ function M.parse_buffer(buf)
 
 	for lnum = 1, #lines do
 		local line = lines[lnum]
-		local name, is_dir, is_link = line_mod.parse_line(line)
+		local name, is_dir = line_mod.parse_line(line)
 		if line ~= "" and name ~= "" then
 			local indent = line_mod.indent_level(line)
 			if not name:find("/", 1, true) then
 				-- Fast path: most entries have no "/" in their name.
-				add(name, is_dir, is_link, indent, lnum)
+				add(name, is_dir, indent, lnum)
 			else
 				-- "dir/subfile" expands into synthetic dir entries plus the
 				-- final child; intermediate segments are always directories.
@@ -58,7 +58,7 @@ function M.parse_buffer(buf)
 				end
 				for i, part in ipairs(parts) do
 					local part_is_dir = (i < #parts) or is_dir
-					add(part, part_is_dir, is_link, indent + (i - 1), lnum)
+					add(part, part_is_dir, indent + (i - 1), lnum)
 				end
 			end
 		end
