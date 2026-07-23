@@ -301,6 +301,7 @@ function M.open(dir)
 	local existing_buf = vim.fn.bufnr("Filebuf")
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if vim.b[existing_buf].filebuf_root then
+			vim.b[existing_buf].filebuf_root = dir
 			vim.api.nvim_set_current_buf(existing_buf)
 			refresh_buffer(existing_buf)
 			prof.stop()
