@@ -247,7 +247,7 @@ describe("git status", function()
 			["sub"] = {},
 		})
 		buf = helpers.open_filebuf(tmpdir)
-		local status = vim.b[buf].filebuf_git_status
+		local status = helpers.wait_for_git_status(buf)
 		assert.is_not_nil(status, "expected git status map to exist")
 
 		-- Untracked → "?? filename" in porcelain → "U" display char.
@@ -264,7 +264,7 @@ describe("git status", function()
 		helpers.git_add(tmpdir, "staged.txt")
 
 		buf = helpers.open_filebuf(tmpdir)
-		local status = vim.b[buf].filebuf_git_status
+		local status = helpers.wait_for_git_status(buf)
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
@@ -287,7 +287,7 @@ describe("git status", function()
 		vim.loop.fs_close(fd)
 
 		buf = helpers.open_filebuf(tmpdir)
-		local status = vim.b[buf].filebuf_git_status
+		local status = helpers.wait_for_git_status(buf)
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
@@ -307,7 +307,7 @@ describe("git status", function()
 		helpers.git_add(tmpdir, "sub/staged.txt")
 
 		buf = helpers.open_filebuf(tmpdir)
-		local status = vim.b[buf].filebuf_git_status
+		local status = helpers.wait_for_git_status(buf)
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
@@ -327,7 +327,7 @@ describe("git status", function()
 		helpers.git_commit(tmpdir, "commit")
 
 		buf = helpers.open_filebuf(tmpdir)
-		local status = vim.b[buf].filebuf_git_status
+		local status = helpers.wait_for_git_status(buf)
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
