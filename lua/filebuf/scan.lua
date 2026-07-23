@@ -450,7 +450,9 @@ local function scan_fd(dir)
 			end
 		end
 	end
+  prof.start("dfs_emit")
 	emit(dir, 0)
+  prof.stop()
 
 	prof.stop()
 	return result
