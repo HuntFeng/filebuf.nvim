@@ -29,27 +29,16 @@ local function unquote(path)
 	return path
 end
 
---- Run `git status --porcelain` in `root` and return a map of path →
---- { index, worktree } status codes, or nil outside a git repo.
---- For directories, also computes an aggregated status from all descendants
---- so that closed folders still show what happened inside them.
----@param root string
----@return table|nil
-function M.get_status_map(root)
-	prof.start("get_git_status_map")
-	local cmd =
-		string.format("git -C %s status --porcelain --ignored=matching --untracked-files=all", vim.fn.shellescape(root))
-	local output = vim.fn.system(cmd)
-	if vim.v.shell_error ~= 0 then
-		prof.stop()
-		return nil
-	end
-
+--- Parse `git status --porcelain` output into a path→status map.
+--- Extracted so both the sync and async paths share the same logic.
+---@param root   string  root directory (prepended to relative paths)
+---@param output string  raw stdout from git status --porcelain
+---@return table  status_map
+function M.parse_status_output(root, output)
 	local status_map = {}
 	for line in output:gmatch("[^\r\n]+") do
 		local x, y = line:sub(1, 1), line:sub(2, 2)
 		local filename = unquote(line:sub(4))
-		-- Renames are "R  old -> new"; keep the new name (each side may be quoted).
 		if x == "R" then
 			local arrow = filename:find(" -> ")
 			if arrow then
@@ -59,9 +48,7 @@ function M.get_status_map(root)
 		status_map[root .. "/" .. filename] = { index = x, worktree = y }
 	end
 
-	-- Aggregate git status up to parent directories so that closed
-	-- folders still show what happened inside them.
-	local dir_map = {} -- dir_path -> { [display_char] = hl_group }
+	local dir_map = {}
 	local root_len = #root
 	for path, s in pairs(status_map) do
 		local code = s.worktree ~= " " and s.worktree or (s.index ~= " " and s.index or nil)
@@ -80,7 +67,7 @@ function M.get_status_map(root)
 	end
 
 	for dir_path, char_map in pairs(dir_map) do
-		if not status_map[dir_path] then -- don't overwrite direct entries (e.g. submodules)
+		if not status_map[dir_path] then
 			local aggregated = {}
 			local chars = vim.tbl_keys(char_map)
 			table.sort(chars)
@@ -91,8 +78,50 @@ function M.get_status_map(root)
 		end
 	end
 
+	return status_map
+end
+
+--- Run `git status --porcelain` synchronously and return a path→status map.
+--- Prefer get_status_map_async for interactive use so git doesn't block the UI.
+---@param root string
+---@return table|nil
+function M.get_status_map(root)
+	prof.start("get_git_status_map")
+	local cmd =
+		string.format("git -C %s status --porcelain --ignored=matching --untracked-files=all", vim.fn.shellescape(root))
+	local output = vim.fn.system(cmd)
+	if vim.v.shell_error ~= 0 then
+		prof.stop()
+		return nil
+	end
+	local status_map = M.parse_status_output(root, output)
 	prof.stop()
 	return status_map
+end
+
+--- Run `git status --porcelain` asynchronously via jobstart.  When complete,
+--- the result is written into vim.b[bufnr].filebuf_git_status so the decoration
+--- provider picks it up on the next redraw.  This keeps git's ~25 ms latency
+--- off the critical path during open and save.
+---@param root  string  root directory
+---@param bufnr number  buffer to update with filebuf_git_status
+function M.get_status_map_async(root, bufnr)
+	local argv = { "git", "-C", root, "status", "--porcelain", "--ignored=matching", "--untracked-files=all" }
+	vim.fn.jobstart(argv, {
+		stdout_buffered = true,
+		on_stdout = function(_, data)
+			if not vim.api.nvim_buf_is_valid(bufnr) then
+				return
+			end
+			local output = table.concat(data or {}, "\n")
+			vim.b[bufnr].filebuf_git_status = M.parse_status_output(root, output)
+		end,
+		on_exit = function(_, exit_code)
+			if exit_code ~= 0 and vim.api.nvim_buf_is_valid(bufnr) then
+				vim.b[bufnr].filebuf_git_status = nil
+			end
+		end,
+	})
 end
 
 --- Look up the git status for a single entry.  Only entries that appear
