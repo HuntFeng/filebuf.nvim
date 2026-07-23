@@ -366,9 +366,12 @@ local function scan_fd(dir)
 	end
 	prof.stop()
 
-	-- Helper: find hidden/ignored subdirectories via fs_scandir cross-reference.
-	-- Anything fs_scandir finds that fd did NOT return is either hidden (dot-prefix)
-	-- or gitignored; directories become lazy placeholders.
+	-- Helper: find entries that fd excluded (dot-prefixed or gitignored).
+	-- Directories become lazy placeholders so users can expand into them.
+	-- Dotfiles are collected so toggling show_hidden works as a pure
+	-- re-filter.  Other gitignored files are skipped — creating entries for
+	-- potentially tens of thousands of them (e.g. **/*.npz) dominates
+	-- dfs_emit and would make scanning a 100k-file repo lag.
 	local function find_lazy_subdirs(parent_path, regular_set)
 		local handle = vim.loop.fs_scandir(parent_path)
 		if not handle then
@@ -383,11 +386,8 @@ local function scan_fd(dir)
 			if regular_set[name] then
 				goto continue
 			end
+			local is_dotfile = name:sub(1, 1) == "."
 			if ftype == "directory" then
-				-- All directories found here were excluded by fd (either
-				-- dot-prefixed or gitignored); tag them so filter_visible
-				-- hides them when show_hidden is off.
-				local is_dotfile = name:sub(1, 1) == "."
 				lazy[#lazy + 1] = {
 					name = name,
 					type = "dir",
@@ -396,20 +396,20 @@ local function scan_fd(dir)
 					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 					lazy = true,
 				}
-			else
-				-- Hidden/ignored file/link that fd excluded.  Always
-				-- collect them so toggling show_hidden is a pure re-filter
-				-- of the cached list.
+			elseif is_dotfile then
+				-- Dot-prefixed file/link that fd excluded (when -H is off).
+				-- Collected so toggling show_hidden is a pure re-filter.
 				local etype = ftype == "link" and "link" or "file"
-				local is_dotfile = name:sub(1, 1) == "."
 				lazy[#lazy + 1] = {
 					name = name,
 					type = etype,
 					path = parent_path .. "/" .. name,
-					is_hidden = is_dotfile or nil,
-					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
+					is_hidden = true,
 				}
 			end
+			-- else: gitignored regular file — skip it.  Collecting these
+			-- is prohibitively expensive with glob ignore patterns that
+			-- match many individual files (e.g. **/*.npz).
 			::continue::
 		end
 		sort_children(lazy)
