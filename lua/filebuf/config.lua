@@ -42,7 +42,7 @@ local config = {
 	},
 }
 
---- Git status colors + hidden entry colors.
+--- Git status colors + hidden/link entry colors.
 ---@type table<string, table>
 local HIGHLIGHTS = {
 	FilebufGitAdded = { fg = "#98c379" },
@@ -53,6 +53,7 @@ local HIGHLIGHTS = {
 	FilebufGitRenamed = { fg = "#56b6c2" },
 	FilebufHiddenFile = { fg = "#5c6370" },
 	FilebufHiddenDir = { fg = "#5c6370" },
+	FilebufLink = { fg = "#56b6c2" },
 	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
 }
 

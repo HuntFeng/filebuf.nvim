@@ -481,11 +481,11 @@ function M.fold_close_all(buf)
 end
 
 ----------------------------------------------------------------------
--- Entry opening
+-- Entry opening (file / symlink)
 ----------------------------------------------------------------------
 
---- Open an entry (file / link)
---- Let neovim handle the how to open the entry
+--- Open a file or follow a symlink.  For symlinks that point to
+--- directories, open a new filebuf at the target.
 ---@param buf   number
 ---@param entry table
 function M.open_entry(buf, entry)
@@ -494,7 +494,15 @@ function M.open_entry(buf, entry)
 	end
 
 	local target = vim.loop.fs_realpath(entry.path) or entry.path
-	vim.cmd("edit " .. vim.fn.fnameescape(target))
+	if entry.type == "link" and vim.fn.isdirectory(target) == 1 then
+		-- Symlink → directory: open a new filebuf.
+		local filebuf = require("filebuf")
+		filebuf.open(target)
+	elseif vim.fn.filereadable(target) == 1 then
+		vim.cmd("edit " .. vim.fn.fnameescape(target))
+	else
+		vim.notify("Cannot read: " .. entry.path, vim.log.levels.WARN)
+	end
 end
 
 --- Handle <CR> / open_or_toggle: toggle fold on directories, open files.

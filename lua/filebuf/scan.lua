@@ -4,7 +4,7 @@
 -- placeholders whose children are loaded on demand.
 -- fd fast path when available, else a find(1) fallback; both return the
 -- same flat DFS-ordered entry shape:
---   { name, type, path, indent, is_hidden?, is_ignored?, lazy? }  (type = dir|file)
+--   { name, type, path, indent, is_hidden?, is_ignored?, lazy? }  (type = dir|link|file)
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
@@ -13,11 +13,11 @@ local ignore = require("filebuf.ignore")
 local M = {}
 
 --- Sort a child list in place according to the configured sort method.
---- "type"     — dirs, then files; alpha within each group.
+--- "type"     — dirs, then links, then files; alpha within each group.
 --- "name"     — case-insensitive alphabetical.
 --- "modified" — most recently modified first; ties broken alphabetically.
 --- "created"  — most recently created first (birthtime or mtime fallback).
-local ENTRY_PRIO = { dir = 1, file = 2, error = 3 }
+local ENTRY_PRIO = { dir = 1, link = 2, file = 3, error = 4 }
 local function sort_children(children, sort_method)
 	if #children <= 1 then
 		return
@@ -119,7 +119,8 @@ local FIND_MAXDEPTH = 21 -- legacy default: max_depth 20 + 1
 
 --- Recursively read a directory tree using a single find(1) subprocess,
 --- returning the flat entry list.  Reads .ignore/.gitignore on the way down
---- to tag hidden entries.  Symlinks are treated as regular files.
+--- to tag hidden entries.  Symlinks are atomic entries (type "link"),
+--- never followed.
 ---@param dir string
 ---@return table[]
 local function read_dir_recursive(dir)
@@ -152,7 +153,7 @@ local function read_dir_recursive(dir)
 
 	prof.start("parse_find_output")
 	local by_parent = {} -- parent_path → { entry, ... }
-	local TYPE_MAP = { d = "dir", l = "file", f = "file" }
+	local TYPE_MAP = { d = "dir", l = "link", f = "file" }
 	for _, line in ipairs(lines) do
 		local type_char, parent, name = line:match("^(.)\t(.+)\t(.+)$")
 		local type_label = type_char and TYPE_MAP[type_char]
@@ -288,7 +289,7 @@ end
 
 --- Scan `dir` with fd.  fd natively skips .git/ contents and respects
 --- .gitignore/.ignore, so giant ignored subtrees are never traversed.
---- Symlinks are treated as regular files, never followed.
+--- Symlinks appear as atomic entries (type "link"), never followed.
 ---@param dir string
 ---@return table[]
 local function scan_fd(dir)
@@ -314,7 +315,9 @@ local function scan_fd(dir)
 		return vim.fn.systemlist(argv)
 	end
 
-	-- Main scan (fd appends "/" to directories).
+		-- Main scan (fd appends "/" to directories).  Symlinks are detected
+		-- with a per-entry lstat — the kernel caches are hot from fd's readdir,
+		-- avoiding the cost of a second subprocess.
 	prof.start("fd_scan")
 	local fd_out = run({})
 	prof.stop()
@@ -326,7 +329,13 @@ local function scan_fd(dir)
 		if raw ~= "" then
 			local is_dir = raw:sub(-1) == "/"
 			local full = is_dir and raw:sub(1, -2) or raw
-			local etype = is_dir and "dir" or "file"
+			local etype
+			if is_dir then
+				etype = "dir"
+			else
+				local stat = vim.loop.fs_lstat(full)
+				etype = (stat and stat.type == "link") and "link" or "file"
+			end
 
 			local parent, name = full:match("^(.*)/(.+)$")
 			if not parent then
@@ -386,9 +395,9 @@ local function scan_fd(dir)
 					lazy = true,
 				}
 			elseif is_dotfile then
-				-- Dot-prefixed file that fd excluded (when -H is off).
+				-- Dot-prefixed file/link that fd excluded (when -H is off).
 				-- Collected so toggling show_hidden is a pure re-filter.
-				local etype = "file"
+				local etype = ftype == "link" and "link" or "file"
 				lazy[#lazy + 1] = {
 					name = name,
 					type = etype,
@@ -435,7 +444,7 @@ local function scan_fd(dir)
 			e.indent = depth
 			result[#result + 1] = e
 			if e.type == "dir" and not e.lazy then
-				emit(e.path, depth + 1) -- directories only, files never followed
+				emit(e.path, depth + 1) -- symlinks are never followed
 			end
 		end
 	end
@@ -539,16 +548,16 @@ function M.scan_dir_children(dir, by_parent_cache)
 				entry.is_ignored = true
 			end
 		elseif ftype == "link" then
-			entry.type = "file"
+			entry.type = "link"
 		else
 			entry.type = "file"
 		end
 
-		-- Tag dot-prefixed files as hidden.
+		-- Tag dot-prefixed files/links as hidden.
 		if name:sub(1, 1) == "." then
 			entry.is_hidden = true
 		end
-		-- Check gitignore for files too (directories handled above).
+		-- Check gitignore for files/links too (directories handled above).
 		if
 			not entry.is_ignored
 			and config.respect_ignore

@@ -69,30 +69,32 @@ end
 
 local ESCAPE = { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" }
 
---- Build the display line for an entry.  Directories get a trailing "/".
---- Control characters are escaped in shell $'...'
+--- Build the display line for an entry.  Directories get a trailing "/",
+--- symlinks a trailing "@".  Control characters are escaped in shell $'...'
 --- notation so nvim_buf_set_lines accepts the line and parse_line can undo it.
 ---@param entry table  { name, type, indent? }
 ---@return string
 function M.format_line(entry)
 	prof.start("format_line")
 	local prefix = M.indent_str(entry.indent or 0)
-	local suffix = entry.type == "dir" and "/" or ""
+	local suffix = entry.type == "dir" and "/" or (entry.type == "link" and "@" or "")
 	local name = entry.name:gsub("[\n\r\t]", ESCAPE)
 	prof.stop()
 	return prefix .. name .. suffix
 end
 
 --- Parse a display line: strip leading whitespace, detect the trailing-slash
---- dir marker, and reverse format_line escaping.
+--- dir marker and trailing-@ symlink marker, and reverse format_line escaping.
 ---@param line string
----@return string name   cleaned name (no indent, no trailing /)
+---@return string name   cleaned name (no indent, no trailing / or @)
 ---@return boolean is_dir
+---@return boolean is_link
 function M.parse_line(line)
 	prof.start("parse_line")
 	local name = line:match("^%s*(.+)") or ""
 	local is_dir = name:sub(-1) == "/"
-	if is_dir then
+	local is_link = name:sub(-1) == "@" and not is_dir
+	if is_dir or is_link then
 		name = name:sub(1, -2)
 	end
 	-- Only run gsub if the escape sentinel is present (99%+ of names skip this).
@@ -100,7 +102,7 @@ function M.parse_line(line)
 		name = name:gsub("%$'\\n'", "\n"):gsub("%$'\\r'", "\r"):gsub("%$'\\t'", "\t")
 	end
 	prof.stop()
-	return name, is_dir
+	return name, is_dir, is_link
 end
 
 return M

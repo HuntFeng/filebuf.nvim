@@ -1,6 +1,6 @@
 ----------------------------------------------------------------------
 -- Decoration provider.  Registered once in setup(); Neovim calls on_win on
--- every redraw, so git/dir/hidden extmarks are always current without
+-- every redraw, so git/dir/hidden/link extmarks are always current without
 -- manual clear/refresh.  Work is O(visible viewport), never O(buffer).
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
@@ -67,9 +67,9 @@ local function entries_for(bufnr)
 	return entries
 end
 
---- on_win: apply ephemeral dir/hidden/git extmarks to the visible lines.
+--- on_win: apply ephemeral dir/link/hidden/git extmarks to the visible lines.
 --- Fold-aware — closed-fold interiors are skipped.
---- Priorities: dir (10) > hidden (5) > git (0).
+--- Priorities: dir (10) > link (8) > hidden (5) > git (0).
 function M.on_win(_, winid, bufnr, toprow, botrow)
 	prof.start("decoration.on_win")
 	if not vim.b[bufnr].filebuf_root then
@@ -101,7 +101,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 		local entry = entries[lnum]
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
-			local suffix = (entry.type == "dir") and 1 or 0 -- "/"
+			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0 -- "/" or "@"
 			local name_end = name_start + #entry.name + suffix
 
 			if entry.type == "dir" and not entry.is_hidden and not entry.is_ignored then
@@ -109,6 +109,13 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 					end_col = name_end,
 					hl_group = "Directory",
 					priority = 10,
+					ephemeral = true,
+				})
+			elseif entry.type == "link" then
+				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
+					end_col = name_end,
+					hl_group = "FilebufLink",
+					priority = 8,
 					ephemeral = true,
 				})
 			end
