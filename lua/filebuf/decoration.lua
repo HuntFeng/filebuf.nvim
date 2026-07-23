@@ -76,6 +76,14 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 		prof.stop()
 		return false
 	end
+	-- During rebuild, entries are pre-stamped and buffer content is still
+	-- being manipulated (fold operations, etc.).  Skip all extmark work — the
+	-- final redraw after filebuf_rebuilding is cleared will decorate
+	-- everything correctly in one pass.
+	if vim.b[bufnr].filebuf_rebuilding then
+		prof.stop()
+		return false
+	end
 	local entries = entries_for(bufnr)
 	if not entries then
 		prof.stop()

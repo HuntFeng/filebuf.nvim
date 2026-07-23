@@ -85,8 +85,8 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
 	vim.b[buf].filebuf_git_status = nil
 	git.get_status_map_async(dir, buf)
 
-	vim.bo[buf].modified = false
 	vim.b[buf].filebuf_rebuilding = nil
+	vim.bo[buf].modified = false
 
 	if prof.enabled then
 		prof.report()
@@ -465,8 +465,8 @@ function M.open(dir)
 		end,
 	})
 
-	vim.bo[buf].modified = false
 	vim.b[buf].filebuf_rebuilding = nil
+	vim.bo[buf].modified = false
 
 	if prof.enabled then
 		prof.report()
