@@ -115,6 +115,10 @@ function M.get_status_map_async(root, bufnr)
 			end
 			local output = table.concat(data or {}, "\n")
 			vim.b[bufnr].filebuf_git_status = M.parse_status_output(root, output)
+			-- Force an immediate redraw so the decoration provider picks up
+			-- the new git status extmarks.  redraw! (with bang) clears and
+			-- repaints the entire screen, which guarantees on_win fires.
+			pcall(vim.cmd, "redraw!")
 		end,
 		on_exit = function(_, exit_code)
 			if exit_code ~= 0 and vim.api.nvim_buf_is_valid(bufnr) then

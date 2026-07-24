@@ -273,6 +273,19 @@ function M.expand_dir(buf, lazy_entry)
 		vim.b[buf].filebuf_all_entries = all_entries
 	end
 
+	-- 3a. Mirror the splice into filebuf_disk_baseline when one exists
+	--     (it was created by toggle_hidden to snapshot clean disk state).
+	local disk_baseline = vim.b[buf].filebuf_disk_baseline
+	if disk_baseline then
+		local db_pos = find_entry_index(disk_baseline, lazy_entry)
+		if db_pos then
+			for i = #children, 1, -1 do
+				table.insert(disk_baseline, db_pos + 1, vim.deepcopy(children[i]))
+			end
+			vim.b[buf].filebuf_disk_baseline = disk_baseline
+		end
+	end
+
 	-- 4. Snapshot which dirs are open BEFORE modifying anything.
 	local open_dirs = open_dirs_of(display)
 	open_dirs[lazy_entry.path] = true -- ensure the expanded dir ends up open
