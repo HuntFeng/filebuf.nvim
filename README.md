@@ -66,6 +66,9 @@ require("filebuf").setup({
     -- Respect .gitignore / .ignore patterns
     respect_ignore = true,
 
+    -- Confirm operations before saving
+	save_confirmation = true,
+
     -- Use filebuf instead of netrw when opening directories
     hijack_netrw = true,
 
