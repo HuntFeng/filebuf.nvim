@@ -315,9 +315,9 @@ local function scan_fd(dir)
 		return vim.fn.systemlist(argv)
 	end
 
-		-- Main scan (fd appends "/" to directories).  Symlinks are detected
-		-- with a per-entry lstat — the kernel caches are hot from fd's readdir,
-		-- avoiding the cost of a second subprocess.
+	-- Main scan (fd appends "/" to directories).  Symlinks are detected
+	-- with a per-entry lstat — the kernel caches are hot from fd's readdir,
+	-- avoiding the cost of a second subprocess.
 	prof.start("fd_scan")
 	local fd_out = run({})
 	prof.stop()
@@ -450,9 +450,9 @@ local function scan_fd(dir)
 			end
 		end
 	end
-  prof.start("dfs_emit")
+	prof.start("dfs_emit")
 	emit(dir, 0)
-  prof.stop()
+	prof.stop()
 
 	prof.stop()
 	return result

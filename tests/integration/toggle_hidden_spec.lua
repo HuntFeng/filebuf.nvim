@@ -42,7 +42,9 @@ describe("toggle hidden mid-edit", function()
 			local lines = helpers.get_buffer_lines(buf)
 			local has_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("%.secret") then has_hidden = true end
+				if l:match("%.secret") then
+					has_hidden = true
+				end
 			end
 			assert.is_false(has_hidden, "hidden file should not be visible initially")
 
@@ -57,8 +59,12 @@ describe("toggle hidden mid-edit", function()
 			local found_new = false
 			local found_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("new_file%.txt") then found_new = true end
-				if l:match("%.secret") then found_hidden = true end
+				if l:match("new_file%.txt") then
+					found_new = true
+				end
+				if l:match("%.secret") then
+					found_hidden = true
+				end
 			end
 			assert.is_true(found_new, "newly added file should still be visible after toggle on")
 			assert.is_true(found_hidden, "hidden file should now be visible")
@@ -70,8 +76,12 @@ describe("toggle hidden mid-edit", function()
 			found_new = false
 			has_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("new_file%.txt") then found_new = true end
-				if l:match("%.secret") then has_hidden = true end
+				if l:match("new_file%.txt") then
+					found_new = true
+				end
+				if l:match("%.secret") then
+					has_hidden = true
+				end
 			end
 			assert.is_true(found_new, "newly added file should still be visible after toggle off")
 			assert.is_false(has_hidden, "hidden file should be hidden again")
@@ -80,12 +90,9 @@ describe("toggle hidden mid-edit", function()
 			-- Save: only the new file should be created.
 			helpers.save_buffer(buf)
 
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/new_file.txt"),
-				"new file should exist on disk")
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/.secret.txt"),
-				"hidden file should NOT have been deleted")
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/visible.txt"),
-				"existing visible file should still exist")
+			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/new_file.txt"), "new file should exist on disk")
+			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/.secret.txt"), "hidden file should NOT have been deleted")
+			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/visible.txt"), "existing visible file should still exist")
 			assert.is_false(vim.bo[buf].modified)
 		end)
 
@@ -140,7 +147,9 @@ describe("toggle hidden mid-edit", function()
 			lines = helpers.get_buffer_lines(buf)
 			local found = false
 			for _, l in ipairs(lines) do
-				if l:match("new_nested%.txt") then found = true end
+				if l:match("new_nested%.txt") then
+					found = true
+				end
 			end
 			assert.is_true(found, "nested new file should survive toggles")
 
@@ -177,8 +186,12 @@ describe("toggle hidden mid-edit", function()
 			local found_removed = false
 			local found_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("remove_me") then found_removed = true end
-				if l:match("%.secret") then found_hidden = true end
+				if l:match("remove_me") then
+					found_removed = true
+				end
+				if l:match("%.secret") then
+					found_hidden = true
+				end
 			end
 			assert.is_false(found_removed, "deleted file should not reappear when toggle on")
 			assert.is_true(found_hidden, "hidden file should be visible")
@@ -188,7 +201,9 @@ describe("toggle hidden mid-edit", function()
 			lines = helpers.get_buffer_lines(buf)
 			found_removed = false
 			for _, l in ipairs(lines) do
-				if l:match("remove_me") then found_removed = true end
+				if l:match("remove_me") then
+					found_removed = true
+				end
 			end
 			assert.is_false(found_removed, "deleted file should still be gone after toggle off")
 
@@ -252,8 +267,12 @@ describe("toggle hidden mid-edit", function()
 			local found_old = false
 			local found_new = false
 			for _, l in ipairs(lines) do
-				if l == "old_name.txt" then found_old = true end
-				if l == "new_name.txt" then found_new = true end
+				if l == "old_name.txt" then
+					found_old = true
+				end
+				if l == "new_name.txt" then
+					found_new = true
+				end
 			end
 			assert.is_false(found_old, "old name should be gone")
 			assert.is_true(found_new, "new name should be present")
@@ -323,11 +342,21 @@ describe("toggle hidden mid-edit", function()
 			lines = helpers.get_buffer_lines(buf)
 			local has = { brand_new = false, also_new = false, deleted = false, hidden = false, keep = false }
 			for _, l in ipairs(lines) do
-				if l == "brand_new.txt" then has.brand_new = true end
-				if l == "also_new.txt" then has.also_new = true end
-				if l:match("delete_me") then has.deleted = true end
-				if l:match("%.secret") then has.hidden = true end
-				if l == "keep.txt" then has.keep = true end
+				if l == "brand_new.txt" then
+					has.brand_new = true
+				end
+				if l == "also_new.txt" then
+					has.also_new = true
+				end
+				if l:match("delete_me") then
+					has.deleted = true
+				end
+				if l:match("%.secret") then
+					has.hidden = true
+				end
+				if l == "keep.txt" then
+					has.keep = true
+				end
 			end
 			assert.is_true(has.brand_new, "first new file should be present")
 			assert.is_true(has.also_new, "second new file should be present")
@@ -363,7 +392,9 @@ describe("toggle hidden mid-edit", function()
 			local lines = helpers.get_buffer_lines(buf)
 			local has_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("%.secret") then has_hidden = true end
+				if l:match("%.secret") then
+					has_hidden = true
+				end
 			end
 			assert.is_true(has_hidden)
 
@@ -377,8 +408,12 @@ describe("toggle hidden mid-edit", function()
 			local found_new = false
 			local found_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("added") then found_new = true end
-				if l:match("%.secret") then found_hidden = true end
+				if l:match("added") then
+					found_new = true
+				end
+				if l:match("%.secret") then
+					found_hidden = true
+				end
 			end
 			assert.is_true(found_new, "new file should remain visible")
 			assert.is_false(found_hidden, "hidden file should disappear")
@@ -389,8 +424,12 @@ describe("toggle hidden mid-edit", function()
 			found_new = false
 			found_hidden = false
 			for _, l in ipairs(lines) do
-				if l:match("added") then found_new = true end
-				if l:match("%.secret") then found_hidden = true end
+				if l:match("added") then
+					found_new = true
+				end
+				if l:match("%.secret") then
+					found_hidden = true
+				end
 			end
 			assert.is_true(found_new, "new file should still be present")
 			assert.is_true(found_hidden, "hidden file should reappear")
@@ -425,7 +464,9 @@ describe("toggle hidden mid-edit", function()
 			lines = helpers.get_buffer_lines(buf)
 			local found_trash = false
 			for _, l in ipairs(lines) do
-				if l:match("trash_me") then found_trash = true end
+				if l:match("trash_me") then
+					found_trash = true
+				end
 			end
 			assert.is_false(found_trash, "deleted file should not reappear")
 
@@ -435,8 +476,12 @@ describe("toggle hidden mid-edit", function()
 			found_trash = false
 			local found_dot = false
 			for _, l in ipairs(lines) do
-				if l:match("trash_me") then found_trash = true end
-				if l:match("%.dotfile") then found_dot = true end
+				if l:match("trash_me") then
+					found_trash = true
+				end
+				if l:match("%.dotfile") then
+					found_dot = true
+				end
 			end
 			assert.is_false(found_trash, "deleted file should still be gone")
 			assert.is_true(found_dot, "dotfile should be visible again")
@@ -464,13 +509,11 @@ describe("toggle hidden mid-edit", function()
 
 			-- Toggle on: modified must stay true.
 			toggle_hidden()
-			assert.is_true(vim.bo[buf].modified,
-				"modified should remain true after toggle on with edits")
+			assert.is_true(vim.bo[buf].modified, "modified should remain true after toggle on with edits")
 
 			-- Toggle off: modified must stay true.
 			toggle_hidden()
-			assert.is_true(vim.bo[buf].modified,
-				"modified should remain true after toggle off with edits")
+			assert.is_true(vim.bo[buf].modified, "modified should remain true after toggle off with edits")
 
 			-- Save clears it.
 			helpers.save_buffer(buf)
@@ -486,12 +529,10 @@ describe("toggle hidden mid-edit", function()
 			assert.is_false(vim.bo[buf].modified)
 
 			toggle_hidden()
-			assert.is_false(vim.bo[buf].modified,
-				"toggle with no edits should not mark modified")
+			assert.is_false(vim.bo[buf].modified, "toggle with no edits should not mark modified")
 
 			toggle_hidden()
-			assert.is_false(vim.bo[buf].modified,
-				"toggle back with no edits should not mark modified")
+			assert.is_false(vim.bo[buf].modified, "toggle back with no edits should not mark modified")
 		end)
 	end)
 
@@ -517,7 +558,9 @@ describe("toggle hidden mid-edit", function()
 
 			local late_add_found = false
 			for _, l in ipairs(helpers.get_buffer_lines(buf)) do
-				if l:match("late_add") then late_add_found = true end
+				if l:match("late_add") then
+					late_add_found = true
+				end
 			end
 			assert.is_true(late_add_found, "late_add should survive toggles")
 

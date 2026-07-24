@@ -20,7 +20,7 @@ local config = {
 	--- Set to false if you need netrw for remote file editing (scp://, etc.).
 	hijack_netrw = true,
 	--- Default sort order for entries within each directory.
-  --- You could change by FilebufSortMethod <method> on the fly
+	--- You could change by FilebufSortMethod <method> on the fly
 	sort_method = "type",
 
 	--- Customizable keymaps.  Set any value to a key string to override,
@@ -34,9 +34,9 @@ local config = {
 		fold_open_recursive = "zO",
 		fold_open_all = "zR",
 		fold_close_all = "zM",
-		-- Entry actions
-		open_or_toggle = "<CR>", -- toggle dir fold OR open file
-		-- Buffer actions
+		open_file = "gf",
+		open_or_toggle = "<CR>",
+		preview = "K",
 		toggle_hidden = "gh",
 		close_filebuf = "q",
 	},

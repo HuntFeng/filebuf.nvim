@@ -105,8 +105,8 @@ local function refresh_buffer(buf)
 		return
 	end
 
-  -- save to restore cursor pos and everything later
-  local win_info = vim.fn.winsaveview()
+	-- save to restore cursor pos and everything later
+	local win_info = vim.fn.winsaveview()
 
 	local display_entries = vim.b[buf].filebuf_display_entries
 
@@ -164,8 +164,8 @@ local function refresh_buffer(buf)
 
 	rebuild_buffer_display(buf, scan.filter_visible(new_all_entries), open_dirs)
 
-  vim.fn.winrestview(win_info)
-  prof.stop()
+	vim.fn.winrestview(win_info)
+	prof.stop()
 end
 
 ----------------------------------------------------------------------
@@ -215,18 +215,18 @@ local function toggle_hidden(buf)
 			vim.b[buf].filebuf_by_parent = by_parent
 		end
 		-- Snapshot the clean disk state before merging edits, so the
-			-- :w handler can diff against the true filesystem baseline
-			-- rather than the edit-contaminated cache.  Only snapshot on
-			-- the first toggle — subsequent toggles reuse it.
-			if not vim.b[buf].filebuf_disk_baseline then
-				local snapshot = {}
-				for _, e in ipairs(all_entries) do
-					snapshot[#snapshot + 1] = vim.deepcopy(e)
-				end
-				vim.b[buf].filebuf_disk_baseline = snapshot
+		-- :w handler can diff against the true filesystem baseline
+		-- rather than the edit-contaminated cache.  Only snapshot on
+		-- the first toggle — subsequent toggles reuse it.
+		if not vim.b[buf].filebuf_disk_baseline then
+			local snapshot = {}
+			for _, e in ipairs(all_entries) do
+				snapshot[#snapshot + 1] = vim.deepcopy(e)
 			end
+			vim.b[buf].filebuf_disk_baseline = snapshot
+		end
 
-			sync.apply_ops_to_entries(all_entries, ops)
+		sync.apply_ops_to_entries(all_entries, ops)
 		vim.b[buf].filebuf_all_entries = all_entries
 		-- Invalidate by_parent after structural edits (it will be
 		-- rebuilt lazily on the next full re-scan if needed).
@@ -285,7 +285,9 @@ local function setup_keymaps(buf, dir)
 		fold_close = { actions.fold_close, "filebuf: close fold" },
 		fold_toggle = { actions.fold_toggle, "filebuf: toggle fold" },
 		fold_open_recursive = { actions.fold_open_recursive, "filebuf: recursively open folds" },
+		open_file = { actions.open_entry, "filebuf: open file" },
 		open_or_toggle = { actions.open_or_toggle, "filebuf: open file / toggle dir" },
+		preview = { actions.preview_entry, "filebuf: preview file" },
 	}
 	for name, def in pairs(ENTRY_KEYMAPS) do
 		local key = km[name]
@@ -470,14 +472,14 @@ function M.open(dir)
 				-- Prefer the clean disk snapshot (from toggle_hidden) over
 				-- the live cache, which may contain merged edits.  Filter
 				-- to current visibility so hidden files aren't seen as deleted.
-        local disk_baseline = vim.b[buf].filebuf_disk_baseline
-        if not disk_baseline then
-          disk_baseline = vim.b[buf].filebuf_all_entries
-        end
-        if not disk_baseline then
-          disk_baseline = scan.scan_tree(dir)
-        end
-        local ops = sync.compute_diff(buf_entries, scan.filter_visible(disk_baseline))
+				local disk_baseline = vim.b[buf].filebuf_disk_baseline
+				if not disk_baseline then
+					disk_baseline = vim.b[buf].filebuf_all_entries
+				end
+				if not disk_baseline then
+					disk_baseline = scan.scan_tree(dir)
+				end
+				local ops = sync.compute_diff(buf_entries, scan.filter_visible(disk_baseline))
 
 				if #ops.errors > 0 then
 					sync.report_errors(buf, ops.errors)
@@ -510,10 +512,7 @@ function M.open(dir)
 					end
 				end
 				vim.notify(
-					string.format(
-						"filebuf: save error — %s\nNothing was saved; your files are unchanged.",
-						msg
-					),
+					string.format("filebuf: save error — %s\nNothing was saved; your files are unchanged.", msg),
 					vim.log.levels.ERROR
 				)
 			end

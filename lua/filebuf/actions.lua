@@ -549,4 +549,13 @@ function M.get_entry_at_cursor(buf)
 	return entry_at_cursor(buf)
 end
 
+--- Preview a file entry in a floating window (like LSP hover).
+--- Bound to K by default.  Pressing K again on the same entry focuses
+--- the window; pressing K on a different entry replaces the content.
+---@param buf   number
+---@param entry table
+function M.preview_entry(buf, entry)
+	require("filebuf.preview").show(buf, entry)
+end
+
 return M

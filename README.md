@@ -43,15 +43,6 @@ Open the filebuf browser at the current directory:
 :Filebuf
 ```
 
-| Key | Action |
-|-----|--------|
-| `<CR>` | Toggle directory fold / open file |
-| `zo` / `zc` / `za` | Open / close / toggle fold |
-| `zO` | Recursively open folds |
-| `zR` / `zM` | Open / close all folds |
-| `gh` | Toggle hidden (dot) files |
-| `q` | Close the filebuf buffer |
-
 Edit any entry name inline, then `:w` to apply the changes to disk. The plugin validates your edits before writing — type mismatches (e.g., removing the indent that makes a file a child of a directory) are caught and reported.
 
 ## Configuration
@@ -89,7 +80,9 @@ require("filebuf").setup({
         fold_open_recursive = "zO",
         fold_open_all = "zR",
         fold_close_all = "zM",
+        open_file = "gf",
         open_or_toggle = "<CR>",
+        toggle_preview = "K",
         toggle_hidden = "gh",
         close_filebuf = "q",
     },
