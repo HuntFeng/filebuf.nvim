@@ -2,7 +2,7 @@
 
 A minimalistic, zero-dependency, intuitive tree-based filesystem editor for Neovim.
 
-https://github.com/user-attachments/assets/73cdb1af-f5a9-4978-ba11-f3a5868cfb8e
+https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 
 :construction: Early stage plugin, expect changes :construction:
 
