@@ -175,22 +175,63 @@ end
 local SORT_METHODS = { "type", "name", "modified", "created" }
 
 --- Toggle show_hidden and refresh, preserving the cursor entry and fold state.
---- Refuses when there are unsaved changes.  With hybrid mode, hidden entries
---- are already cached as lazy placeholders in filebuf_all_entries, so toggling
---- is just a re-filter — no heavy re-scan is ever needed.
+--- When there are unsaved changes, edits are merged into filebuf_all_entries
+--- before toggling so they survive the buffer rebuild (like a VCS rebase).
+--- Hidden entries are already cached as lazy placeholders in filebuf_all_entries,
+--- so toggling is a re-filter — no heavy re-scan is ever needed.
 ---@param buf number
 local function toggle_hidden(buf)
 	prof.start("toggle_hidden")
-	if vim.bo[buf].modified then
-		vim.notify("filebuf: save or discard changes before toggling hidden files", vim.log.levels.WARN)
-		prof.stop()
-		return
-	end
-
 	local dir = vim.b[buf].filebuf_root
 	local pre_entries = vim.b[buf].filebuf_display_entries or {}
 	local cursor_lnum = vim.api.nvim_win_get_cursor(0)[1]
 	local cursor_path = pre_entries[cursor_lnum] and pre_entries[cursor_lnum].path
+
+	-- If the buffer has unsaved edits, merge them into filebuf_all_entries
+	-- before toggling so they survive the buffer rebuild.  The edits are
+	-- diffed against the last-rendered display baseline, then applied to
+	-- the in-memory entry list — just like a VCS rebase.
+	local has_edits = vim.bo[buf].modified
+	if has_edits then
+		local buf_entries = buffer.parse_buffer(buf)
+		local baseline = pre_entries
+		local ops = sync.compute_diff(buf_entries, baseline)
+
+		if #ops.errors > 0 then
+			sync.report_errors(buf, ops.errors)
+			vim.notify("filebuf: fix errors before toggling hidden files", vim.log.levels.WARN)
+			prof.stop()
+			return
+		end
+
+		-- Clear stale diagnostics from a previously failed save.
+		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
+
+		-- Ensure the cache is loaded before mutating it.
+		local all_entries = vim.b[buf].filebuf_all_entries
+		if not all_entries then
+			local entries, by_parent = scan.scan_tree(dir)
+			all_entries = entries
+			vim.b[buf].filebuf_by_parent = by_parent
+		end
+		-- Snapshot the clean disk state before merging edits, so the
+			-- :w handler can diff against the true filesystem baseline
+			-- rather than the edit-contaminated cache.  Only snapshot on
+			-- the first toggle — subsequent toggles reuse it.
+			if not vim.b[buf].filebuf_disk_baseline then
+				local snapshot = {}
+				for _, e in ipairs(all_entries) do
+					snapshot[#snapshot + 1] = vim.deepcopy(e)
+				end
+				vim.b[buf].filebuf_disk_baseline = snapshot
+			end
+
+			sync.apply_ops_to_entries(all_entries, ops)
+		vim.b[buf].filebuf_all_entries = all_entries
+		-- Invalidate by_parent after structural edits (it will be
+		-- rebuilt lazily on the next full re-scan if needed).
+		vim.b[buf].filebuf_by_parent = nil
+	end
 
 	actions.save_fold_state(buf, dir, pre_entries)
 	local open_dirs = {}
@@ -212,6 +253,12 @@ local function toggle_hidden(buf)
 		vim.b[buf].filebuf_by_parent = by_parent
 	end
 	rebuild_buffer_display(buf, scan.filter_visible(all_entries), open_dirs)
+
+	-- Preserve the modified flag when edits were merged in: the buffer
+	-- content still represents unsaved changes to the filesystem.
+	if has_edits then
+		vim.bo[buf].modified = true
+	end
 
 	-- Restore the cursor to the same entry (accounts for shifted line numbers).
 	if cursor_path then
@@ -420,13 +467,17 @@ function M.open(dir)
 			prof.start("save_filebuf")
 			local ok, result = pcall(function()
 				local buf_entries = buffer.parse_buffer(buf)
-				-- Use the cached list as the disk baseline (avoids a re-scan);
-				-- filter to visible so hidden files aren't seen as "deleted".
-				local all_disk = vim.b[buf].filebuf_all_entries
-				if not all_disk then
-					all_disk = scan.scan_tree(dir)
-				end
-				local ops = sync.compute_diff(buf_entries, scan.filter_visible(all_disk))
+				-- Prefer the clean disk snapshot (from toggle_hidden) over
+				-- the live cache, which may contain merged edits.  Filter
+				-- to current visibility so hidden files aren't seen as deleted.
+        local disk_baseline = vim.b[buf].filebuf_disk_baseline
+        if not disk_baseline then
+          disk_baseline = vim.b[buf].filebuf_all_entries
+        end
+        if not disk_baseline then
+          disk_baseline = scan.scan_tree(dir)
+        end
+        local ops = sync.compute_diff(buf_entries, scan.filter_visible(disk_baseline))
 
 				if #ops.errors > 0 then
 					sync.report_errors(buf, ops.errors)
@@ -438,6 +489,10 @@ function M.open(dir)
 				prof.start("save.apply_ops")
 				sync.apply_ops(ops)
 				prof.stop() -- save.apply_ops
+
+				-- Clear the disk snapshot now that edits have been
+				-- persisted; the next toggle will start fresh.
+				vim.b[buf].filebuf_disk_baseline = nil
 
 				refresh_buffer(buf)
 				vim.notify("filebuf: saved", vim.log.levels.INFO)
