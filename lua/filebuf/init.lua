@@ -333,6 +333,65 @@ local function setup_keymaps(buf, dir)
 	end
 end
 
+--- Build a confirmation message from diff ops and ask the user to confirm.
+--- Returns true if the user confirms, false if they cancel.
+---@param ops table  result of sync.compute_diff()
+---@param root string  filebuf root directory (for relative paths)
+---@return boolean
+local function confirm_save(ops, root)
+	local lines = { "Apply the following changes to the filesystem?" }
+
+	-- Format a path relative to the filebuf root.
+	local function rel(p)
+		return p:sub(#root + 2) -- strip root .. "/"
+	end
+
+	local MAX_SHOWN = 20 -- cap per category to keep the dialog readable
+
+	-- Creates
+	if #ops.created > 0 then
+		lines[#lines + 1] = ""
+		lines[#lines + 1] = string.format("Create (%d):", #ops.created)
+		for i = 1, math.min(#ops.created, MAX_SHOWN) do
+			local e = ops.created[i]
+			lines[#lines + 1] = "  + " .. rel(e.path) .. (e.type == "dir" and "/" or "")
+		end
+		if #ops.created > MAX_SHOWN then
+			lines[#lines + 1] = string.format("  ... and %d more", #ops.created - MAX_SHOWN)
+		end
+	end
+
+	-- Deletes
+	if #ops.deleted > 0 then
+		lines[#lines + 1] = ""
+		lines[#lines + 1] = string.format("Delete (%d):", #ops.deleted)
+		for i = 1, math.min(#ops.deleted, MAX_SHOWN) do
+			local e = ops.deleted[i]
+			lines[#lines + 1] = "  - " .. rel(e.path) .. (e.type == "dir" and "/" or "")
+		end
+		if #ops.deleted > MAX_SHOWN then
+			lines[#lines + 1] = string.format("  ... and %d more", #ops.deleted - MAX_SHOWN)
+		end
+	end
+
+	-- Renames
+	if #ops.renamed > 0 then
+		lines[#lines + 1] = ""
+		lines[#lines + 1] = string.format("Rename (%d):", #ops.renamed)
+		for i = 1, math.min(#ops.renamed, MAX_SHOWN) do
+			local r = ops.renamed[i]
+			lines[#lines + 1] = "  ~ " .. rel(r.old.path) .. " → " .. rel(r.new.path)
+		end
+		if #ops.renamed > MAX_SHOWN then
+			lines[#lines + 1] = string.format("  ... and %d more", #ops.renamed - MAX_SHOWN)
+		end
+	end
+
+	local message = table.concat(lines, "\n")
+	local choice = vim.fn.confirm(message, "&Yes\n&No", 1, "Question")
+	return choice == 1
+end
+
 ----------------------------------------------------------------------
 -- Public API
 ----------------------------------------------------------------------
@@ -487,6 +546,16 @@ function M.open(dir)
 				end
 				-- Clear any stale diagnostics on successful validation (safe-wrapped).
 				pcall(vim.diagnostic.reset, sync.diag_ns, buf)
+
+				-- Save confirmation (when enabled and there are actual changes).
+				local has_changes = #ops.renamed > 0 or #ops.created > 0 or #ops.deleted > 0
+				if config.save_confirmation and has_changes then
+					if not confirm_save(ops, dir) then
+						vim.notify("filebuf: save cancelled", vim.log.levels.INFO)
+						prof.stop()
+						return
+					end
+				end
 
 				prof.start("save.apply_ops")
 				sync.apply_ops(ops)

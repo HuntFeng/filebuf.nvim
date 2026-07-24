@@ -7,6 +7,7 @@
 ---@field show_hidden boolean  when false, entries whose name starts with "." are hidden
 ---@field respect_ignore boolean  when true, .ignore/.gitignore patterns filter entries
 ---@field sort_method string  sort order: "type" | "name" | "modified" | "created"
+---@field save_confirmation boolean  when true, show a confirmation dialog before :w applies changes to the filesystem
 ---@field keymaps table  maps action names to key strings; set a value to false to disable
 local config = {
 	permanent_delete = false,
@@ -14,6 +15,7 @@ local config = {
 	git_status = true,
 	show_hidden = false,
 	respect_ignore = true,
+	save_confirmation = true,
 
 	--- When true (default), filebuf disables netrw and intercepts directory
 	--- opens so `nvim <dir>` and `:e <dir>` open filebuf instead of netrw.
