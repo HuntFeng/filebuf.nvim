@@ -4,6 +4,7 @@
 -- manual clear/refresh.  Work is O(visible viewport), never O(buffer).
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
+local prof = require("filebuf.profiler")
 local line_mod = require("filebuf.line")
 local buffer = require("filebuf.buffer")
 local git = require("filebuf.git")
@@ -26,8 +27,19 @@ end
 --- Resolve a lnum→entry map for a filebuf buffer.  Uses the cached display
 --- entries when clean; re-parses (recovering is_hidden from the full cache)
 --- when the buffer has been edited.
+--- During rebuild (filebuf_rebuilding flag), display entries are set before
+--- nvim_buf_set_lines so they are already current; returning them directly
+--- avoids ~9 redundant parse_buffer calls per save.
 local function entries_for(bufnr)
+	prof.start("decoration.entries_for")
+	-- Fast path during rebuild: entries are pre-stamped before the buffer
+	-- content is replaced, so they already match what's on screen.
+	if vim.b[bufnr].filebuf_rebuilding then
+		prof.stop()
+		return vim.b[bufnr].filebuf_display_entries
+	end
 	if not vim.bo[bufnr].modified then
+		prof.stop()
 		return vim.b[bufnr].filebuf_display_entries
 	end
 	local entries = {}
@@ -51,6 +63,7 @@ local function entries_for(bufnr)
 			end
 		end
 	end
+	prof.stop()
 	return entries
 end
 
@@ -58,11 +71,22 @@ end
 --- Fold-aware — closed-fold interiors are skipped.
 --- Priorities: dir (10) > link (8) > hidden (5) > git (0).
 function M.on_win(_, winid, bufnr, toprow, botrow)
+	prof.start("decoration.on_win")
 	if not vim.b[bufnr].filebuf_root then
+		prof.stop()
+		return false
+	end
+	-- During rebuild, entries are pre-stamped and buffer content is still
+	-- being manipulated (fold operations, etc.).  Skip all extmark work — the
+	-- final redraw after filebuf_rebuilding is cleared will decorate
+	-- everything correctly in one pass.
+	if vim.b[bufnr].filebuf_rebuilding then
+		prof.stop()
 		return false
 	end
 	local entries = entries_for(bufnr)
 	if not entries then
+		prof.stop()
 		return false
 	end
 
@@ -127,6 +151,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 		lnum = fold_end ~= -1 and fold_end + 1 or lnum + 1
 	end
 
+	prof.stop()
 	return false
 end
 

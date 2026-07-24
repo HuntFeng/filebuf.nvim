@@ -315,19 +315,11 @@ local function scan_fd(dir)
 		return vim.fn.systemlist(argv)
 	end
 
-	-- Main scan (fd appends "/" to directories) + a symlink-only pass so we
-	-- can tag type "link" without a per-entry stat.
+		-- Main scan (fd appends "/" to directories).  Symlinks are detected
+		-- with a per-entry lstat — the kernel caches are hot from fd's readdir,
+		-- avoiding the cost of a second subprocess.
 	prof.start("fd_scan")
 	local fd_out = run({})
-	prof.stop()
-
-	prof.start("fd_scan_links")
-	local symlink_set = {}
-	for _, p in ipairs(run({ "-t", "l" })) do
-		if p ~= "" then
-			symlink_set[p:sub(-1) == "/" and p:sub(1, -2) or p] = true
-		end
-	end
 	prof.stop()
 
 	prof.start("parse_fd_output")
@@ -337,7 +329,13 @@ local function scan_fd(dir)
 		if raw ~= "" then
 			local is_dir = raw:sub(-1) == "/"
 			local full = is_dir and raw:sub(1, -2) or raw
-			local etype = symlink_set[full] and "link" or (is_dir and "dir" or "file")
+			local etype
+			if is_dir then
+				etype = "dir"
+			else
+				local stat = vim.loop.fs_lstat(full)
+				etype = (stat and stat.type == "link") and "link" or "file"
+			end
 
 			local parent, name = full:match("^(.*)/(.+)$")
 			if not parent then
@@ -366,9 +364,12 @@ local function scan_fd(dir)
 	end
 	prof.stop()
 
-	-- Helper: find hidden/ignored subdirectories via fs_scandir cross-reference.
-	-- Anything fs_scandir finds that fd did NOT return is either hidden (dot-prefix)
-	-- or gitignored; directories become lazy placeholders.
+	-- Helper: find entries that fd excluded (dot-prefixed or gitignored).
+	-- Directories become lazy placeholders so users can expand into them.
+	-- Dotfiles are collected so toggling show_hidden works as a pure
+	-- re-filter.  Other gitignored files are skipped — creating entries for
+	-- potentially tens of thousands of them (e.g. **/*.npz) dominates
+	-- dfs_emit and would make scanning a 100k-file repo lag.
 	local function find_lazy_subdirs(parent_path, regular_set)
 		local handle = vim.loop.fs_scandir(parent_path)
 		if not handle then
@@ -383,11 +384,9 @@ local function scan_fd(dir)
 			if regular_set[name] then
 				goto continue
 			end
+
+			local is_dotfile = name:sub(1, 1) == "."
 			if ftype == "directory" then
-				-- All directories found here were excluded by fd (either
-				-- dot-prefixed or gitignored); tag them so filter_visible
-				-- hides them when show_hidden is off.
-				local is_dotfile = name:sub(1, 1) == "."
 				lazy[#lazy + 1] = {
 					name = name,
 					type = "dir",
@@ -397,11 +396,9 @@ local function scan_fd(dir)
 					lazy = true,
 				}
 			else
-				-- Hidden/ignored file/link that fd excluded.  Always
-				-- collect them so toggling show_hidden is a pure re-filter
-				-- of the cached list.
+				-- Dot-prefixed file/link that fd excluded (when -H is off).
+				-- Collected so toggling show_hidden is a pure re-filter.
 				local etype = ftype == "link" and "link" or "file"
-				local is_dotfile = name:sub(1, 1) == "."
 				lazy[#lazy + 1] = {
 					name = name,
 					type = etype,
@@ -410,6 +407,9 @@ local function scan_fd(dir)
 					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
 				}
 			end
+			-- else: gitignored regular file — skip it.  Collecting these
+			-- is prohibitively expensive with glob ignore patterns that
+			-- match many individual files (e.g. **/*.npz).
 			::continue::
 		end
 		sort_children(lazy)
@@ -450,7 +450,9 @@ local function scan_fd(dir)
 			end
 		end
 	end
+  prof.start("dfs_emit")
 	emit(dir, 0)
+  prof.stop()
 
 	prof.stop()
 	return result

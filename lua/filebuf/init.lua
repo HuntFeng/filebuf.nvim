@@ -46,23 +46,33 @@ end
 ---@param entries table[]  display entries (already filtered for visibility)
 ---@param open_dirs table|nil  set of dir paths to keep open (nil = all closed)
 local function rebuild_buffer_display(buf, entries, open_dirs)
+	prof.start("rebuild_buffer_display")
 	local dir = vim.b[buf].filebuf_root
 	if not dir then
+		prof.stop()
 		return
 	end
 
 	-- Entries are 1:1 with lines; stamp lnum so folds/extmarks skip re-parsing.
+	prof.start("rebuild.format_lines")
 	local lines = {}
 	for i, entry in ipairs(entries) do
 		entry.lnum = i
 		lines[i] = line_mod.format_line(entry)
 	end
+	prof.stop() -- rebuild.format_lines
+
+	-- Stamp display entries AND set the rebuilding flag BEFORE touching
+	-- buffer content.  This lets the decoration provider's on_win callback
+	-- return the already-current entries directly instead of re-parsing
+	-- the whole buffer on every redraw (saves ~9 parse_buffer calls / save).
+	vim.b[buf].filebuf_display_entries = entries
+	vim.b[buf].filebuf_rebuilding = true
+
 	buffer.without_undo(buf, function()
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 	end)
 	buffer.clear_undo(buf)
-
-	vim.b[buf].filebuf_display_entries = entries
 
 	-- Rebuild all folds and restore previously-open directories.
 	actions.rebuild_folds(buf, entries, open_dirs)
@@ -70,22 +80,28 @@ local function rebuild_buffer_display(buf, entries, open_dirs)
 	-- Persist after folds are rebuilt so newly-revealed dirs default to closed.
 	actions.save_fold_state(buf, dir, entries)
 
-	-- Cache git status for the decoration provider's next redraw.
-	vim.b[buf].filebuf_git_status = git.get_status_map(dir)
+	-- Kick off async git status so it doesn't block the critical path.
+	-- Clear old status immediately; the async callback populates when ready.
+	vim.b[buf].filebuf_git_status = nil
+	git.get_status_map_async(dir, buf)
 
+	vim.b[buf].filebuf_rebuilding = nil
 	vim.bo[buf].modified = false
 
 	if prof.enabled then
 		prof.report()
 	end
+	prof.stop()
 end
 
 --- Re-read the tree from disk and refresh the buffer, preserving fold state
 --- and any previously-expanded lazy directories.
 ---@param buf number
 local function refresh_buffer(buf)
+	prof.start("refresh_buffer")
 	local dir = vim.b[buf].filebuf_root
 	if not dir then
+		prof.stop()
 		return
 	end
 
@@ -115,6 +131,7 @@ local function refresh_buffer(buf)
 	-- Re-expand lazy dirs that were expanded before the refresh.
 	-- Must operate in a forward pass so splices don't shift positions
 	-- we haven't reached yet.
+	prof.start("refresh.re_expand_lazy")
 	local i = 1
 	while i <= #new_all_entries do
 		local entry = new_all_entries[i]
@@ -143,10 +160,12 @@ local function refresh_buffer(buf)
 		end
 		i = i + 1
 	end
+	prof.stop() -- refresh.re_expand_lazy
 
 	rebuild_buffer_display(buf, scan.filter_visible(new_all_entries), open_dirs)
 
   vim.fn.winrestview(win_info)
+  prof.stop()
 end
 
 ----------------------------------------------------------------------
@@ -161,8 +180,10 @@ local SORT_METHODS = { "type", "name", "modified", "created" }
 --- is just a re-filter — no heavy re-scan is ever needed.
 ---@param buf number
 local function toggle_hidden(buf)
+	prof.start("toggle_hidden")
 	if vim.bo[buf].modified then
 		vim.notify("filebuf: save or discard changes before toggling hidden files", vim.log.levels.WARN)
+		prof.stop()
 		return
 	end
 
@@ -203,6 +224,7 @@ local function toggle_hidden(buf)
 	end
 
 	vim.notify("filebuf: hidden files " .. (config.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
+	prof.stop()
 end
 
 --- Set up buffer-local keymaps from config.
@@ -271,6 +293,7 @@ end
 --- file.  Edits apply to disk only on :w; type mismatches block the save.
 ---@param dir string|nil
 function M.open(dir)
+	prof.start("open_filebuf")
 	dir = (dir or vim.fn.getcwd()):gsub("/$", "") -- normalize trailing slash
 
 	-- If a filebuf for this directory already exists and is a real filebuf
@@ -278,8 +301,10 @@ function M.open(dir)
 	local existing_buf = vim.fn.bufnr("Filebuf")
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if vim.b[existing_buf].filebuf_root then
+			vim.b[existing_buf].filebuf_root = dir
 			vim.api.nvim_set_current_buf(existing_buf)
 			refresh_buffer(existing_buf)
+			prof.stop()
 			return
 		end
 		-- Stale session-restored buffer: wipe so we create a fresh one below.
@@ -307,18 +332,24 @@ function M.open(dir)
 	vim.b[buf].filebuf_by_parent = by_parent
 	vim.b[buf].filebuf_lazy_expanded = {}
 
+	prof.start("open.filter_and_format")
 	local display_entries = scan.filter_visible(all_entries)
 	local lines = {}
 	for i, e in ipairs(display_entries) do
 		e.lnum = i
 		lines[i] = line_mod.format_line(e)
 	end
+	-- Pre-stamp display entries so the decoration provider can use them
+	-- during the initial redraw window.
+	vim.b[buf].filebuf_display_entries = display_entries
+	vim.b[buf].filebuf_rebuilding = true
 	if #lines > 0 then
 		buffer.without_undo(buf, function()
 			vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
 		end)
 		buffer.clear_undo(buf)
 	end
+	prof.stop() -- open.filter_and_format
 
 	-- Manual folding: each directory + descendants form a fold, closed initially.
 	vim.api.nvim_set_current_buf(buf)
@@ -375,8 +406,10 @@ function M.open(dir)
 		end
 	end
 
-	vim.b[buf].filebuf_display_entries = display_entries
-	vim.b[buf].filebuf_git_status = git.get_status_map(dir)
+	-- Kick off async git status so it doesn't block the critical path.
+	-- Clear old status immediately; the async callback populates when ready.
+	vim.b[buf].filebuf_git_status = nil
+	git.get_status_map_async(dir, buf)
 
 	-- :w → parse, diff against disk, validate, apply, refresh.
 	local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
@@ -384,6 +417,7 @@ function M.open(dir)
 		group = group,
 		buffer = buf,
 		callback = function()
+			prof.start("save_filebuf")
 			local ok, result = pcall(function()
 				local buf_entries = buffer.parse_buffer(buf)
 				-- Use the cached list as the disk baseline (avoids a re-scan);
@@ -401,7 +435,10 @@ function M.open(dir)
 				-- Clear any stale diagnostics on successful validation (safe-wrapped).
 				pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 
+				prof.start("save.apply_ops")
 				sync.apply_ops(ops)
+				prof.stop() -- save.apply_ops
+
 				refresh_buffer(buf)
 				vim.notify("filebuf: saved", vim.log.levels.INFO)
 			end)
@@ -425,14 +462,17 @@ function M.open(dir)
 					vim.log.levels.ERROR
 				)
 			end
+			prof.stop() -- save_filebuf
 		end,
 	})
 
+	vim.b[buf].filebuf_rebuilding = nil
 	vim.bo[buf].modified = false
 
 	if prof.enabled then
 		prof.report()
 	end
+	prof.stop()
 end
 
 --- Setup entry point.  Merges `opts` into config and registers commands.

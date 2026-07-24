@@ -80,6 +80,21 @@ function M.open_filebuf(dir)
 	return vim.api.nvim_get_current_buf()
 end
 
+--- Wait for async git status to populate on a filebuf buffer.
+--- After open/save, git status is fetched asynchronously via jobstart;
+--- this polls vim.b[bufnr].filebuf_git_status until it's non-nil or
+--- the timeout expires.
+---@param bufnr  number   the filebuf buffer
+---@param timeout_ms number  max wait time in ms (default 2000)
+---@return table|nil  the git status map, or nil on timeout
+function M.wait_for_git_status(bufnr, timeout_ms)
+	timeout_ms = timeout_ms or 2000
+	vim.wait(timeout_ms, function()
+		return vim.b[bufnr].filebuf_git_status ~= nil
+	end)
+	return vim.b[bufnr].filebuf_git_status
+end
+
 --- Trigger save on the filebuf buffer (simulates :w).
 --- Wraps in pcall because validation errors cause :w to throw in headless mode
 --- (the BufWriteCmd handler's vim.notify escapes as a Vim(append) error).
