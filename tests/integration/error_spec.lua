@@ -132,8 +132,10 @@ describe("error handling", function()
 		assert.is_true(#diags > 0)
 		-- The message should mention "file" and "dir" (the type mismatch).
 		local msg = diags[1].message:lower()
-		assert.is_true(msg:find("file") ~= nil or msg:find("dir") ~= nil,
-			"expected error message to mention file/dir types, got: " .. diags[1].message)
+		assert.is_true(
+			msg:find("file") ~= nil or msg:find("dir") ~= nil,
+			"expected error message to mention file/dir types, got: " .. diags[1].message
+		)
 	end)
 
 	it("allows valid edits when previous save was rejected", function()

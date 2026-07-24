@@ -252,10 +252,7 @@ describe("git status", function()
 
 		-- Untracked → "?? filename" in porcelain → "U" display char.
 		local git = require("filebuf.git")
-		local char, _ = git.entry_status(
-			{ path = tmpdir .. "/new_file.txt", type = "file" },
-			status
-		)
+		local char, _ = git.entry_status({ path = tmpdir .. "/new_file.txt", type = "file" }, status)
 		assert.equals("U", char)
 	end)
 
@@ -268,10 +265,7 @@ describe("git status", function()
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
-		local char, _ = git.entry_status(
-			{ path = tmpdir .. "/staged.txt", type = "file" },
-			status
-		)
+		local char, _ = git.entry_status({ path = tmpdir .. "/staged.txt", type = "file" }, status)
 		-- Staged new file → "A " in porcelain → "A" display char.
 		assert.equals("A", char)
 	end)
@@ -291,10 +285,7 @@ describe("git status", function()
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
-		local char, _ = git.entry_status(
-			{ path = tmpdir .. "/mod.txt", type = "file" },
-			status
-		)
+		local char, _ = git.entry_status({ path = tmpdir .. "/mod.txt", type = "file" }, status)
 		-- Modified in worktree → " M" in porcelain → "M" display char.
 		assert.equals("M", char)
 	end)
@@ -311,10 +302,7 @@ describe("git status", function()
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
-		local segments = git.dir_status(
-			{ path = tmpdir .. "/sub", type = "dir" },
-			status
-		)
+		local segments = git.dir_status({ path = tmpdir .. "/sub", type = "dir" }, status)
 		-- The "sub" directory should have aggregated status from staged.txt.
 		assert.is_not_nil(segments, "expected aggregated git status for directory")
 		assert.is_true(#segments > 0, "expected at least one status segment")
@@ -331,10 +319,7 @@ describe("git status", function()
 		assert.is_not_nil(status)
 
 		local git = require("filebuf.git")
-		local char, _ = git.entry_status(
-			{ path = tmpdir .. "/clean.txt", type = "file" },
-			status
-		)
+		local char, _ = git.entry_status({ path = tmpdir .. "/clean.txt", type = "file" }, status)
 		-- Committed, unmodified files have no status indicator.
 		assert.is_nil(char)
 	end)

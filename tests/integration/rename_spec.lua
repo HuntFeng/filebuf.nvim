@@ -99,31 +99,31 @@ describe("rename", function()
 	end)
 
 	it("preserves file content when renaming in-place", function()
-			-- Write a file with multiline content to ensure the full content survives.
-			local f = io.open(tmpdir .. "/multiline.txt", "w")
-			f:write("line one\nline two\nline three\n")
-			f:close()
+		-- Write a file with multiline content to ensure the full content survives.
+		local f = io.open(tmpdir .. "/multiline.txt", "w")
+		f:write("line one\nline two\nline three\n")
+		f:close()
 
-			-- Refresh the buffer to pick up the new file.
-			helpers.close_filebuf(buf)
-			buf = helpers.open_filebuf(tmpdir)
+		-- Refresh the buffer to pick up the new file.
+		helpers.close_filebuf(buf)
+		buf = helpers.open_filebuf(tmpdir)
 
-			local lines = helpers.get_buffer_lines(buf)
-			for i, line in ipairs(lines) do
-				if line == "multiline.txt" then
-					lines[i] = "multiline_renamed.txt"
-					break
-				end
+		local lines = helpers.get_buffer_lines(buf)
+		for i, line in ipairs(lines) do
+			if line == "multiline.txt" then
+				lines[i] = "multiline_renamed.txt"
+				break
 			end
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+		end
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
 
-			helpers.save_buffer(buf)
+		helpers.save_buffer(buf)
 
-			-- Old file is gone, new file has the original multiline content.
-			assert.is_nil(helpers.fs_stat(tmpdir .. "/multiline.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/multiline_renamed.txt"))
-			assert.equals("line one\nline two\nline three\n", helpers.read_file(tmpdir .. "/multiline_renamed.txt"))
-		end)
+		-- Old file is gone, new file has the original multiline content.
+		assert.is_nil(helpers.fs_stat(tmpdir .. "/multiline.txt"))
+		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/multiline_renamed.txt"))
+		assert.equals("line one\nline two\nline three\n", helpers.read_file(tmpdir .. "/multiline_renamed.txt"))
+	end)
 
 	it("handles rename + create + delete in a single save", function()
 		local lines = helpers.get_buffer_lines(buf)
