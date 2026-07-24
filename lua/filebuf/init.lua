@@ -285,6 +285,7 @@ local function setup_keymaps(buf, dir)
 		fold_close = { actions.fold_close, "filebuf: close fold" },
 		fold_toggle = { actions.fold_toggle, "filebuf: toggle fold" },
 		fold_open_recursive = { actions.fold_open_recursive, "filebuf: recursively open folds" },
+		open_file = { actions.open_entry, "filebuf: open file" },
 		open_or_toggle = { actions.open_or_toggle, "filebuf: open file / toggle dir" },
 		preview = { actions.preview_entry, "filebuf: preview file" },
 	}

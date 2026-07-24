@@ -80,6 +80,7 @@ require("filebuf").setup({
         fold_open_recursive = "zO",
         fold_open_all = "zR",
         fold_close_all = "zM",
+        open_file = "gf",
         open_or_toggle = "<CR>",
         toggle_preview = "K",
         toggle_hidden = "gh",

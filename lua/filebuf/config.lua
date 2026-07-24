@@ -34,11 +34,9 @@ local config = {
 		fold_open_recursive = "zO",
 		fold_open_all = "zR",
 		fold_close_all = "zM",
-		-- Entry actions
-		open_or_toggle = "<CR>", -- toggle dir fold OR open file
-		-- Preview
+		open_file = "gf",
+		open_or_toggle = "<CR>",
 		preview = "K",
-		-- Buffer actions
 		toggle_hidden = "gh",
 		close_filebuf = "q",
 	},
