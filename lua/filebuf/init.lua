@@ -466,7 +466,11 @@ function M.open(dir)
 	vim.wo.foldcolumn = "auto:9"
 	vim.wo.foldtext = "v:lua.FilebufFoldText()"
 	vim.wo.winhighlight = "Folded:FilebufFoldLine"
-	vim.wo.fillchars = (vim.wo.fillchars or "") .. "foldopen:▼,foldclose:▶,fold: "
+	vim.opt_local.fillchars:append({
+		foldopen = "▼",
+		foldclose = "▶",
+		fold = " ",
+	})
 
 	actions.create_folds(buf, display_entries)
 
