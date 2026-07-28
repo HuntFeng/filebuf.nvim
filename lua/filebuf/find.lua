@@ -8,18 +8,20 @@
 --
 -- Session state (job, timer, tree) is held module-locally by bufnr, since
 -- libuv handles aren't valid buffer-variable values.
+--
+-- Entering find mode snapshots the buffer's entry list and exiting renders that
+-- snapshot back, so unsaved edits survive the round trip verbatim.  There is no
+-- need to replay a diff onto a shadow tree, which is what this used to do.
 ----------------------------------------------------------------------
-local config = require("filebuf.config")
 local search = require("filebuf.search")
 local actions = require("filebuf.actions")
 local buffer = require("filebuf.buffer")
-local sync = require("filebuf.sync")
-local scan = require("filebuf.scan")
-local line_mod = require("filebuf.line")
+local state = require("filebuf.state")
+local render = require("filebuf.render")
 
 local M = {}
 
--- Session state: bufnr -> { job, timer, tree, pattern, saved_state }
+-- Session state: bufnr -> { job, timer, tree, pattern, saved_state, query_entries }
 local sessions = {}
 
 ----------------------------------------------------------------------
@@ -46,7 +48,7 @@ local function tree_insert(tree, root, abs_path, is_dir)
 	end
 end
 
--- Flatten the tree into a display entry list, sorted dirs-first + alphabetically.
+-- Flatten the tree into an entry list, sorted dirs-first + alphabetically.
 local function tree_flatten(tree, root, current_path, indent)
 	local entries = {}
 	local names = {}
@@ -65,13 +67,15 @@ local function tree_flatten(tree, root, current_path, indent)
 	for _, name in ipairs(names) do
 		local node = tree.children[name]
 		local path = current_path == "" and (root .. "/" .. name) or (current_path .. "/" .. name)
-		local entry = {
+		entries[#entries + 1] = {
 			name = name,
 			type = node.type,
 			path = path,
 			indent = indent,
+			-- Dot-prefixed names still dim in find mode; without this the results
+			-- lost every decoration the normal tree has.
+			is_hidden = (name:sub(1, 1) == ".") or nil,
 		}
-		entries[#entries + 1] = entry
 
 		if node.type == "dir" and next(node.children) then
 			local sub = tree_flatten(node, root, path, indent + 1)
@@ -122,7 +126,7 @@ function M.query_async(root, pattern, on_line, on_done)
 				end
 			end
 		end,
-	}, function(result)
+	}, function()
 		-- Process any remaining partial line.
 		if stdout_buffer ~= "" then
 			local path = stdout_buffer:sub(-1) == "/" and stdout_buffer:sub(1, -2) or stdout_buffer
@@ -143,33 +147,26 @@ end
 -- Render
 ----------------------------------------------------------------------
 
-local function render(buf)
+local function draw(buf)
 	local session = sessions[buf]
 	if not session or not session.tree then
 		return
 	end
 
-	local entries = tree_flatten(session.tree, vim.b[buf].filebuf_root, "", 0)
-	for i, entry in ipairs(entries) do
-		entry.lnum = i
-	end
+	local entries = tree_flatten(session.tree, state.root(buf), "", 0)
+	-- Scoped baseline for save diffing: unmatched files must not look deleted.
+	session.query_entries = entries
+	render.entries(buf, entries, nil)
+end
 
-	vim.b[buf].filebuf_display_entries = entries
-	vim.b[buf].filebuf_query_entries = entries -- scoped baseline for save diffing
-
-	buffer.without_undo(buf, function()
-		local lines = {}
-		for _, entry in ipairs(entries) do
-			lines[#lines + 1] = line_mod.format_line(entry)
-		end
-		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-	end)
-
-	-- Rebuild folds so nested matches can be folded/unfolded normally.
-	actions.rebuild_folds(buf, entries)
-
-	-- Rendering the query tree shouldn't mark the buffer as modified.
-	vim.bo[buf].modified = false
+--- The entry list find mode is currently showing, or nil outside find mode.
+--- Used as the :w diff baseline so a save in find mode only touches the
+--- entries that are actually on screen.
+---@param buf number
+---@return table[]|nil
+function M.query_entries(buf)
+	local session = sessions[buf]
+	return session and session.query_entries or nil
 end
 
 ----------------------------------------------------------------------
@@ -177,10 +174,11 @@ end
 ----------------------------------------------------------------------
 
 function M.enter(buf)
-	local root = vim.b[buf].filebuf_root
-	if not root then
+	local st = state.get(buf)
+	if not st then
 		return
 	end
+	local root = st.root
 
 	-- Tear down any existing session so re-pressing g/ restarts cleanly.
 	if sessions[buf] then
@@ -193,33 +191,14 @@ function M.enter(buf)
 		return
 	end
 
-	-- Snapshot normal-mode state for restore on <Esc>.
+	-- Snapshot normal-mode state for restore on <Esc>.  state.entries reflects
+	-- unsaved edits, so restoring it puts the user's text back as it was.
 	local saved_state = {
-		display_entries = vim.deepcopy(vim.b[buf].filebuf_display_entries or {}),
+		entries = state.entries(buf),
 		modified = vim.bo[buf].modified,
 		fold_state = vim.deepcopy(actions.closed[root] or {}),
 	}
 
-	-- If the buffer has unsaved edits, merge them into filebuf_all_entries
-	-- before entering find mode (same pattern as toggle_hidden).
-	if vim.bo[buf].modified then
-		local buf_entries = buffer.parse_buffer(buf)
-		local baseline = saved_state.display_entries
-		local ops = sync.compute_diff(buf_entries, baseline)
-
-		if #ops.errors > 0 then
-			sync.report_errors(buf, ops.errors)
-			vim.notify("filebuf: fix errors before entering find mode", vim.log.levels.WARN)
-			return
-		end
-
-		local all_entries = vim.b[buf].filebuf_all_entries
-		if all_entries then
-			sync.apply_ops_to_entries(all_entries, ops)
-		end
-	end
-
-	-- Initialize session.
 	sessions[buf] = {
 		pattern = pattern,
 		saved_state = saved_state,
@@ -227,17 +206,20 @@ function M.enter(buf)
 		dirty = false,
 		timer = nil,
 		job = nil,
+		query_entries = {},
 	}
 
 	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 		vim.api.nvim_set_option_value("winbar", "Find: " .. pattern, { win = win })
 	end
-	vim.b[buf].filebuf_mode = "find"
+	st.mode = "find"
 
 	-- Clear the buffer and start async query.
+	st.rendering = true
 	buffer.without_undo(buf, function()
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
 	end)
+	st.rendering = false
 	vim.bo[buf].modified = false
 
 	-- Batched render: timer fires every ~80ms to avoid O(n) re-renders per hit.
@@ -252,7 +234,7 @@ function M.enter(buf)
 			end
 			session.dirty = false
 			if vim.api.nvim_buf_is_valid(buf) then
-				render(buf)
+				draw(buf)
 			end
 		end)
 	)
@@ -270,7 +252,7 @@ function M.enter(buf)
 			sessions[buf].timer:stop()
 		end
 		if vim.api.nvim_buf_is_valid(buf) then
-			render(buf)
+			draw(buf)
 		end
 	end)
 
@@ -298,43 +280,26 @@ function M.exit(buf)
 		session.timer:stop()
 	end
 
-	-- Restore snapshotted normal-mode state.
-	local root = vim.b[buf].filebuf_root
-	if root and session.saved_state then
+	sessions[buf] = nil
+
+	local st = state.get(buf)
+	if st then
 		local saved = session.saved_state
-
-		-- Re-render the saved display entries.
-		local saved_entries = saved.display_entries
-		if saved_entries and #saved_entries > 0 then
-			local lines = {}
-			for _, entry in ipairs(saved_entries) do
-				lines[#lines + 1] = line_mod.format_line(entry)
-			end
-			buffer.without_undo(buf, function()
-				vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-			end)
-
-			-- Restore fold state.
+		if saved and saved.entries and #saved.entries > 0 then
 			local open_dirs = {}
-			for _, e in ipairs(saved_entries) do
+			for _, e in ipairs(saved.entries) do
 				if e.type == "dir" and not saved.fold_state[e.path] then
 					open_dirs[e.path] = true
 				end
 			end
-			actions.rebuild_folds(buf, saved_entries, open_dirs)
+			render.entries(buf, saved.entries, open_dirs)
+			-- Unsaved edits made before entering find mode are still unsaved.
+			vim.bo[buf].modified = saved.modified
 		end
 
-		vim.b[buf].filebuf_display_entries = saved_entries
-		vim.b[buf].filebuf_query_entries = nil
-
-		-- Restore modified flag (unsaved edits made before entering find mode
-		-- are still unsaved).
-		vim.bo[buf].modified = saved.modified
+		st.mode = "normal"
 	end
 
-	-- Clean up session and mode.
-	sessions[buf] = nil
-	vim.b[buf].filebuf_mode = "normal"
 	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 		vim.api.nvim_set_option_value("winbar", "Normal", { win = win })
 	end

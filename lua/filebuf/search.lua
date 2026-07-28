@@ -16,6 +16,7 @@
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
 local actions = require("filebuf.actions")
+local state = require("filebuf.state")
 
 local M = {}
 
@@ -173,9 +174,8 @@ end
 
 --- The path of the entry under the cursor, or nil.
 local function cursor_path(buf)
-	local lnum = vim.api.nvim_win_get_cursor(0)[1]
-	local entries = vim.b[buf].filebuf_display_entries
-	return entries and entries[lnum] and entries[lnum].path or nil
+	local entry = state.entry_at_cursor(buf)
+	return entry and entry.path or nil
 end
 
 --- Search, reveal every hit's ancestor chain, highlight the matches and place
@@ -193,7 +193,7 @@ end
 ---@return number  how many matches were revealed
 function M.run(buf, pattern)
 	prof.start("search.run")
-	local root = vim.b[buf].filebuf_root
+	local root = state.root(buf)
 	if not root then
 		prof.stop()
 		return 0
@@ -231,7 +231,10 @@ function M.run(buf, pattern)
 	for _, e in ipairs(entries) do
 		matches[e.path] = true
 	end
-	vim.b[buf].filebuf_search_matches = matches
+	local st = state.get(buf)
+	if st then
+		st.matches = matches
+	end
 
 	-- Cursor: if it already sits on a match (the native search having just
 	-- jumped there), keep it — revealing shifted the line, not the entry.
@@ -267,8 +270,9 @@ end
 --- Drop the highlighted match set for `buf`.
 ---@param buf number
 function M.clear(buf)
-	if vim.api.nvim_buf_is_valid(buf) then
-		vim.b[buf].filebuf_search_matches = nil
+	local st = state.get(buf)
+	if st then
+		st.matches = nil
 	end
 end
 

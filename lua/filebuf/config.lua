@@ -8,6 +8,8 @@
 ---@field respect_ignore boolean  when true, .ignore/.gitignore patterns filter entries
 ---@field sort_method string  sort order: "type" | "name" | "modified" | "created"
 ---@field save_confirmation boolean  when true, show a confirmation dialog before :w applies changes to the filesystem
+---@field eager_load boolean  when true, scan the whole tree on open so native `/` sees every entry
+---@field eager_max_entries number  cap on the eager scan; past it, folders load on demand
 ---@field search_max_results number  cap on hits returned by tree search (find mode / :FilebufFind)
 ---@field max_expand_entries number  cap on entries loaded by one recursive expand (zO)
 ---@field expand_confirm_threshold number|false  confirm before a recursive expand this large
@@ -20,10 +22,20 @@ local config = {
 	respect_ignore = true,
 	save_confirmation = true,
 
-	--- Every directory is lazy-loaded, so entries not yet on screen are invisible
-	--- to native `/`.  Use `g/` (find mode) for interactive async search, or
-	--- `:FilebufFind` to query with fd (or find) over the whole tree and load
-	--- just the ancestor chain of each hit.  This caps how many hits are revealed.
+	--- Load the whole tree when opening a filebuf, so every entry is a real
+	--- buffer line and Vim's own `/` searches all of it.  Directories still fold
+	--- closed, so the initial view is unchanged.
+	---
+	--- Set to false to load one directory at a time instead; entries not yet on
+	--- screen are then invisible to `/`, and `g/` (find mode) or `:FilebufFind`
+	--- is the way to search the rest.
+	eager_load = true,
+	--- Upper bound on the eager scan.  Past this many entries the scan stops
+	--- descending and the remaining folders load on demand, so opening a filebuf
+	--- on `/` or a home directory cannot hang the editor.
+	eager_max_entries = 200000,
+
+	--- Cap on how many hits tree search (find mode / :FilebufFind) reveals.
 	search_max_results = 500,
 	--- Upper bound on how many entries a single recursive expand (zO) may
 	--- load, so `zO` near the root of a huge tree cannot hang the editor.

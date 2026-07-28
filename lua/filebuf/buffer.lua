@@ -10,12 +10,13 @@ local M = {}
 
 --- Parse the entire buffer in one pass, computing the full filesystem path
 --- for every entry via an indent stack.
----@param buf number
+---@param buf   number
+---@param root? string  filebuf root (defaults to the buffer's state root)
 ---@return table[]  { name, type, path, indent, lnum }
-function M.parse_buffer(buf)
+function M.parse_buffer(buf, root)
 	prof.start("parse_buffer")
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local root = vim.b[buf].filebuf_root
+	root = root or require("filebuf.state").root(buf)
 	local entries = {}
 
 	-- Ancestry chain: a directory pushes { indent, path }; when indent

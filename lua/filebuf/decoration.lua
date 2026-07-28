@@ -1,12 +1,18 @@
 ----------------------------------------------------------------------
 -- Decoration provider.  Registered once in setup(); Neovim calls on_win on
 -- every redraw, so git/dir/hidden/link extmarks are always current without
--- manual clear/refresh.  Work is O(visible viewport), never O(buffer).
+-- manual clear/refresh.
+--
+-- Work is O(visible viewport) unconditionally.  It used to re-parse the entire
+-- buffer on every redraw while the buffer was modified — ~130ms per redraw on a
+-- 100k-entry tree, i.e. visible lag on every keystroke.  Now each visible line
+-- resolves through state.entry(), which is an array read while the index is
+-- current and a short backward walk past the last edit.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
 local line_mod = require("filebuf.line")
-local buffer = require("filebuf.buffer")
+local state = require("filebuf.state")
 local git = require("filebuf.git")
 
 local M = {}
@@ -17,76 +23,26 @@ M.ns = vim.api.nvim_create_namespace("filebuf-deco")
 --- on_start: skip the whole redraw cycle when no filebuf window is visible.
 function M.on_start()
 	for _, winid in ipairs(vim.api.nvim_list_wins()) do
-		if vim.b[vim.api.nvim_win_get_buf(winid)].filebuf_root then
+		if state.is_filebuf(vim.api.nvim_win_get_buf(winid)) then
 			return true
 		end
 	end
 	return false
 end
 
---- Resolve a lnum→entry map for a filebuf buffer.  Uses the cached display
---- entries when clean; re-parses (recovering is_hidden from the full cache)
---- when the buffer has been edited.
---- During rebuild (filebuf_rebuilding flag), display entries are set before
---- nvim_buf_set_lines so they are already current; returning them directly
---- avoids ~9 redundant parse_buffer calls per save.
-local function entries_for(bufnr)
-	prof.start("decoration.entries_for")
-	-- Fast path during rebuild: entries are pre-stamped before the buffer
-	-- content is replaced, so they already match what's on screen.
-	if vim.b[bufnr].filebuf_rebuilding then
-		prof.stop()
-		return vim.b[bufnr].filebuf_display_entries
-	end
-	if not vim.bo[bufnr].modified then
-		prof.stop()
-		return vim.b[bufnr].filebuf_display_entries
-	end
-	local entries = {}
-	for _, e in ipairs(buffer.parse_buffer(bufnr)) do
-		entries[e.lnum] = e
-	end
-	-- is_hidden/is_ignored aren't in the buffer text; recover them from the full
-	-- cache.
-	local all = vim.b[bufnr].filebuf_all_entries
-	if all then
-		local by_path = {}
-		for _, e in ipairs(all) do
-			by_path[e.path] = e
-		end
-		for _, e in pairs(entries) do
-			local cached = by_path[e.path]
-			if cached then
-				e.is_hidden = cached.is_hidden
-				e.is_ignored = cached.is_ignored
-				e.lazy = cached.lazy
-			end
-		end
-	end
-	prof.stop()
-	return entries
-end
-
 --- on_win: apply ephemeral dir/link/hidden/git extmarks to the visible lines.
 --- Fold-aware — closed-fold interiors are skipped.
---- Priorities: dir (10) > link (8) > hidden (5) > git (0).
+--- Priorities: search (20) > dir (10) > link (8) > hidden (5) > git (0).
 function M.on_win(_, winid, bufnr, toprow, botrow)
 	prof.start("decoration.on_win")
-	if not vim.b[bufnr].filebuf_root then
+	local st = state.get(bufnr)
+	if not st then
 		prof.stop()
 		return false
 	end
-	-- During rebuild, entries are pre-stamped and buffer content is still
-	-- being manipulated (fold operations, etc.).  Skip all extmark work — the
-	-- final redraw after filebuf_rebuilding is cleared will decorate
-	-- everything correctly in one pass.
-	if vim.b[bufnr].filebuf_rebuilding then
-		prof.stop()
-		return false
-	end
-
-	local entries = entries_for(bufnr)
-	if not entries then
+	-- During a render, buffer content and folds are both mid-flight.  Skip all
+	-- extmark work — the redraw after st.rendering clears paints everything.
+	if st.rendering then
 		prof.stop()
 		return false
 	end
@@ -94,13 +50,13 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 	local height = vim.api.nvim_win_get_height(winid)
 	local use_tabs = not vim.go.expandtab
 	local iw = line_mod.indent_width()
-	local status_map = config.git_status and vim.b[bufnr].filebuf_git_status or nil
-	local matches = vim.b[bufnr].filebuf_search_matches
+	local status_map = config.git_status and st.git or nil
+	local matches = st.matches
 
-	local lnum = toprow + 1 -- toprow is 0-indexed; entries is 1-indexed
+	local lnum = toprow + 1 -- toprow is 0-indexed; lines are 1-indexed
 	local count = 0
 	while lnum <= botrow + 1 and count <= height + 2 do
-		local entry = entries[lnum]
+		local entry = state.entry(bufnr, lnum)
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
 			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0 -- "/" or "@"

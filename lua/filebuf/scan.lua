@@ -123,9 +123,12 @@ end
 -- Ignore patterns in scope for a directory
 ----------------------------------------------------------------------
 
---- dir → { patterns = table[], negate_count = number }, accumulated from the
---- filebuf root down to `dir`.  Cleared by M.clear_ignore_cache() so edits to
+--- dir → { patterns = table[], compiled = table }, accumulated from the filebuf
+--- root down to `dir`.  Cleared by M.clear_ignore_cache() so edits to
 --- .gitignore / .ignore on disk take effect on the next scan.
+---
+--- The compiled matcher is cached alongside the patterns: classifying them is
+--- cheap but happens per directory, while matching happens per entry.
 local _ignore_cache = {}
 
 --- Drop the accumulated-ignore-pattern cache.  Call before a fresh scan.
@@ -142,25 +145,26 @@ end
 --- reused, so descending one level costs one .ignore/.gitignore read.
 ---@param root string  filebuf root (recursion stops here)
 ---@param dir  string  directory to collect patterns for
----@return table[] patterns
----@return number  negate_count
+---@return table   compiled matcher (see ignore.compile)
+---@return number  pattern count
 local function ignore_patterns_for(root, dir)
 	local cached = _ignore_cache[dir]
 	if cached then
-		return cached.patterns, cached.negate_count
+		return cached.compiled, #cached.patterns
 	end
 
-	local patterns, negate_count = {}, 0
+	local patterns = {}
 	-- Inherit the parent's accumulated patterns unless we're at (or outside) the
 	-- root.  Copied rather than shared so each level can append its own without
 	-- mutating the parent's cached list.
 	local parent = dir ~= root and vim.startswith(dir, root .. "/") and dir:match("^(.*)/[^/]+$") or nil
+	local own = 0
 	if parent then
-		local parent_patterns, parent_negate_count = ignore_patterns_for(root, parent)
+		ignore_patterns_for(root, parent)
+		local parent_patterns = _ignore_cache[parent].patterns
 		for i = 1, #parent_patterns do
 			patterns[i] = parent_patterns[i]
 		end
-		negate_count = parent_negate_count
 	end
 
 	for _, fname in ipairs({ ".ignore", ".gitignore" }) do
@@ -169,15 +173,22 @@ local function ignore_patterns_for(root, dir)
 		if fstat and fstat.type == "file" then
 			for _, p in ipairs(ignore.parse_ignore_file(ipath)) do
 				patterns[#patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = dir }
-				if p.negate then
-					negate_count = negate_count + 1
-				end
+				own = own + 1
 			end
 		end
 	end
 
-	_ignore_cache[dir] = { patterns = patterns, negate_count = negate_count }
-	return patterns, negate_count
+	-- Reuse the parent's compiled matcher verbatim when this directory adds no
+	-- rules of its own, which is the overwhelmingly common case.
+	local compiled
+	if own == 0 and parent then
+		compiled = _ignore_cache[parent].compiled
+	else
+		compiled = ignore.compile(patterns)
+	end
+
+	_ignore_cache[dir] = { patterns = patterns, compiled = compiled }
+	return compiled, #patterns
 end
 
 ----------------------------------------------------------------------
@@ -202,46 +213,40 @@ function M.scan_dir_children(dir, root)
 		return {}
 	end
 
-	local active_patterns, active_negate_count = {}, 0
+	local matcher, pattern_count
 	if config.respect_ignore then
-		active_patterns, active_negate_count = ignore_patterns_for(root or dir, dir)
+		matcher, pattern_count = ignore_patterns_for(root or dir, dir)
 	end
-	local has_patterns = #active_patterns > 0
+	local check_ignore = config.respect_ignore and (pattern_count or 0) > 0
 
 	local children = {}
+	local n = 0
 	while true do
 		local name, ftype = vim.loop.fs_scandir_next(handle)
 		if not name then
 			break
 		end
 		local child_path = dir .. "/" .. name
-		local entry = { name = name, path = child_path }
-
-		if ftype == "directory" then
-			entry.type = "dir"
+		local is_dir = ftype == "directory"
+		local entry = {
+			name = name,
+			path = child_path,
+			type = is_dir and "dir" or (ftype == "link" and "link" or "file"),
 			-- Lazy by default: only one level is ever loaded at a time.
-			entry.lazy = true
-		elseif ftype == "link" then
-			entry.type = "link"
-		else
-			entry.type = "file"
-		end
+			lazy = is_dir or nil,
+		}
 
 		-- Dot-prefixed entries are always hidden.
 		if name:sub(1, 1) == "." then
 			entry.is_hidden = true
 		end
 		-- .ignore itself is never tagged as ignored (matching the old scanner).
-		if
-			name ~= ".ignore"
-			and config.respect_ignore
-			and has_patterns
-			and ignore.matches_ignore(child_path, name, active_patterns, entry.type == "dir", active_negate_count)
-		then
+		if check_ignore and name ~= ".ignore" and ignore.matches(matcher, child_path, name, is_dir) then
 			entry.is_ignored = true
 		end
 
-		children[#children + 1] = entry
+		n = n + 1
+		children[n] = entry
 	end
 
 	sort_children(children)
@@ -302,6 +307,53 @@ function M.scan_tree(dir)
 	end
 	prof.stop()
 	return entries
+end
+
+--- Walk the tree under `root`, emitting the flat DFS entry list that should be
+--- rendered right now.
+---
+--- Filtering happens inline rather than in a second filter_visible pass: an
+--- invisible directory's children are never read at all, so hiding a big
+--- node_modules/ costs nothing instead of costing a full scan plus a filter.
+---
+--- `descend(path, emitted_so_far)` decides whether to read a directory's
+--- children — that single predicate is what makes eager and lazy loading the
+--- same code path.
+---@param root     string
+---@param descend  fun(path: string, emitted: number): boolean
+---@return table[] entries  flat DFS order, indent already set
+---@return number  emitted  how many entries were produced
+function M.walk(root, descend)
+	prof.start("scan.walk")
+	local show_hidden = config.show_hidden
+	local entries = {}
+	local n = 0
+
+	--- Returns how many entries this directory contributed directly.
+	local function visit(dir, indent)
+		local children = M.scan_dir_children(dir, root)
+		local shown = 0
+		for _, entry in ipairs(children) do
+			if show_hidden or not (entry.is_hidden or entry.is_ignored) then
+				entry.indent = indent
+				n = n + 1
+				entries[n] = entry
+				shown = shown + 1
+				if entry.type == "dir" and descend(entry.path, n) then
+					local grandchildren = visit(entry.path, indent + 1)
+					-- A directory that yielded nothing is indistinguishable from
+					-- an unexpanded one by looking at the buffer, so record it.
+					entry.expanded_empty = grandchildren == 0 or nil
+					entry.lazy = nil
+				end
+			end
+		end
+		return shown
+	end
+
+	visit(root, 0)
+	prof.stop()
+	return entries, n
 end
 
 return M

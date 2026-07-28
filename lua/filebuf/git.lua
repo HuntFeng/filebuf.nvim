@@ -100,29 +100,34 @@ function M.get_status_map(root)
 end
 
 --- Run `git status --porcelain` asynchronously via jobstart.  When complete,
---- the result is written into vim.b[bufnr].filebuf_git_status so the decoration
+--- the result is stored on the buffer's filebuf state so the decoration
 --- provider picks it up on the next redraw.  This keeps git's ~25 ms latency
 --- off the critical path during open and save.
 ---@param root  string  root directory
----@param bufnr number  buffer to update with filebuf_git_status
+---@param bufnr number  buffer to update
 function M.get_status_map_async(root, bufnr)
+	local state = require("filebuf.state")
 	local argv = { "git", "-C", root, "status", "--porcelain", "--ignored=matching", "--untracked-files=all" }
 	vim.fn.jobstart(argv, {
 		stdout_buffered = true,
 		on_stdout = function(_, data)
-			if not vim.api.nvim_buf_is_valid(bufnr) then
+			local st = state.get(bufnr)
+			if not st or not vim.api.nvim_buf_is_valid(bufnr) then
 				return
 			end
 			local output = table.concat(data or {}, "\n")
-			vim.b[bufnr].filebuf_git_status = M.parse_status_output(root, output)
+			st.git = M.parse_status_output(root, output)
 			-- Force an immediate redraw so the decoration provider picks up
 			-- the new git status extmarks.  redraw! (with bang) clears and
 			-- repaints the entire screen, which guarantees on_win fires.
 			pcall(vim.cmd, "redraw!")
 		end,
 		on_exit = function(_, exit_code)
-			if exit_code ~= 0 and vim.api.nvim_buf_is_valid(bufnr) then
-				vim.b[bufnr].filebuf_git_status = nil
+			if exit_code ~= 0 then
+				local st = state.get(bufnr)
+				if st then
+					st.git = nil
+				end
 			end
 		end,
 	})

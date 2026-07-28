@@ -12,6 +12,20 @@ local M = {}
 --- Neovim versions that reject a nil namespace.
 M.diag_ns = vim.api.nvim_create_namespace("filebuf-diag")
 
+--- Parent directory of a path.  vim.fn.fnamemodify(p, ":h") does the same thing
+--- but crosses into Vimscript, which shows up when the diff calls it once per
+--- entry on a large tree.
+---@param path string
+---@return string
+local function parent_of(path)
+	return path:match("^(.*)/") or path
+end
+
+--- Depth of a path, measured by "/" count (for create/delete ordering).
+local function depth(path)
+	return select(2, path:gsub("/", "/"))
+end
+
 --- Compare the buffer's desired state with the filesystem.  Rename detection
 --- is name-based: an unmatched buffer entry pairs with an unmatched disk entry
 --- of the same name, preferring the same parent directory.
@@ -59,36 +73,52 @@ function M.compute_diff(buf_entries, disk_entries)
 	end
 
 	-- Phase 2: name-based rename matching (same name, different parent).
+	--
+	-- Each name's candidates carry a forward-only cursor, so a candidate is
+	-- examined at most once across the whole phase.  Rescanning the candidate
+	-- list per unmatched entry made this O(unmatched x candidates): renaming a
+	-- loaded directory in a repo full of same-named files (index.ts, mod.rs,
+	-- __init__.py) took 3.4s at 17.6k descendants and grew quadratically.
+	--
+	-- There is deliberately no same-parent preference here: same parent plus
+	-- same name means the same path, which Phase 1 already consumed.
+	local renamed_disk = {} -- disk paths consumed by renames
+	local buf_unmatched2 = {} -- entries still unmatched after name-based matching
+
 	local disk_by_name = {}
-	for _, de in ipairs(disk_entries) do
-		if not consumed[de.path] then
-			local list = disk_by_name[de.name]
-			if not list then
-				list = {}
-				disk_by_name[de.name] = list
+	if #buf_unmatched > 0 then
+		for _, de in ipairs(disk_entries) do
+			if not consumed[de.path] then
+				local bucket = disk_by_name[de.name]
+				if not bucket then
+					bucket = { at = 1 }
+					disk_by_name[de.name] = bucket
+				end
+				bucket[#bucket + 1] = de
 			end
-			list[#list + 1] = de
 		end
 	end
 
-	local renamed_disk = {} -- disk paths consumed by renames
-	local buf_unmatched2 = {} -- entries still unmatched after name-based matching
-	for _, be in ipairs(buf_unmatched) do
-		local candidates = disk_by_name[be.name]
-		local best
-		if candidates then
-			-- Prefer a same-parent match to avoid false positives across dirs.
-			local be_parent = vim.fn.fnamemodify(be.path, ":h")
-			for _, de in ipairs(candidates) do
-				if not renamed_disk[de.path] then
-					if vim.fn.fnamemodify(de.path, ":h") == be_parent then
-						best = de
-						break
-					end
-					best = best or de -- fallback: first unmatched same-name entry
-				end
-			end
+	--- Next candidate in `bucket` that no rename has claimed yet.
+	local function take(bucket)
+		if not bucket then
+			return nil
 		end
+		local at = bucket.at
+		while at <= #bucket do
+			local de = bucket[at]
+			if not renamed_disk[de.path] then
+				bucket.at = at
+				return de
+			end
+			at = at + 1
+		end
+		bucket.at = at
+		return nil
+	end
+
+	for _, be in ipairs(buf_unmatched) do
+		local best = take(disk_by_name[be.name])
 
 		if best then
 			if (best.type == "dir") ~= (be.type == "dir") then
@@ -128,7 +158,7 @@ function M.compute_diff(buf_entries, disk_entries)
 		local disk_by_parent = {}
 		for _, de in ipairs(disk_entries) do
 			if not consumed[de.path] and not renamed_disk[de.path] then
-				local parent = vim.fn.fnamemodify(de.path, ":h")
+				local parent = parent_of(de.path)
 				local list = disk_by_parent[parent]
 				if not list then
 					list = {}
@@ -142,7 +172,7 @@ function M.compute_diff(buf_entries, disk_entries)
 		local function paths_with_children(entries)
 			local parents = {}
 			for _, e in ipairs(entries) do
-				parents[vim.fn.fnamemodify(e.path, ":h")] = true
+				parents[parent_of(e.path)] = true
 			end
 			return parents
 		end
@@ -156,7 +186,7 @@ function M.compute_diff(buf_entries, disk_entries)
 				created[#created + 1] = be
 				goto continue
 			end
-			local be_parent = vim.fn.fnamemodify(be.path, ":h")
+			local be_parent = parent_of(be.path)
 			local candidates = disk_by_parent[be_parent]
 			local best
 			if candidates then
@@ -226,14 +256,9 @@ function M.report_errors(buf, errors)
 	)
 end
 
---- Depth of a path, measured by "/" count (for create/delete ordering).
-local function depth(path)
-	return select(2, path:gsub("/", "/"))
-end
-
 --- Apply diff operations to an in-memory entry list.  Used when toggling
---- visibility mid-edit: user edits are first merged into filebuf_all_entries
---- so that rebuilding the buffer preserves them.
+--- visibility mid-edit: the user's unsaved edits are replayed onto the freshly
+--- rendered tree so that changing what is visible doesn't discard them.
 ---
 --- Mutates `entries` in place.
 ---@param entries table[]  flat DFS-ordered entry list
@@ -290,15 +315,12 @@ function M.apply_ops_to_entries(entries, ops)
 		for _, c in ipairs(ops.created) do
 			creates[#creates + 1] = c
 		end
-		local function depth(p)
-			return select(2, p:gsub("/", "/"))
-		end
 		table.sort(creates, function(a, b)
 			return depth(a.path) < depth(b.path)
 		end)
 
 		for _, c in ipairs(creates) do
-			local parent_path = vim.fn.fnamemodify(c.path, ":h")
+			local parent_path = parent_of(c.path)
 			local parent_idx, parent_indent
 			for i, e in ipairs(entries) do
 				if e.path == parent_path then
@@ -343,10 +365,12 @@ function M.apply_ops(ops)
 		end
 	end
 
-	-- 2. Deletes, deepest path first.
+	-- 2. Deletes, deepest path first, so children go before their parents.
+	-- Depth is the "/" count, not the string length: "/a/bbbbbbbb" is longer
+	-- than "/a/b/c" but shallower, and sorting by length got that backwards.
 	local to_delete = ops.deleted
 	table.sort(to_delete, function(a, b)
-		return #a.path > #b.path
+		return depth(a.path) > depth(b.path)
 	end)
 
 	-- When permanent_delete is off, everything deleted this save goes into a
