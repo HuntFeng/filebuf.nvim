@@ -590,49 +590,6 @@ function M.open(dir)
 		end,
 	})
 
-	-- Hybrid `/`: `/` itself stays native (incsearch, history, n/N).  We watch
-	-- it leave the cmdline and always query the tree afterwards — a match in
-	-- the buffer says nothing about how many more are still unloaded on disk.
-	--
-	-- When the pattern matches nothing on screen, the search Vim is about to
-	-- run would abort with E486 before we get a chance to reveal anything, so
-	-- the cmdline is swapped for `\%^` (start of buffer — always matches, never
-	-- errors) and @/ is restored to the user's pattern afterwards so hlsearch
-	-- and n/N work over the revealed lines.
-	--
-	-- vim.schedule is required either way: at CmdlineLeave the search has not
-	-- been applied yet, and revealing rewrites buffer lines.
-	vim.api.nvim_create_autocmd("CmdlineLeave", {
-		group = group,
-		buffer = buf,
-		callback = function()
-			local cmdtype = vim.fn.getcmdtype()
-			if cmdtype ~= "/" and cmdtype ~= "?" then
-				return
-			end
-			local pattern = vim.fn.getcmdline()
-			if pattern == "" or (vim.v.event and vim.v.event.abort) then
-				return
-			end
-
-			local matched_locally = vim.fn.search(pattern, "nw") ~= 0
-			if not matched_locally then
-				pcall(vim.fn.setcmdline, "\\%^")
-			end
-
-			vim.schedule(function()
-				if not vim.api.nvim_buf_is_valid(buf) or vim.api.nvim_get_current_buf() ~= buf then
-					return
-				end
-				if not matched_locally then
-					pcall(vim.fn.setreg, "/", pattern)
-				end
-				-- pcall: an invalid pattern must not break `/`.
-				pcall(search.run, buf, pattern)
-			end)
-		end,
-	})
-
 	-- Cleanup find-mode session if buffer is deleted/unloaded.
 	vim.api.nvim_create_autocmd({ "BufDelete", "BufUnload" }, {
 		group = group,

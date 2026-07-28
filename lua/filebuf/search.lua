@@ -1,11 +1,12 @@
 ----------------------------------------------------------------------
--- Fallback search for lazily-loaded entries.
+-- Tree search for lazily-loaded entries.
 --
--- Every directory is lazy-loaded, so native `/` can only match entries that
--- are already on screen.  When it matches nothing, filebuf queries the whole
--- tree with fd (find(1) fallback) and loads just the ancestor chain of each
--- hit — sibling subdirectories along the way are listed but not expanded.
--- Matches are highlighted via the decoration provider.
+-- Every directory is lazy-loaded, so entries not yet on screen are invisible
+-- to native `/`.  Use `g/` (find mode) for interactive asynchronous search,
+-- or `:FilebufFind <pattern>` to query the whole tree synchronously with fd
+-- (find(1) fallback) and load the ancestor chain of each hit — sibling
+-- subdirectories along the way are listed but not expanded.  Matches are
+-- highlighted via the decoration provider.
 --
 -- The pattern arrives as a Vim regex and has to be handed to a different
 -- engine.  Vim-only atoms are stripped and, if any other escape survives, the
@@ -184,9 +185,9 @@ end
 --- finding an entry in the buffer says nothing about how many more are still
 --- unloaded on disk.
 ---
---- @/ is left alone — the caller (native `/`, or `:FilebufFind`) owns it, and
---- the user's pattern still matches the freshly-revealed basename lines, so
---- n/N keep working.
+--- @/ is left alone — the caller (e.g. :FilebufFind) owns it, and the user's
+--- pattern still matches the freshly-revealed basename lines, so n/N keep
+--- working.
 ---@param buf     number
 ---@param pattern string  a Vim search pattern
 ---@return number  how many matches were revealed

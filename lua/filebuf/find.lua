@@ -334,8 +334,6 @@ function M.exit(buf)
 
 	-- Clean up session and mode.
 	sessions[buf] = nil
-	-- vim.b[buf].filebuf_mode = "normal"
-	-- vim.wo.winbar = "Normal"
 	vim.b[buf].filebuf_mode = "normal"
 	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
 		vim.api.nvim_set_option_value("winbar", "Normal", { win = win })

@@ -8,7 +8,7 @@
 ---@field respect_ignore boolean  when true, .ignore/.gitignore patterns filter entries
 ---@field sort_method string  sort order: "type" | "name" | "modified" | "created"
 ---@field save_confirmation boolean  when true, show a confirmation dialog before :w applies changes to the filesystem
----@field search_max_results number  cap on hits returned by the `/` fallback search
+---@field search_max_results number  cap on hits returned by tree search (find mode / :FilebufFind)
 ---@field max_expand_entries number  cap on entries loaded by one recursive expand (zO)
 ---@field expand_confirm_threshold number|false  confirm before a recursive expand this large
 ---@field keymaps table  maps action names to key strings; set a value to false to disable
@@ -20,10 +20,10 @@ local config = {
 	respect_ignore = true,
 	save_confirmation = true,
 
-	--- Every directory is lazy-loaded, so native `/` can only match entries
-	--- already on screen.  When it finds nothing, filebuf falls back to an
-	--- fd (or find) query over the whole tree and loads just the ancestor
-	--- chain of each hit.  This caps how many hits are revealed.
+	--- Every directory is lazy-loaded, so entries not yet on screen are invisible
+	--- to native `/`.  Use `g/` (find mode) for interactive async search, or
+	--- `:FilebufFind` to query with fd (or find) over the whole tree and load
+	--- just the ancestor chain of each hit.  This caps how many hits are revealed.
 	search_max_results = 500,
 	--- Upper bound on how many entries a single recursive expand (zO) may
 	--- load, so `zO` near the root of a huge tree cannot hang the editor.
@@ -72,12 +72,12 @@ local HIGHLIGHTS = {
 	FilebufHiddenFile = { fg = "#5c6370" },
 	FilebufHiddenDir = { fg = "#5c6370" },
 	FilebufLink = { fg = "#56b6c2" },
-	-- Entries revealed by the `/` fallback search.  Linked rather than a hard
+	-- Entries revealed by tree search (find mode / :FilebufFind).  Linked rather
 	-- colour so it follows the colourscheme's search highlight.
 	FilebufSearchMatch = { link = "Search" },
 	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
 	-- Mode banner (normal/find mode indicator).
-	FilebufModeBar = { link = "Visual" },
+	WinBar = { link = "TabLineSel" },
 }
 
 --- Define every filebuf highlight group.  Called from setup().
@@ -85,6 +85,11 @@ function config.define_highlights()
 	for name, def in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
 	end
+	-- WinBar is a built-in Neovim highlight group.  Setting it with
+	-- default=true would be a no-op (the built-in definition already
+	-- exists), so we must set it without default=true for the link to
+	-- actually take effect.
+	vim.api.nvim_set_hl(0, "WinBar", { link = "TabLineSel" })
 end
 
 return config
