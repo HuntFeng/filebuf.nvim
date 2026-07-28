@@ -28,16 +28,16 @@ jobs:
           git clone --depth 1 https://github.com/nvim-lua/plenary.nvim.git .deps/plenary.nvim
 
       # ------------------------------------------------------------------
-      # Run tests (find fallback — no fd installed yet)
+      # Run tests (find fallback for the `/` search — no fd installed yet)
       # ------------------------------------------------------------------
       - name: Run tests (find fallback)
         run: make test
 
       # ------------------------------------------------------------------
-      # Install fd and re-run tests to exercise the fd fast-path scanner
+      # Install fd and re-run tests to exercise the fd search backend
       # ------------------------------------------------------------------
       - name: Install fd-find
         run: sudo apt-get update -y && sudo apt-get install -y fd-find
 
-      - name: Run tests (fd fast path)
+      - name: Run tests (fd search backend)
         run: make test

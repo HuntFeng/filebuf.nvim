@@ -80,6 +80,42 @@ function M.open_filebuf(dir)
 	return vim.api.nvim_get_current_buf()
 end
 
+--- Expand one lazy directory by absolute path.  Every directory is
+--- lazy-loaded, so a nested entry only becomes a buffer line once its parent
+--- has been expanded.
+---@param buf  number
+---@param path string  absolute path of the directory to expand
+---@return boolean  true when the directory was found and expanded
+function M.expand(buf, path)
+	for _, e in ipairs(vim.b[buf].filebuf_display_entries or {}) do
+		if e.path == path and e.type == "dir" then
+			require("filebuf.actions").expand_dir(buf, e)
+			return true
+		end
+	end
+	return false
+end
+
+--- Load every ancestor of `path` so it becomes a visible buffer line.
+--- Thin wrapper over actions.reveal_path for readability in specs.
+---@param buf  number
+---@param path string  absolute path under the filebuf root
+---@return table|nil  the revealed display entry
+function M.reveal(buf, path)
+	return require("filebuf.actions").reveal_path(buf, path)
+end
+
+--- Buffer lines as a set, for order-independent presence assertions.
+---@param buf number
+---@return table<string, boolean>
+function M.line_set(buf)
+	local names = {}
+	for _, l in ipairs(M.get_buffer_lines(buf)) do
+		names[l] = true
+	end
+	return names
+end
+
 --- Wait for async git status to populate on a filebuf buffer.
 --- After open/save, git status is fetched asynchronously via jobstart;
 --- this polls vim.b[bufnr].filebuf_git_status until it's non-nil or

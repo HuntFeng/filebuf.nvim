@@ -16,8 +16,21 @@ local sync = require("filebuf.sync")
 local git = require("filebuf.git")
 local decoration = require("filebuf.decoration")
 local actions = require("filebuf.actions")
+local search = require("filebuf.search")
+local find = require("filebuf.find")
 
 local M = {}
+
+--- Set winbar on every window that displays `buf`.
+--- vim.wo.winbar is window-local; when multiple windows show the same
+--- filebuf buffer, we must update each one so the mode line stays in sync.
+---@param buf number
+---@param text string
+local function set_winbar(buf, text)
+	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+		vim.api.nvim_set_option_value("winbar", text, { win = win })
+	end
+end
 
 --- Public, user-mutable configuration (see filebuf.config).
 M.config = config
@@ -124,19 +137,22 @@ local function refresh_buffer(buf)
 	local previously_expanded = vim.b[buf].filebuf_lazy_expanded or {}
 	vim.b[buf].filebuf_lazy_expanded = {}
 
-	local new_all_entries, by_parent = scan.scan_tree(dir)
-	vim.b[buf].filebuf_all_entries = new_all_entries
-	vim.b[buf].filebuf_by_parent = by_parent
+	-- Search match lnums no longer mean anything after a rebuild.
+	search.clear(buf)
 
-	-- Re-expand lazy dirs that were expanded before the refresh.
-	-- Must operate in a forward pass so splices don't shift positions
-	-- we haven't reached yet.
+	scan.clear_ignore_cache()
+	local new_all_entries = scan.scan_tree(dir)
+	vim.b[buf].filebuf_all_entries = new_all_entries
+
+	-- Re-expand lazy dirs that were expanded before the refresh.  A forward
+	-- pass is required both so splices don't shift positions we haven't reached
+	-- yet, and so a parent is spliced in before the loop reaches its children.
 	prof.start("refresh.re_expand_lazy")
 	local i = 1
 	while i <= #new_all_entries do
 		local entry = new_all_entries[i]
 		if entry.lazy and previously_expanded[entry.path] then
-			local children = scan.scan_dir_children(entry.path, by_parent)
+			local children = scan.scan_dir_children(entry.path, dir)
 			local parent_indent = entry.indent
 			for _, child in ipairs(children) do
 				child.indent = parent_indent + 1
@@ -156,7 +172,10 @@ local function refresh_buffer(buf)
 			exp_rb[entry.path] = true
 			vim.b[buf].filebuf_lazy_expanded = exp_rb
 			vim.b[buf].filebuf_all_entries = new_all_entries
-			i = i + #children
+			-- Deliberately do NOT skip past the children: they were just
+			-- scanned as lazy placeholders themselves, and any of them that was
+			-- also expanded before the refresh has to be re-expanded in turn.
+			-- entry.lazy is cleared above, so index i can't be revisited.
 		end
 		i = i + 1
 	end
@@ -210,9 +229,7 @@ local function toggle_hidden(buf)
 		-- Ensure the cache is loaded before mutating it.
 		local all_entries = vim.b[buf].filebuf_all_entries
 		if not all_entries then
-			local entries, by_parent = scan.scan_tree(dir)
-			all_entries = entries
-			vim.b[buf].filebuf_by_parent = by_parent
+			all_entries = scan.scan_tree(dir)
 		end
 		-- Snapshot the clean disk state before merging edits, so the
 		-- :w handler can diff against the true filesystem baseline
@@ -228,9 +245,6 @@ local function toggle_hidden(buf)
 
 		sync.apply_ops_to_entries(all_entries, ops)
 		vim.b[buf].filebuf_all_entries = all_entries
-		-- Invalidate by_parent after structural edits (it will be
-		-- rebuilt lazily on the next full re-scan if needed).
-		vim.b[buf].filebuf_by_parent = nil
 	end
 
 	actions.save_fold_state(buf, dir, pre_entries)
@@ -243,14 +257,13 @@ local function toggle_hidden(buf)
 
 	config.show_hidden = not config.show_hidden
 
-	-- Hidden entries are already in filebuf_all_entries (as lazy placeholders),
-	-- so toggling is a pure re-filter.  Re-scan only if the cache is missing.
+	-- Every loaded directory's hidden/ignored entries are already in
+	-- filebuf_all_entries, so toggling is a pure re-filter — never a re-scan.
+	-- Re-scan only if the cache is missing entirely.
 	local all_entries = vim.b[buf].filebuf_all_entries
 	if not all_entries then
-		local entries, by_parent = scan.scan_tree(dir)
-		all_entries = entries
+		all_entries = scan.scan_tree(dir)
 		vim.b[buf].filebuf_all_entries = all_entries
-		vim.b[buf].filebuf_by_parent = by_parent
 	end
 	rebuild_buffer_display(buf, scan.filter_visible(all_entries), open_dirs)
 
@@ -331,6 +344,13 @@ local function setup_keymaps(buf, dir)
 			vim.api.nvim_buf_delete(buf, { force = true })
 		end, { buffer = buf, desc = "filebuf: close" })
 	end
+
+	-- find_mode (custom — enter async find mode)
+	if km.find_mode then
+		vim.keymap.set("n", km.find_mode, function()
+			find.enter(buf)
+		end, { buffer = buf, desc = "filebuf: find mode" })
+	end
 end
 
 --- Build a confirmation message from diff ops and ask the user to confirm.
@@ -396,9 +416,11 @@ end
 -- Public API
 ----------------------------------------------------------------------
 
---- Open the filebuf browser rooted at `dir` (default: cwd).  The full tree is
---- loaded with subdirectories folded closed; <CR> toggles a fold or opens a
---- file.  Edits apply to disk only on :w; type mismatches block the save.
+--- Open the filebuf browser rooted at `dir` (default: cwd).  Only the root's
+--- immediate children are loaded; every directory is a lazy placeholder whose
+--- children appear when it is expanded (<CR> / zo) or when a search reveals a
+--- path through it.  Edits apply to disk only on :w; type mismatches block the
+--- save.
 ---@param dir string|nil
 function M.open(dir)
 	prof.start("open_filebuf")
@@ -433,33 +455,19 @@ function M.open(dir)
 	-- Set up configurable keymaps.
 	setup_keymaps(buf, dir)
 
-	-- Populate with the full tree; cache the unfiltered list so toggle_hidden
-	-- can re-filter from memory instead of re-walking the filesystem.
-	local all_entries, by_parent = scan.scan_tree(dir)
+	-- Load only the root's immediate children — every directory below is a lazy
+	-- placeholder.  The unfiltered list is cached so toggle_hidden is a pure
+	-- re-filter rather than a re-scan.
+	scan.clear_ignore_cache()
+	local all_entries = scan.scan_tree(dir)
 	vim.b[buf].filebuf_all_entries = all_entries
-	vim.b[buf].filebuf_by_parent = by_parent
 	vim.b[buf].filebuf_lazy_expanded = {}
+	vim.b[buf].filebuf_mode = "normal"
 
-	prof.start("open.filter_and_format")
-	local display_entries = scan.filter_visible(all_entries)
-	local lines = {}
-	for i, e in ipairs(display_entries) do
-		e.lnum = i
-		lines[i] = line_mod.format_line(e)
-	end
-	-- Pre-stamp display entries so the decoration provider can use them
-	-- during the initial redraw window.
-	vim.b[buf].filebuf_display_entries = display_entries
-	vim.b[buf].filebuf_rebuilding = true
-	if #lines > 0 then
-		buffer.without_undo(buf, function()
-			vim.api.nvim_buf_set_lines(buf, 0, 0, false, lines)
-		end)
-		buffer.clear_undo(buf)
-	end
-	prof.stop() -- open.filter_and_format
-
-	-- Manual folding: each directory + descendants form a fold, closed initially.
+	-- Manual folding: each directory + descendants form a fold, closed
+	-- initially.  Window options go first so rebuild_buffer_display's fold
+	-- work below sees them.  Unexpanded lazy dirs have no children on screen
+	-- and therefore no fold — the trailing "/" is their only cue.
 	vim.api.nvim_set_current_buf(buf)
 	vim.wo.foldmethod = "manual"
 	vim.wo.foldenable = true
@@ -471,57 +479,31 @@ function M.open(dir)
 		foldclose = "▶",
 		fold = " ",
 	})
+	set_winbar(buf, "Normal")
 
-	actions.create_folds(buf, display_entries)
-
-	-- Restore saved fold state, or close everything on first open.
+	-- Restore saved fold state: everything starts closed, so only the dirs the
+	-- user had left open are reopened (newly-revealed dirs default to closed).
+	local open_dirs
 	if actions.closed[dir] then
-		-- create_folds already closed every dir; open only the ones the user
-		-- had expanded, so newly-revealed dirs default to closed.
-		for _, e in ipairs(display_entries) do
+		open_dirs = {}
+		for _, e in ipairs(all_entries) do
 			if e.type == "dir" and not actions.closed[dir][e.path] then
-				vim.cmd(string.format("silent! %dfoldopen", e.lnum))
+				open_dirs[e.path] = true
 			end
 		end
-	else
-		vim.cmd("silent! %foldclose!")
 	end
+	rebuild_buffer_display(buf, scan.filter_visible(all_entries), open_dirs)
 
-	-- Auto-focus the file that was being edited before :Filebuf.
+	-- Auto-focus the file that was being edited before :Filebuf.  Its ancestors
+	-- aren't loaded yet, so reveal_path expands the chain down to it (and opens
+	-- the folds on the way) before we place the cursor.
 	if config.auto_focus_current_file and current_file ~= "" and vim.startswith(current_file, dir .. "/") then
-		local target = vim.fn.resolve(current_file)
-		local target_lnum, target_indent
-		for _, e in ipairs(display_entries) do
-			if vim.fn.resolve(e.path) == target then
-				target_lnum, target_indent = e.lnum, e.indent
-				break
-			end
-		end
-		if target_lnum then
-			-- Open the closest ancestor dir at each depth above the target.
-			local ancestors = {}
-			for _, e in ipairs(display_entries) do
-				if e.type == "dir" and e.lnum < target_lnum and e.indent < target_indent then
-					ancestors[e.indent] = e.lnum
-				end
-			end
-			local sorted = {}
-			for _, lnum in pairs(ancestors) do
-				sorted[#sorted + 1] = lnum
-			end
-			table.sort(sorted) -- outermost (lowest indent) first
-			for _, lnum in ipairs(sorted) do
-				pcall(vim.cmd, string.format("%dfoldopen", lnum))
-			end
-			vim.api.nvim_win_set_cursor(0, { target_lnum, 0 })
+		local target = actions.reveal_path(buf, vim.fn.resolve(current_file)) or actions.reveal_path(buf, current_file)
+		if target then
+			vim.api.nvim_win_set_cursor(0, { target.lnum, 0 })
 			vim.cmd("normal! zz")
 		end
 	end
-
-	-- Kick off async git status so it doesn't block the critical path.
-	-- Clear old status immediately; the async callback populates when ready.
-	vim.b[buf].filebuf_git_status = nil
-	git.get_status_map_async(dir, buf)
 
 	-- :w → parse, diff against disk, validate, apply, refresh.
 	local group = vim.api.nvim_create_augroup("filebuf_edit_" .. buf, { clear = true })
@@ -532,17 +514,23 @@ function M.open(dir)
 			prof.start("save_filebuf")
 			local ok, result = pcall(function()
 				local buf_entries = buffer.parse_buffer(buf)
-				-- Prefer the clean disk snapshot (from toggle_hidden) over
-				-- the live cache, which may contain merged edits.  Filter
-				-- to current visibility so hidden files aren't seen as deleted.
-				local disk_baseline = vim.b[buf].filebuf_disk_baseline
-				if not disk_baseline then
-					disk_baseline = vim.b[buf].filebuf_all_entries
+				-- In find mode, scope the diff to the query tree only (the shown entries).
+				-- Otherwise, prefer the clean disk snapshot (from toggle_hidden) over
+				-- the live cache, which may contain merged edits.
+				local disk_baseline
+				if vim.b[buf].filebuf_mode == "find" then
+					disk_baseline = vim.b[buf].filebuf_query_entries or {}
+				else
+					disk_baseline = vim.b[buf].filebuf_disk_baseline
+					if not disk_baseline then
+						disk_baseline = vim.b[buf].filebuf_all_entries
+					end
+					if not disk_baseline then
+						disk_baseline = scan.scan_tree(dir)
+					end
+					disk_baseline = scan.filter_visible(disk_baseline)
 				end
-				if not disk_baseline then
-					disk_baseline = scan.scan_tree(dir)
-				end
-				local ops = sync.compute_diff(buf_entries, scan.filter_visible(disk_baseline))
+				local ops = sync.compute_diff(buf_entries, disk_baseline)
 
 				if #ops.errors > 0 then
 					sync.report_errors(buf, ops.errors)
@@ -569,7 +557,15 @@ function M.open(dir)
 				-- persisted; the next toggle will start fresh.
 				vim.b[buf].filebuf_disk_baseline = nil
 
+				-- If we're in find mode, exit it (save implies commitment to the edits,
+				-- and we show the full tree again). Update the mode banner.
+				if vim.b[buf].filebuf_mode == "find" then
+					find.exit(buf)
+				end
+
 				refresh_buffer(buf)
+				-- Ensure the mode banner is visible after refresh.
+				vim.b[buf].filebuf_mode = vim.b[buf].filebuf_mode or "normal"
 				vim.notify("filebuf: saved", vim.log.levels.INFO)
 			end)
 			if not ok and not tostring(result):match("validation failed") then
@@ -589,7 +585,60 @@ function M.open(dir)
 					vim.log.levels.ERROR
 				)
 			end
+
 			prof.stop() -- save_filebuf
+		end,
+	})
+
+	-- Hybrid `/`: `/` itself stays native (incsearch, history, n/N).  We watch
+	-- it leave the cmdline and always query the tree afterwards — a match in
+	-- the buffer says nothing about how many more are still unloaded on disk.
+	--
+	-- When the pattern matches nothing on screen, the search Vim is about to
+	-- run would abort with E486 before we get a chance to reveal anything, so
+	-- the cmdline is swapped for `\%^` (start of buffer — always matches, never
+	-- errors) and @/ is restored to the user's pattern afterwards so hlsearch
+	-- and n/N work over the revealed lines.
+	--
+	-- vim.schedule is required either way: at CmdlineLeave the search has not
+	-- been applied yet, and revealing rewrites buffer lines.
+	vim.api.nvim_create_autocmd("CmdlineLeave", {
+		group = group,
+		buffer = buf,
+		callback = function()
+			local cmdtype = vim.fn.getcmdtype()
+			if cmdtype ~= "/" and cmdtype ~= "?" then
+				return
+			end
+			local pattern = vim.fn.getcmdline()
+			if pattern == "" or (vim.v.event and vim.v.event.abort) then
+				return
+			end
+
+			local matched_locally = vim.fn.search(pattern, "nw") ~= 0
+			if not matched_locally then
+				pcall(vim.fn.setcmdline, "\\%^")
+			end
+
+			vim.schedule(function()
+				if not vim.api.nvim_buf_is_valid(buf) or vim.api.nvim_get_current_buf() ~= buf then
+					return
+				end
+				if not matched_locally then
+					pcall(vim.fn.setreg, "/", pattern)
+				end
+				-- pcall: an invalid pattern must not break `/`.
+				pcall(search.run, buf, pattern)
+			end)
+		end,
+	})
+
+	-- Cleanup find-mode session if buffer is deleted/unloaded.
+	vim.api.nvim_create_autocmd({ "BufDelete", "BufUnload" }, {
+		group = group,
+		buffer = buf,
+		callback = function()
+			find.cleanup(buf)
 		end,
 	})
 
@@ -653,6 +702,21 @@ function M.setup(opts)
 			)
 		end
 	end, { nargs = "?", desc = "Set or cycle sort method (type | name | modified | created)" })
+	vim.api.nvim_create_user_command("FilebufFind", function(args)
+		local buf = vim.api.nvim_get_current_buf()
+		if not vim.b[buf] or not vim.b[buf].filebuf_root then
+			vim.notify("filebuf: not in a filebuf buffer", vim.log.levels.WARN)
+			return
+		end
+		if args.args == "" then
+			vim.notify("filebuf: :FilebufFind needs a pattern", vim.log.levels.WARN)
+			return
+		end
+		search.run(buf, args.args)
+	end, { nargs = "?", desc = "Search the whole tree and reveal matching entries" })
+	vim.api.nvim_create_user_command("FilebufSearchClear", function()
+		search.clear(vim.api.nvim_get_current_buf())
+	end, { desc = "Clear filebuf search match highlighting" })
 end
 
 return M

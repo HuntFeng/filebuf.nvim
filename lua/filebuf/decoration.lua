@@ -84,6 +84,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 		prof.stop()
 		return false
 	end
+
 	local entries = entries_for(bufnr)
 	if not entries then
 		prof.stop()
@@ -94,6 +95,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 	local use_tabs = not vim.go.expandtab
 	local iw = line_mod.indent_width()
 	local status_map = config.git_status and vim.b[bufnr].filebuf_git_status or nil
+	local matches = vim.b[bufnr].filebuf_search_matches
 
 	local lnum = toprow + 1 -- toprow is 0-indexed; entries is 1-indexed
 	local count = 0
@@ -125,6 +127,16 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 					end_col = name_end,
 					hl_group = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile",
 					priority = 5,
+					ephemeral = true,
+				})
+			end
+
+			-- Above Directory (10) so a revealed match stands out.
+			if matches and matches[entry.path] then
+				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
+					end_col = name_end,
+					hl_group = "FilebufSearchMatch",
+					priority = 20,
 					ephemeral = true,
 				})
 			end

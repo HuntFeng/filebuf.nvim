@@ -7,6 +7,7 @@
 -- the functions can be called from arbitrary keymaps or scripts.
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
+local config = require("filebuf.config")
 local buffer = require("filebuf.buffer")
 local scan = require("filebuf.scan")
 local line_mod = require("filebuf.line")
@@ -230,6 +231,7 @@ end
 --- Idempotent — if the entry is already expanded, this is a no-op.
 ---@param buf        number
 ---@param lazy_entry table  the lazy directory entry
+---@return number  how many child entries were loaded (0 when already expanded)
 function M.expand_dir(buf, lazy_entry)
 	-- Idempotency guard: mark expanded BEFORE doing any work so a
 	-- failure mid-way cannot lead to double-expansion.
@@ -239,7 +241,7 @@ function M.expand_dir(buf, lazy_entry)
 		vim.b[buf].filebuf_lazy_expanded = expanded
 	end
 	if not lazy_entry.lazy or expanded[lazy_entry.path] then
-		return -- already expanded
+		return 0 -- already expanded
 	end
 	expanded[lazy_entry.path] = true
 	vim.b[buf].filebuf_lazy_expanded = expanded
@@ -247,10 +249,9 @@ function M.expand_dir(buf, lazy_entry)
 	-- vim.b returns a snapshot — always re-read after writing back.
 	local display = vim.b[buf].filebuf_display_entries
 	local all_entries = vim.b[buf].filebuf_all_entries
-	local by_parent = vim.b[buf].filebuf_by_parent
 
 	-- 1. Scan immediate children.
-	local children = scan.scan_dir_children(lazy_entry.path, by_parent)
+	local children = scan.scan_dir_children(lazy_entry.path, vim.b[buf].filebuf_root)
 
 	-- 2. Set indent (parent indent + 1) and inherit hidden/ignored flags.
 	local parent_indent = lazy_entry.indent
@@ -316,9 +317,17 @@ function M.expand_dir(buf, lazy_entry)
 		display[i].lnum = i
 	end
 
-	-- 8. Clear lazy flag on every reference to this entry.
+	-- 8. Clear lazy flag on every reference to this entry.  vim.b hands out
+	--    detached snapshots, so `display`, `all_entries` and the caller's
+	--    `lazy_entry` are three distinct tables for the same directory — all
+	--    three have to be cleared or callers see a stale `lazy`.
 	lazy_entry.lazy = nil
 	for _, e in ipairs(all_entries) do
+		if e.path == lazy_entry.path then
+			e.lazy = nil
+		end
+	end
+	for _, e in ipairs(display) do
 		if e.path == lazy_entry.path then
 			e.lazy = nil
 		end
@@ -337,16 +346,64 @@ function M.expand_dir(buf, lazy_entry)
 	-- Buffer modified tracking: expanding a lazy dir changes the display
 	-- but not the disk — it is not a user edit.
 	vim.bo[buf].modified = false
+
+	return #children
+end
+
+--- Ask before loading a large subtree.  Returns false when the user declines.
+---
+--- The count is taken up front with a cheap capped walk (no entries built, no
+--- buffer lines) so the dialog can state a real number instead of a vague
+--- warning.  Skipped entirely when expand_confirm_threshold is falsy.
+---@param buf        number
+---@param lazy_entry table
+---@return boolean  true to proceed
+local function confirm_large_expand(buf, lazy_entry)
+	local threshold = config.expand_confirm_threshold
+	if not threshold or threshold <= 0 then
+		return true
+	end
+
+	local cap = config.max_expand_entries + 1
+	local count, capped = scan.count_subtree(lazy_entry.path, vim.b[buf].filebuf_root, cap)
+	if count < threshold then
+		return true
+	end
+
+	local how_many = capped and string.format("more than %d", cap - 1) or tostring(count)
+	local message =
+		string.format("Recursively expanding '%s/' will load %s entries.\nContinue?", lazy_entry.name, how_many)
+	-- Default to No: this is the expensive branch.
+	return vim.fn.confirm(message, "&Yes\n&No", 2, "Question") == 1
 end
 
 --- Recursively expand a lazy directory and all nested lazy dirs within it.
+---
+--- Since every directory is lazy, this can walk an arbitrarily large subtree.
+--- Two guards apply: the user is asked to confirm once the subtree exceeds
+--- config.expand_confirm_threshold entries, and loading stops outright at
+--- config.max_expand_entries rather than hanging the editor.
 ---@param buf        number
 ---@param lazy_entry table
-function M.expand_dir_recursive(buf, lazy_entry)
+---@param budget?    table  internal: { left = number } shared across recursion
+function M.expand_dir_recursive(buf, lazy_entry, budget)
 	if not lazy_entry.lazy then
 		return -- already expanded
 	end
-	M.expand_dir(buf, lazy_entry)
+
+	local toplevel = budget == nil
+	if toplevel and not confirm_large_expand(buf, lazy_entry) then
+		vim.notify("filebuf: expand cancelled", vim.log.levels.INFO)
+		return
+	end
+
+	budget = budget or { left = config.max_expand_entries }
+	if budget.left <= 0 then
+		return
+	end
+
+	budget.left = budget.left - M.expand_dir(buf, lazy_entry)
+
 	-- Collect lazy child paths first (expansion shifts indices).
 	local display = vim.b[buf].filebuf_display_entries
 	local start = lazy_entry.lnum
@@ -365,14 +422,27 @@ function M.expand_dir_recursive(buf, lazy_entry)
 		end
 	end
 	for _, path in ipairs(lazy_paths) do
+		if budget.left <= 0 then
+			break
+		end
 		display = vim.b[buf].filebuf_display_entries
 		expanded = vim.b[buf].filebuf_lazy_expanded or {}
 		for _, e in ipairs(display) do
 			if e.path == path and e.lazy and not expanded[e.path] then
-				M.expand_dir_recursive(buf, e)
+				M.expand_dir_recursive(buf, e, budget)
 				break
 			end
 		end
+	end
+
+	if toplevel and budget.left <= 0 then
+		vim.notify(
+			string.format(
+				"filebuf: stopped after loading %d entries (max_expand_entries); expand deeper folders individually",
+				config.max_expand_entries
+			),
+			vim.log.levels.WARN
+		)
 	end
 end
 
@@ -399,6 +469,91 @@ function M.expand_all_dirs(buf)
 			end
 		end
 	end
+end
+
+----------------------------------------------------------------------
+-- Reveal (load the ancestor chain of a path)
+----------------------------------------------------------------------
+
+--- Locate a display entry by path.  Re-reads vim.b every call because each
+--- expansion replaces the list and shifts every lnum after the splice.
+---@param buf  number
+---@param path string
+---@return table|nil
+local function display_entry_by_path(buf, path)
+	for _, e in ipairs(vim.b[buf].filebuf_display_entries or {}) do
+		if e.path == path then
+			return e
+		end
+	end
+	return nil
+end
+
+--- Load and open every ancestor directory of `target_path` so the target
+--- itself becomes a visible buffer line, and return its display entry.
+---
+--- Only the ancestors are expanded — sibling subdirectories along the way are
+--- listed (they are children of an expanded ancestor) but never expanded
+--- themselves.  Returns nil when the target is outside the root, does not
+--- exist, or is filtered out of the display by show_hidden.
+---@param buf         number
+---@param target_path string  absolute path under the filebuf root
+---@return table|nil
+function M.reveal_path(buf, target_path)
+	local root = vim.b[buf].filebuf_root
+	if not root or not target_path or not vim.startswith(target_path, root .. "/") then
+		return nil
+	end
+
+	local rel = target_path:sub(#root + 2)
+	-- Walk the ancestor prefixes outermost-first, expanding as we go.
+	local prefix = root
+	for component in rel:gmatch("([^/]+)/") do
+		prefix = prefix .. "/" .. component
+		local entry = display_entry_by_path(buf, prefix)
+		if not entry or entry.type ~= "dir" then
+			return nil -- not loaded, filtered out by show_hidden, or not a dir
+		end
+		if entry.lazy and not is_expanded(buf, entry) then
+			M.expand_dir(buf, entry)
+			-- expand_dir replaced the entry list; re-resolve before folding.
+			entry = display_entry_by_path(buf, prefix)
+		end
+		if entry then
+			vim.cmd(string.format("silent! %dfoldopen", entry.lnum))
+		end
+	end
+
+	return display_entry_by_path(buf, target_path)
+end
+
+--- Reveal several paths in one pass.  Paths are sorted so shallow ancestors
+--- are expanded before deeper ones and shared prefixes hit expand_dir's
+--- idempotency guard instead of rescanning.
+---@param buf   number
+---@param paths string[]
+---@return table[]  the display entries that resolved, in reveal order
+function M.reveal_paths(buf, paths)
+	prof.start("reveal_paths")
+	local sorted = vim.deepcopy(paths)
+	table.sort(sorted)
+	local revealed = {}
+	for _, path in ipairs(sorted) do
+		if M.reveal_path(buf, path) then
+			revealed[#revealed + 1] = path
+		end
+	end
+	-- Re-resolve only now: every reveal shifts the lnums of the ones before it,
+	-- so entries captured during the loop would carry stale line numbers.
+	local found = {}
+	for _, path in ipairs(revealed) do
+		local entry = display_entry_by_path(buf, path)
+		if entry then
+			found[#found + 1] = entry
+		end
+	end
+	prof.stop()
+	return found
 end
 
 ----------------------------------------------------------------------

@@ -38,19 +38,24 @@ describe("display", function()
 		assert.equals("mydir/", lines[1])
 	end)
 
-	it("renders nested files with correct indent", function()
+	it("renders nested files with correct indent once the parent is expanded", function()
 		helpers.populate_dir(tmpdir, {
 			["parent"] = {},
 			["parent/child.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
+		-- Directories are lazy: only the root's children are loaded at open.
+		assert.equals("parent/", helpers.get_buffer_lines(buf)[1])
+		assert.is_nil(helpers.get_buffer_lines(buf)[2])
+
+		helpers.expand(buf, tmpdir .. "/parent")
 		local lines = helpers.get_buffer_lines(buf)
 		-- shiftwidth=2: parent at indent 0, child at indent 1 (2 spaces).
 		assert.equals("parent/", lines[1])
 		assert.equals("  child.txt", lines[2])
 	end)
 
-	it("renders deeply nested structures with increasing indent", function()
+	it("renders deeply nested structures with increasing indent when revealed", function()
 		helpers.populate_dir(tmpdir, {
 			["a"] = {},
 			["a/b"] = {},
@@ -58,6 +63,7 @@ describe("display", function()
 			["a/b/c/deep.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
+		assert.is_not_nil(helpers.reveal(buf, tmpdir .. "/a/b/c/deep.txt"))
 		local lines = helpers.get_buffer_lines(buf)
 		assert.equals("a/", lines[1])
 		assert.equals("  b/", lines[2])

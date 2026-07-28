@@ -116,10 +116,14 @@ function M.compute_diff(buf_entries, disk_entries)
 	-- in-place renames would be treated as delete (old path) + create (new
 	-- empty file), losing the original content.
 	--
-	-- Directories are excluded: an in-place dir rename would conflict with
-	-- child renames already detected in Phase 2 (children's paths reference
-	-- the new parent name).  Directories carry no content to lose, so the
-	-- old create+delete approach (after moving children out) works correctly.
+	-- Directories participate only when neither side has children loaded into
+	-- the buffer.  An in-place rename of a dir whose children *are* loaded is
+	-- left to delete+create: Phase 2 already paired each child individually
+	-- (their paths reference the new parent name), so the children move out
+	-- before the old dir is removed and nothing is lost.  But a dir whose
+	-- children were never loaded — the normal case now that every directory is
+	-- lazy — has no such child renames, so delete+create would destroy the
+	-- entire unloaded subtree.  Those must become a real fs_rename.
 	if #buf_unmatched2 > 0 then
 		local disk_by_parent = {}
 		for _, de in ipairs(disk_entries) do
@@ -133,9 +137,22 @@ function M.compute_diff(buf_entries, disk_entries)
 				list[#list + 1] = de
 			end
 		end
+
+		--- Set of dir paths that have at least one descendant in `entries`.
+		local function paths_with_children(entries)
+			local parents = {}
+			for _, e in ipairs(entries) do
+				parents[vim.fn.fnamemodify(e.path, ":h")] = true
+			end
+			return parents
+		end
+		local buf_parents = paths_with_children(buf_entries)
+		local disk_parents = paths_with_children(disk_entries)
+
 		for _, be in ipairs(buf_unmatched2) do
-			-- Directories are excluded from same-parent matching (see above).
-			if be.type == "dir" then
+			local want_dir = be.type == "dir"
+			-- A dir with loaded children is handled by delete+create (see above).
+			if want_dir and buf_parents[be.path] then
 				created[#created + 1] = be
 				goto continue
 			end
@@ -143,10 +160,16 @@ function M.compute_diff(buf_entries, disk_entries)
 			local candidates = disk_by_parent[be_parent]
 			local best
 			if candidates then
-				-- Take the first available non-dir disk entry in the same
-				-- parent (dirs are left for Phase 3 deletion).
+				-- Take the first available disk entry of the matching kind in
+				-- the same parent.  Dirs pair only with childless dirs; files
+				-- and links never pair with a dir.
 				for i, de in ipairs(candidates) do
-					if not renamed_disk[de.path] and de.type ~= "dir" then
+					local de_is_dir = de.type == "dir"
+					if
+						not renamed_disk[de.path]
+						and de_is_dir == want_dir
+						and not (want_dir and disk_parents[de.path])
+					then
 						best = de
 						table.remove(candidates, i)
 						break

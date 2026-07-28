@@ -1,0 +1,598 @@
+----------------------------------------------------------------------
+-- DEAD REFERENCE CODE — not loaded at runtime.
+--
+-- This file preserves the eager tree scanners from before filebuf moved to
+-- lazy-loading every directory.  The old model materialized the *entire*
+-- non-hidden / non-ignored tree at open time so that native `/` could match
+-- any entry in the repo; only hidden/ignored directories were lazy
+-- placeholders.  That cost became prohibitive on repos with ~100k files.
+--
+-- Kept verbatim (module wiring aside) in case any of it is needed again:
+--   * fd_cmd               — cached fd/fdfind executable lookup
+--   * scan_fd              — whole-tree scan via a single fd subprocess
+--   * find_lazy_subdirs    — recovery of entries fd filtered out
+--   * read_dir_recursive   — whole-tree scan via a single find(1) subprocess
+--   * scan_dir_children_cached — the by_parent-cache branch of
+--                            scan.scan_dir_children, used only by the
+--                            find(1) fallback's parent→children map
+--   * extract_find_expressions — .gitignore → find(1) `-path ... -prune`
+--                            translation, formerly ignore.extract_find_expressions
+--
+-- The `.bak` extension keeps it off Lua's package.path, so `require` can
+-- never pick it up.  A ".lua.bak" name also stops LSP/stylua from treating
+-- it as live source.
+----------------------------------------------------------------------
+local prof = require("filebuf.profiler")
+local config = require("filebuf.config")
+local ignore = require("filebuf.ignore")
+
+local M = {}
+
+--- Sort helper — the live version lives in scan.lua; duplicated here so this
+--- file is self-contained if ever revived.
+local ENTRY_PRIO = { dir = 1, link = 2, file = 3, error = 4 }
+local function sort_children(children, sort_method)
+	if #children <= 1 then
+		return
+	end
+	sort_method = sort_method or config.sort_method
+
+	if sort_method == "name" then
+		table.sort(children, function(a, b)
+			return a.name:lower() < b.name:lower()
+		end)
+	elseif sort_method == "modified" then
+		for _, e in ipairs(children) do
+			if not e._stat then
+				e._stat = vim.loop.fs_stat(e.path)
+			end
+		end
+		table.sort(children, function(a, b)
+			local ta = (a._stat and a._stat.mtime and a._stat.mtime.sec) or 0
+			local tb = (b._stat and b._stat.mtime and b._stat.mtime.sec) or 0
+			if ta ~= tb then
+				return ta > tb -- newest first
+			end
+			return a.name:lower() < b.name:lower()
+		end)
+	elseif sort_method == "created" then
+		for _, e in ipairs(children) do
+			if not e._stat then
+				e._stat = vim.loop.fs_stat(e.path)
+			end
+		end
+		table.sort(children, function(a, b)
+			local function btime_sec(entry)
+				local st = entry._stat
+				if not st then
+					return 0
+				end
+				local bt = st.birthtime or st.mtime
+				return bt and bt.sec or 0
+			end
+			local ba = btime_sec(a)
+			local bb = btime_sec(b)
+			if ba ~= bb then
+				return ba > bb -- newest first
+			end
+			return a.name:lower() < b.name:lower()
+		end)
+	else -- "type" (default)
+		table.sort(children, function(a, b)
+			local pa = ENTRY_PRIO[a.type] or 5
+			local pb = ENTRY_PRIO[b.type] or 5
+			if pa ~= pb then
+				return pa < pb
+			end
+			return a.name:lower() < b.name:lower()
+		end)
+	end
+end
+
+----------------------------------------------------------------------
+-- find(1) fallback scanner (whole tree in one subprocess)
+----------------------------------------------------------------------
+
+local FIND_MAXDEPTH = 21 -- legacy default: max_depth 20 + 1
+
+--- Recursively read a directory tree using a single find(1) subprocess,
+--- returning the flat entry list.  Reads .ignore/.gitignore on the way down
+--- to tag hidden entries.  Symlinks are atomic entries (type "link"),
+--- never followed.
+---@param dir string
+---@return table[] entries
+---@return table   by_parent  parent_path → children (for lazy expansion)
+function M.read_dir_recursive(dir)
+	prof.start("read_dir_recursive")
+
+	-- %y = type char (d/f/l), %h = parent dir, %f = basename.  Letting find
+	-- split dirname/basename in C avoids per-entry Lua path decomposition.
+	prof.start("read_dir")
+	-- Build argv with -path ... -prune and -path expressions derived
+	-- -name is an O(1) basename comparison; -prune on the directory itself
+	-- prevents find from ever descending into it, so children are never
+	-- stat'd or printed.  Table-arg systemlist avoids shell escaping.
+	local argv = { "find", dir }
+	vim.list_extend(argv, { "-mindepth", "1", "-maxdepth", tostring(FIND_MAXDEPTH) })
+	-- Expressions from .gitignore/.ignore ordered cheapest→most-expensive.
+	-- find's -path `*` wildcard crosses "/" (fnmatch without FNM_PATHNAME).
+	if config.respect_ignore then
+		local groups = M.extract_find_expressions(dir)
+		for _, group in ipairs(groups) do
+			for _, expr in ipairs(group) do
+				vim.list_extend(argv, expr.tokens)
+				argv[#argv + 1] = "-o"
+			end
+		end
+	end
+	argv[#argv + 1] = "-printf"
+	argv[#argv + 1] = "%y\t%h\t%f\n"
+	local lines = vim.fn.systemlist(argv)
+	prof.stop() -- read_dir
+
+	prof.start("parse_find_output")
+	local by_parent = {} -- parent_path → { entry, ... }
+	local TYPE_MAP = { d = "dir", l = "link", f = "file" }
+	for _, line in ipairs(lines) do
+		local type_char, parent, name = line:match("^(.)\t(.+)\t(.+)$")
+		local type_label = type_char and TYPE_MAP[type_char]
+		if type_label and parent and name then
+			local lst = by_parent[parent]
+			if not lst then
+				lst = {}
+				by_parent[parent] = lst
+			end
+			lst[#lst + 1] = { name = name, type = type_label, path = parent .. "/" .. name }
+		end
+	end
+	prof.stop() -- parse_find_output
+
+	prof.start("sort_children")
+	for _, children in pairs(by_parent) do
+		sort_children(children)
+	end
+	prof.stop() -- sort_children
+
+	-- Mutable stack of active ignore patterns, pushed on entering a directory
+	-- and popped on leaving.  active_negate_count lets matches_ignore early-exit
+	-- when no negation patterns are in scope.
+	local active_patterns = {}
+	local active_negate_count = 0
+
+	--- Read a directory's .ignore/.gitignore (found in by_parent, so no stat
+	--- syscall) and push its patterns; returns how many were pushed.
+	local function push_ignore(parent_path)
+		if not config.respect_ignore then
+			return 0
+		end
+		local pushed = 0
+		for _, child in ipairs(by_parent[parent_path] or {}) do
+			if child.name == ".ignore" or child.name == ".gitignore" then
+				for _, p in ipairs(ignore.parse_ignore_file(child.path)) do
+					active_patterns[#active_patterns + 1] = { raw = p.raw, negate = p.negate, source_dir = parent_path }
+					if p.negate then
+						active_negate_count = active_negate_count + 1
+					end
+					pushed = pushed + 1
+				end
+			end
+		end
+		return pushed
+	end
+
+	local function pop_ignore(n)
+		for _ = 1, n do
+			if active_patterns[#active_patterns].negate then
+				active_negate_count = active_negate_count - 1
+			end
+			active_patterns[#active_patterns] = nil
+		end
+	end
+
+	prof.start("setup_ignore")
+	push_ignore(dir) -- root .ignore before descending
+	prof.stop() -- setup_ignore
+
+	-- DFS: build the flat result, tagging hidden entries via the pattern stack.
+	local result = {}
+	local function emit_children(parent_path, depth, inside_ignored)
+		for _, entry in ipairs(by_parent[parent_path] or {}) do
+			entry.indent = depth
+
+			-- Tag hidden / ignored entries; .ignore itself is never tagged.
+			if entry.name ~= ".ignore" then
+				if inside_ignored then
+					entry.is_ignored = true -- whole subtree inherits, skip matching
+				elseif entry.name:sub(1, 1) == "." then
+					entry.is_hidden = true -- dotfiles are always hidden
+				end
+				if
+					not entry.is_hidden
+					and not entry.is_ignored
+					and config.respect_ignore
+					and #active_patterns > 0
+					and ignore.matches_ignore(
+						entry.path,
+						entry.name,
+						active_patterns,
+						entry.type == "dir",
+						active_negate_count
+					)
+				then
+					entry.is_ignored = true
+				end
+			end
+
+			result[#result + 1] = entry
+
+			if entry.type == "dir" then
+				if entry.is_hidden or entry.is_ignored then
+					-- Hidden/ignored directory: mark lazy, don't recurse.
+					-- Children stay in by_parent for on-demand expansion.
+					entry.lazy = true
+				else
+					local pushed = push_ignore(entry.path)
+					emit_children(entry.path, depth + 1, inside_ignored or entry.is_ignored)
+					pop_ignore(pushed)
+				end
+			end
+		end
+	end
+
+	prof.start("dfs_emit")
+	emit_children(dir, 0, false)
+	prof.stop() -- dfs_emit
+
+	prof.stop()
+	return result, by_parent
+end
+
+----------------------------------------------------------------------
+-- fd fast-path scanner (whole tree in one subprocess)
+----------------------------------------------------------------------
+
+--- Cached fd executable name ("fd" or "fdfind"); false when absent.
+local _fd_cmd
+function M.fd_cmd()
+	if _fd_cmd == nil then
+		if vim.fn.executable("fd") == 1 then
+			_fd_cmd = "fd"
+		elseif vim.fn.executable("fdfind") == 1 then
+			_fd_cmd = "fdfind"
+		else
+			_fd_cmd = false
+		end
+	end
+	return _fd_cmd or nil
+end
+
+--- Scan `dir` with fd.  fd natively skips .git/ contents and respects
+--- .gitignore/.ignore, so giant ignored subtrees are never traversed.
+--- Symlinks appear as atomic entries (type "link"), never followed.
+---@param dir string
+---@return table[]
+function M.scan_fd(dir)
+	prof.start("scan_fd")
+	local show_hidden = config.show_hidden
+
+	-- -H includes dot entries; -I disables .gitignore/.ignore filtering (so
+	-- .venv/, node_modules/ etc. still appear, dimmed, with show_hidden, or
+	-- when the user disabled respect_ignore).
+	local flags = { "--color", "never" }
+	if show_hidden then
+		flags[#flags + 1] = "-H"
+	end
+	if not config.respect_ignore then
+		flags[#flags + 1] = "-I"
+	end
+	local function run(extra)
+		local argv = { M.fd_cmd() }
+		vim.list_extend(argv, flags)
+		vim.list_extend(argv, extra)
+		argv[#argv + 1] = "."
+		argv[#argv + 1] = dir
+		return vim.fn.systemlist(argv)
+	end
+
+	-- Main scan (fd appends "/" to directories).  Symlinks are detected
+	-- with a per-entry lstat — the kernel caches are hot from fd's readdir,
+	-- avoiding the cost of a second subprocess.
+	prof.start("fd_scan")
+	local fd_out = run({})
+	prof.stop()
+
+	prof.start("parse_fd_output")
+	local by_parent = {}
+	local regular_children = {} -- parent_path → { child_name = true }
+	for _, raw in ipairs(fd_out) do
+		if raw ~= "" then
+			local is_dir = raw:sub(-1) == "/"
+			local full = is_dir and raw:sub(1, -2) or raw
+			local etype
+			if is_dir then
+				etype = "dir"
+			else
+				local stat = vim.loop.fs_lstat(full)
+				etype = (stat and stat.type == "link") and "link" or "file"
+			end
+
+			local parent, name = full:match("^(.*)/(.+)$")
+			if not parent then
+				parent, name = dir, full
+			end
+
+			local lst = by_parent[parent]
+			if not lst then
+				lst = {}
+				by_parent[parent] = lst
+			end
+			lst[#lst + 1] = { name = name, type = etype, path = full }
+
+			-- Track what fd returned so we can cross-reference with fs_scandir.
+			if not regular_children[parent] then
+				regular_children[parent] = {}
+			end
+			regular_children[parent][name] = true
+		end
+	end
+	prof.stop()
+
+	prof.start("sort_children")
+	for _, children in pairs(by_parent) do
+		sort_children(children)
+	end
+	prof.stop()
+
+	-- Helper: find entries that fd excluded (dot-prefixed or gitignored).
+	-- Directories become lazy placeholders so users can expand into them.
+	-- Dotfiles are collected so toggling show_hidden works as a pure
+	-- re-filter.  Other gitignored files are skipped — creating entries for
+	-- potentially tens of thousands of them (e.g. **/*.npz) dominates
+	-- dfs_emit and would make scanning a 100k-file repo lag.
+	local function find_lazy_subdirs(parent_path, regular_set)
+		local handle = vim.loop.fs_scandir(parent_path)
+		if not handle then
+			return {}
+		end
+		local lazy = {}
+		while true do
+			local name, ftype = vim.loop.fs_scandir_next(handle)
+			if not name then
+				break
+			end
+			if regular_set[name] then
+				goto continue
+			end
+
+			local is_dotfile = name:sub(1, 1) == "."
+			if ftype == "directory" then
+				lazy[#lazy + 1] = {
+					name = name,
+					type = "dir",
+					path = parent_path .. "/" .. name,
+					is_hidden = is_dotfile or nil,
+					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
+					lazy = true,
+				}
+			else
+				-- Dot-prefixed file/link that fd excluded (when -H is off).
+				-- Collected so toggling show_hidden is a pure re-filter.
+				local etype = ftype == "link" and "link" or "file"
+				lazy[#lazy + 1] = {
+					name = name,
+					type = etype,
+					path = parent_path .. "/" .. name,
+					is_hidden = is_dotfile or nil,
+					is_ignored = (not is_dotfile and config.respect_ignore) or nil,
+				}
+			end
+			-- else: gitignored regular file — skip it.  Collecting these
+			-- is prohibitively expensive with glob ignore patterns that
+			-- match many individual files (e.g. **/*.npz).
+			::continue::
+		end
+		sort_children(lazy)
+		return lazy
+	end
+
+	-- DFS emit — interleaves lazy placeholders with regular children.
+	-- Dot-prefixed directories from the regular output are also marked lazy
+	-- so hidden dirs are never eagerly expanded.
+	local result = {}
+	local function emit(parent, depth)
+		local regular = by_parent[parent] or {}
+		local lazy_dirs = find_lazy_subdirs(parent, regular_children[parent] or {})
+
+		-- Merge and sort: lazy placeholders + regular entries.
+		local all_children = {}
+		for _, e in ipairs(lazy_dirs) do
+			all_children[#all_children + 1] = e
+		end
+		for _, e in ipairs(regular) do
+			-- Dot-prefixed directories from the fd output are also lazy
+			-- (their children were scanned by fd but we skip recursing).
+			if e.type == "dir" and e.name:sub(1, 1) == "." then
+				e.lazy = true
+				e.is_hidden = true
+			elseif show_hidden and e.name:sub(1, 1) == "." then
+				e.is_hidden = true
+			end
+			all_children[#all_children + 1] = e
+		end
+		sort_children(all_children)
+
+		for _, e in ipairs(all_children) do
+			e.indent = depth
+			result[#result + 1] = e
+			if e.type == "dir" and not e.lazy then
+				emit(e.path, depth + 1) -- symlinks are never followed
+			end
+		end
+	end
+	prof.start("dfs_emit")
+	emit(dir, 0)
+	prof.stop()
+
+	prof.stop()
+	return result
+end
+
+----------------------------------------------------------------------
+-- Cached single-level scan (find(1) fallback's by_parent map)
+----------------------------------------------------------------------
+
+--- Emit a directory's children straight out of the by_parent map built by
+--- read_dir_recursive — zero filesystem access.  Formerly the first branch
+--- of scan.scan_dir_children.
+---@param dir string
+---@param by_parent_cache table  parent→children map from read_dir_recursive
+---@return table[]|nil  children, or nil when the dir isn't in the cache
+function M.scan_dir_children_cached(dir, by_parent_cache)
+	if not (by_parent_cache and by_parent_cache[dir]) then
+		return nil
+	end
+	local children = {}
+	for _, e in ipairs(by_parent_cache[dir]) do
+		local entry = {
+			name = e.name,
+			type = e.type,
+			path = dir .. "/" .. e.name,
+		}
+		-- All subdirectories are lazy when expanding on demand: we only
+		-- loaded one level, so their children haven't been scanned yet.
+		if e.type == "dir" then
+			entry.lazy = true
+		end
+		if e.is_hidden then
+			entry.is_hidden = true
+		end
+		if e.is_ignored then
+			entry.is_ignored = true
+		end
+		children[#children + 1] = entry
+	end
+	sort_children(children)
+	return children
+end
+
+----------------------------------------------------------------------
+-- .gitignore → find(1) expression translation
+-- (formerly ignore.extract_find_expressions)
+----------------------------------------------------------------------
+
+--- Convert .gitignore/.ignore patterns into find(1) -path expression
+--- fragments, ordered cheapest→most-expensive for find's short-circuit
+--- (-o) evaluation.
+---
+--- In GNU find, -path's `*` wildcard crosses "/" (fnmatch without
+--- FNM_PATHNAME), so a single expression can match at any depth.
+---
+--- Patterns are classified into four groups in evaluation order:
+---   1. Exact dir prunes   — literal name, dir-only  (fastest)
+---   2. Exact excludes     — literal name, file/dir  (fast)
+---   3. Wildcard dir prunes   — glob, dir-only       (slower)
+---   4. Wildcard excludes     — glob, file/dir       (slowest)
+---
+--- Skipped: negated patterns, patterns with `**`, and unconvertible
+--- character classes.  These remain handled by per-entry Lua matching.
+---
+---@param root_dir string
+---@return table[]  { tokens = string[], dir_only = boolean }[]
+function M.extract_find_expressions(root_dir)
+	local groups = { {}, {}, {}, {} } -- G1..G4
+	local seen = {}
+
+	for _, fname in ipairs({ ".gitignore", ".ignore" }) do
+		local fpath = root_dir .. "/" .. fname
+		local fstat = vim.loop.fs_stat(fpath)
+		if not fstat or fstat.type ~= "file" then
+			goto continue_file
+		end
+		local patterns = ignore.parse_ignore_file(fpath)
+		for _, pat in ipairs(patterns) do
+			if pat.negate then
+				goto continue_pat
+			end
+
+			local raw = pat.raw
+			-- Skip patterns with ** (no clean find equivalent).
+			if raw:find("%*%*", 1, true) then
+				goto continue_pat
+			end
+
+			-- Trailing "/" = directory-only in gitignore.
+			local dir_only = raw:sub(-1) == "/"
+			if dir_only then
+				raw = raw:sub(1, -2)
+			end
+
+			-- Leading "/" = root-anchored in gitignore.
+			local anchored = raw:sub(1, 1) == "/"
+			if anchored then
+				raw = raw:sub(2)
+			end
+
+			-- Build the -path pattern.
+			-- Patterns with a "/" in the body or an anchored leading "/"
+			-- already have path context.  Bare names need a `*/` prefix
+			-- so they match at any depth (find's `*` crosses "/").
+			local path_pat
+			local has_body_slash = raw:find("/", 1, true) ~= nil
+			if anchored then
+				path_pat = "./" .. raw
+			elseif has_body_slash then
+				path_pat = "*/" .. raw
+			else
+				-- Bare name — prepend "*/" so it matches at any depth.
+				path_pat = "*/" .. raw
+			end
+
+			-- Detect glob characters for classification.
+			local has_globs = raw:find("[%*%?%[]") ~= nil
+
+			-- Deduplicate.
+			if seen[path_pat] then
+				goto continue_pat
+			end
+			seen[path_pat] = true
+
+			-- Build find expression tokens.
+			local tokens
+			if dir_only then
+				tokens = { "(", "-path", path_pat, "-printf", "%y\t%h\t%f\n", "-prune", ")" }
+			else
+				tokens = { "(", "-path", path_pat, ")" }
+			end
+
+			-- Classify into group.
+			local gi
+			if dir_only and not has_globs then
+				gi = 1
+			elseif not dir_only and not has_globs then
+				gi = 2
+			elseif dir_only and has_globs then
+				gi = 3
+			else
+				gi = 4
+			end
+
+			groups[gi][#groups[gi] + 1] = { tokens = tokens }
+			::continue_pat::
+		end
+		::continue_file::
+	end
+	return groups
+end
+
+--- Whole-tree scan entry point: fd when available, find otherwise.
+---@param dir string
+---@return table[] entries
+---@return table?  by_parent  present only for the find fallback
+function M.scan_tree(dir)
+	if M.fd_cmd() then
+		return M.scan_fd(dir), nil
+	end
+	return M.read_dir_recursive(dir)
+end
+
+return M
