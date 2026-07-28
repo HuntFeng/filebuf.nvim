@@ -44,20 +44,33 @@ function M.scan(buf)
 	local eager = st.eager
 	local cap = config.eager_max_entries or math.huge
 	local truncated = false
+	local entries, count
 
-	local entries = scan.walk(st.root, function(path, emitted)
-		if st.expanded[path] then
-			return true
+	if eager then
+		-- Fast path: one find(1) process instead of thousands of
+		-- per-directory fs_scandir calls.  Falls back to walk() on
+		-- platforms without GNU find (or perl).
+		entries, count, truncated = scan.walk_find(st.root, cap)
+		if not entries then
+			entries, count = scan.walk(st.root, function(path, emitted)
+				if st.expanded[path] then
+					return true
+				end
+				if emitted >= cap then
+					truncated = true
+					return false
+				end
+				return true
+			end)
 		end
-		if not eager then
+	else
+		entries, count = scan.walk(st.root, function(path, emitted)
+			if st.expanded[path] then
+				return true
+			end
 			return false
-		end
-		if emitted >= cap then
-			truncated = true
-			return false
-		end
-		return true
-	end)
+		end)
+	end
 
 	-- Remember directories that turned out to be empty; otherwise they look
 	-- unexpanded forever, since "expanded" is otherwise read off the index.
