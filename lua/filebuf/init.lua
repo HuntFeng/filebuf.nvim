@@ -74,9 +74,16 @@ end
 
 local SORT_METHODS = sort.METHODS
 
---- Toggle show_hidden and re-render.  Because the buffer IS the data
---- store there is no edit-replay path; a fresh scan replaces the buffer
---- content.  Unsaved edits must be saved or discarded first.
+--- Toggle hidden entries for this buffer.
+---
+--- Normally a re-projection of the rows already cached: no find(1), no
+--- git ls-files, no re-parse.  The exception is the first time hidden
+--- entries are asked for after a pruned scan -- find never walked the
+--- ignored subtrees, so they have to be collected once, after which both
+--- directions are cheap.
+---
+--- Unsaved edits still block the toggle: the buffer is rewritten wholesale
+--- either way.
 ---@param buf number
 local function toggle_hidden(buf)
 	prof.start("toggle_hidden")
@@ -94,11 +101,13 @@ local function toggle_hidden(buf)
 
 	local cursor_entry = state.entry_at_cursor(buf)
 	local cursor_path = cursor_entry and cursor_entry.path
-	config.show_hidden = not config.show_hidden
+	local want = not st.show_hidden
+	state.set_show_hidden(st.root, want)
 
-	-- Folds carry over on their own: render.tree defaults to the tracked
-	-- open set.
-	render.tree(buf)
+	-- Folds carry over on their own: both paths default to the tracked open set.
+	if not render.reproject(buf, { show_hidden = want }) then
+		render.tree(buf, { show_hidden = want, keep_view = true })
+	end
 
 	if cursor_path then
 		local lnum = state.lnum_of(buf, cursor_path)
@@ -107,7 +116,7 @@ local function toggle_hidden(buf)
 		end
 	end
 
-	vim.notify("filebuf: hidden files " .. (config.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
+	vim.notify("filebuf: hidden files " .. (st.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
 	prof.stop()
 end
 
@@ -254,6 +263,20 @@ local function save_buffer(buf)
 	end
 	local dir = st.root
 
+	-- Nothing has been edited since the last render, so the buffer describes
+	-- the tree the snapshot already holds and there is nothing to sync.  Bails
+	-- before the buffer parse and before the baseline find(1), which together
+	-- were the whole cost of a reflexive :w on a large tree.
+	--
+	-- This also removes a hazard: the old path diffed the unchanged buffer
+	-- against a fresh scan, so a file created outside Neovim since the render
+	-- showed up as a deletion the user never asked for.
+	if st.snap_clean and not vim.bo[buf].modified and st.mode ~= "find" then
+		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
+		prof.stop()
+		return
+	end
+
 	local ok, result = pcall(function()
 		local buf_entries = buffer.parse_buffer(buf, dir)
 
@@ -296,7 +319,10 @@ local function save_buffer(buf)
 		end
 
 		search.clear(buf)
-		render.tree(buf, { keep_view = true })
+		-- The applied ops may have created or removed ignored paths, so the
+		-- ignore set has to be re-read here even though renders no longer
+		-- clear it unconditionally.
+		render.tree(buf, { keep_view = true, refresh_ignore = true })
 		vim.notify("filebuf: saved", vim.log.levels.INFO)
 	end)
 
@@ -428,6 +454,29 @@ function M.setup(opts)
 		end,
 	})
 
+	-- Renders no longer clear the gitignore cache, so something has to. Coming
+	-- back to Neovim is the moment the tree is most likely to have changed
+	-- underneath us; debounced so a flurry of focus events costs one refresh.
+	local focus_timer = nil
+	vim.api.nvim_create_autocmd("FocusGained", {
+		group = vim.api.nvim_create_augroup("filebuf_refresh_on_focus", { clear = true }),
+		callback = function()
+			if focus_timer then
+				focus_timer:stop()
+			end
+			focus_timer = vim.defer_fn(function()
+				focus_timer = nil
+				for _, b in ipairs(state.buffers()) do
+					local st = state.get(b)
+					if st and vim.api.nvim_buf_is_valid(b) and not vim.bo[b].modified then
+						require("filebuf.git").clear_ignore_cache(st.root)
+						render.tree(b, { keep_view = true, refresh_ignore = true })
+					end
+				end
+			end, 200)
+		end,
+	})
+
 	local function current_filebuf()
 		local buf = vim.api.nvim_get_current_buf()
 		if state.is_filebuf(buf) then
@@ -458,13 +507,15 @@ function M.setup(opts)
 			config.sort_method = method
 			local st = state.get(buf)
 			if st then
-				local entries = buffer.parse_buffer(buf, st.root)
-				local open_dirs = actions.open_folds[st.root]
-
-				local cmp = sort.comparator(method)
-				if cmp then
-					local sorted = sort.hierarchical(entries, cmp)
-					if #sorted > 0 then
+				-- Re-order the cached rows in place; falls back to parsing the
+				-- buffer when the cache cannot serve it (mid-edit, find mode).
+				if not render.reproject(buf, { sort_method = method }) then
+					local entries = buffer.parse_buffer(buf, st.root)
+					local open_dirs = actions.open_folds[st.root]
+					-- sort.apply is a no-op for methods with no ordering here
+					-- ("modified" / "created"), so nothing is re-rendered then.
+					local sorted = sort.apply(entries, method)
+					if sorted ~= entries and #sorted > 0 then
 						render.entries(buf, sorted, open_dirs)
 					end
 				end
@@ -493,6 +544,18 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("FilebufSearchClear", function()
 		search.clear(vim.api.nvim_get_current_buf())
 	end, { desc = "Clear filebuf search match highlighting" })
+
+	vim.api.nvim_create_user_command("FilebufRefresh", function()
+		local buf = current_filebuf()
+		if not buf then
+			return
+		end
+		local st = state.get(buf)
+		if st then
+			require("filebuf.git").clear_ignore_cache(st.root)
+		end
+		render.tree(buf, { keep_view = true, refresh_ignore = true })
+	end, { desc = "Re-read the tree from disk, discarding the cached rows" })
 end
 
 return M

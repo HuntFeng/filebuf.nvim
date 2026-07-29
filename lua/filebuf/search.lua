@@ -75,11 +75,15 @@ end
 --- Returns nil if the pattern translates to empty or if fd is unavailable.
 ---@param root    string
 ---@param pattern string  a Vim search pattern
+---@param show_hidden? boolean  defaults to config.show_hidden
 ---@return string[]|nil  argv ready for vim.system or vim.fn.systemlist
-function M.build_fd_argv(root, pattern)
+function M.build_fd_argv(root, pattern, show_hidden)
 	local fd = fd_cmd()
 	if not fd then
 		return nil
+	end
+	if show_hidden == nil then
+		show_hidden = config.show_hidden
 	end
 
 	local limit = config.search_max_results
@@ -89,7 +93,7 @@ function M.build_fd_argv(root, pattern)
 	end
 
 	local argv = { fd, "--color", "never", "--max-results", tostring(limit + 1) }
-	if config.show_hidden then
+	if show_hidden then
 		argv[#argv + 1] = "-H"
 	end
 	if not config.respect_ignore then
@@ -113,10 +117,14 @@ end
 --- pointless.
 ---@param root    string
 ---@param pattern string  a Vim search pattern
+---@param show_hidden? boolean  defaults to config.show_hidden
 ---@return string[] paths  absolute paths, at most config.search_max_results
 ---@return boolean  truncated  the cap was hit and results were dropped
-function M.query(root, pattern)
+function M.query(root, pattern, show_hidden)
 	prof.start("search.query")
+	if show_hidden == nil then
+		show_hidden = config.show_hidden
+	end
 	local limit = config.search_max_results
 	local translated, literal, ignore_case = translate_pattern(pattern)
 	if translated == "" then
@@ -125,7 +133,7 @@ function M.query(root, pattern)
 	end
 
 	local out
-	local argv = M.build_fd_argv(root, pattern)
+	local argv = M.build_fd_argv(root, pattern, show_hidden)
 	if argv then
 		out = vim.fn.systemlist(argv)
 	else
@@ -150,7 +158,7 @@ function M.query(root, pattern)
 			-- aren't shown; reveal_path could not surface them anyway.  fd
 			-- already excludes these, but find does not.
 			local skip = false
-			if not config.show_hidden then
+			if not show_hidden then
 				for component in rel:gmatch("[^/]+") do
 					if component:sub(1, 1) == "." then
 						skip = true
@@ -208,7 +216,8 @@ function M.run(buf, pattern)
 
 	M.clear(buf)
 
-	local paths, truncated = M.query(root, pattern)
+	local st = state.get(buf)
+	local paths, truncated = M.query(root, pattern, st and st.show_hidden)
 	if #paths == 0 then
 		if not matched_locally then
 			vim.notify("filebuf: pattern not found: " .. pattern, vim.log.levels.WARN)

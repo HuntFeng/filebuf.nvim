@@ -18,6 +18,7 @@ local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
 local line_mod = require("filebuf.line")
 local sort = require("filebuf.sort")
+local snapshot = require("filebuf.snapshot")
 
 local M = {}
 
@@ -179,7 +180,74 @@ local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, o
 end
 
 ----------------------------------------------------------------------
--- Core: find -> buffer lines
+-- Core: find -> snapshot -> buffer lines
+----------------------------------------------------------------------
+
+--- Scan `root` into `snap` and return the buffer lines for it.
+---
+--- This is the only producer of snapshot rows.  Unlike find_to_lines below,
+--- what it produces outlives the render: `snap` keeps every row found on
+--- disk (not just the visible ones), so a later toggle, re-sort or
+--- post-save refresh is a re-projection instead of another find(1).
+---
+---@param snap  table   from snapshot.new
+---@param root  string  absolute root directory
+---@param opts? table   { maxdepth?: number, show_hidden?: boolean, prune?: boolean }
+---@return string[]|nil lines
+function M.scan_into(snap, root, opts)
+	prof.start("scan.scan_into")
+	opts = opts or {}
+	local maxdepth = opts.maxdepth or config.max_depth or 20
+	local show_hidden = opts.show_hidden
+	if show_hidden == nil then
+		show_hidden = config.show_hidden
+	end
+
+	-- Build gitignore set (1 system call, cached per root).
+	local ignore_set, ignored_dirs
+	if config.respect_ignore then
+		prof.start("scan.scan_into.ignore_set")
+		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
+		prof.stop()
+	end
+
+	-- Pruning keeps a cold open fast, at the cost of the snapshot not holding
+	-- the ignored subtrees -- recorded as snap.pruned so a later "show hidden"
+	-- knows it has to rescan once to fill them in.
+	local prune = opts.prune
+	if prune == nil then
+		prune = not show_hidden
+	end
+	local prune_dirs = prune and ignored_dirs or nil
+
+	prof.start("scan.scan_into.find")
+	root = root:gsub("(.)/+$", "%1")
+	local output = run_find(root, maxdepth, prune_dirs)
+	prof.stop()
+	if not output then
+		prof.stop()
+		return nil
+	end
+
+	prof.start("scan.scan_into.build")
+	snap.root = root
+	snapshot.build(snap, output, maxdepth, ignore_set, prune_dirs ~= nil and #prune_dirs > 0)
+	prof.stop()
+
+	prof.start("scan.scan_into.project")
+	snapshot.project(snap, config.sort_method, show_hidden)
+	prof.stop()
+
+	prof.start("scan.scan_into.lines")
+	local lines = snapshot.lines(snap)
+	prof.stop()
+
+	prof.stop()
+	return lines, ignore_set
+end
+
+----------------------------------------------------------------------
+-- Core: find -> buffer lines (no snapshot)
 ----------------------------------------------------------------------
 
 --- Transform find(1) output directly into buffer lines.

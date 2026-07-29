@@ -16,6 +16,7 @@ local buffer = require("filebuf.buffer")
 local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local git = require("filebuf.git")
+local snapshot = require("filebuf.snapshot")
 
 local M = {}
 
@@ -50,17 +51,104 @@ function M.entries(buf, entries, open_dirs)
 	st.rendering = false
 	vim.bo[buf].modified = false
 
+	-- Find mode writes its own scoped entry list, which does not correspond to
+	-- snap.view, so snapshot-backed lookups must not be used until the next
+	-- full render.
+	st.snap_clean = false
+	st._by_path_dirty = true
+
 	-- Restore fold state (find mode preserves the open set from before).
 	-- restore_folds records the resulting state as it goes.
 	require("filebuf.actions").restore_folds(buf, open_dirs, entries)
 
-	-- Clear and re-trigger async git status.
-	st.git = nil
+	-- Re-trigger async git status; the existing map stays visible meanwhile.
 	if config.git_status then
 		git.get_status_map_async(st.root, buf)
 	end
 
 	prof.stop()
+end
+
+----------------------------------------------------------------------
+-- Re-projection: cached rows → buffer, no disk read
+----------------------------------------------------------------------
+
+--- Rewrite the buffer from the snapshot already in memory.
+---
+--- No find(1), no git ls-files, no re-parse of the buffer -- just a new
+--- projection of the rows the last scan produced.  This is what makes
+--- toggling hidden files and changing sort method cheap.
+---
+--- Returns false when the cache cannot answer, in which case the caller
+--- should fall back to M.tree:
+---   * no snapshot yet (nothing rendered)
+---   * the buffer has unsaved edits (they would be discarded)
+---   * hidden entries are wanted but the scan used find -prune, so the
+---     ignored subtrees were never collected in the first place
+---
+---@param buf   number
+---@param opts? table  { show_hidden?: boolean, sort_method?: string, keep_view?: boolean }
+---@return boolean handled
+function M.reproject(buf, opts)
+	opts = opts or {}
+	local st = state.get(buf)
+	if not st or not st.snap or st.snap.n == 0 then
+		return false
+	end
+	if vim.bo[buf].modified then
+		return false
+	end
+
+	local show_hidden = opts.show_hidden
+	if show_hidden == nil then
+		show_hidden = st.show_hidden
+	end
+	local snap = st.snap
+	if show_hidden and snap.pruned then
+		-- The ignored rows are not in the cache; only a rescan can supply them.
+		return false
+	end
+
+	prof.start("render.reproject")
+	local view = opts.keep_view ~= false and vim.fn.winsaveview() or nil
+	local method = opts.sort_method or config.sort_method
+
+	prof.start("render.reproject.project")
+	snapshot.project(snap, method, show_hidden)
+	prof.stop()
+
+	prof.start("render.reproject.lines")
+	local lines = snapshot.lines(snap)
+	prof.stop()
+
+	st.matches = nil
+	st.show_hidden = show_hidden
+
+	prof.start("render.reproject.nvim_buf_set_lines")
+	st.rendering = true
+	buffer.without_undo(buf, function()
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+	end)
+	buffer.clear_undo(buf)
+	st.rendering = false
+	vim.bo[buf].modified = false
+	prof.stop()
+
+	st._by_path_dirty = true
+	st.snap_clean = true
+	st.dirty_lo, st.dirty_hi = nil, nil
+	st.truncated_dirs = snapshot.truncated_paths(snap)
+
+	prof.start("render.reproject.restore_folds")
+	require("filebuf.actions").restore_folds(buf, opts.open_dirs or require("filebuf.actions").open_folds[st.root])
+	prof.stop()
+
+	if view then
+		vim.fn.winrestview(view)
+	end
+
+	prof.stop()
+	return true
 end
 
 ----------------------------------------------------------------------
@@ -90,18 +178,35 @@ function M.tree(buf, opts)
 	-- Clear search-match highlighting (line numbers mean nothing after re-render).
 	st.matches = nil
 
-	-- 1. Scan: find → buffer lines ----------------------------------
-  prof.start("render.tree.find_to_lines")
-	git.clear_ignore_cache(st.root)
-	local lines, truncated_dirs, ignore_set = scan.find_to_lines(st.root)
+	-- 1. Scan: find → snapshot → buffer lines -----------------------
+	-- The snapshot outlives this render: it is reused as-is for toggles,
+	-- re-sorts and the post-save refresh, and it is what serves foldexpr and
+	-- path resolution while the buffer is unedited.
+	prof.start("render.tree.scan")
+	-- The ignore cache used to be cleared here, which meant a guaranteed
+	-- `git ls-files` process per render.  It is now invalidated on the events
+	-- that can actually change the answer -- a save, a debounced FocusGained,
+	-- or :FilebufRefresh -- see filebuf.setup.
+	if opts.refresh_ignore then
+		git.clear_ignore_cache(st.root)
+	end
+	st.snap = st.snap or snapshot.new(st.root)
+
+	local show_hidden = opts.show_hidden
+	if show_hidden == nil then
+		show_hidden = st.show_hidden
+	end
+	st.show_hidden = show_hidden
+
+	local lines, ignore_set = scan.scan_into(st.snap, st.root, { show_hidden = show_hidden })
 	if not lines then
 		vim.notify("filebuf: find(1) failed — is the directory accessible?", vim.log.levels.ERROR)
 		prof.stop()
 		return
 	end
-	st.truncated_dirs = truncated_dirs or {}
+	st.truncated_dirs = snapshot.truncated_paths(st.snap)
 	st.ignore_set = ignore_set
-  prof.stop()
+	prof.stop()
 
 	-- 2. Write buffer lines -----------------------------------------
   prof.start("render.tree.nvim_buf_set_lines")
@@ -117,6 +222,12 @@ function M.tree(buf, opts)
 	-- Invalidate the path→lnum cache — line numbers shifted.
 	st._by_path_dirty = true
 
+	-- The buffer now matches snap.view line for line, so lookups may be served
+	-- from the snapshot.  The first edit clears this (see state.attach) and
+	-- everything falls back to reading the buffer.
+	st.snap_clean = true
+	st.dirty_lo, st.dirty_hi = nil, nil
+
 	-- 3. Folds ------------------------------------------------------
 	-- 'foldexpr' derives the fold ranges from the lines just written, so
 	-- this only resets which of them are open — and records that as it goes.
@@ -125,7 +236,9 @@ function M.tree(buf, opts)
 	prof.stop()
 
 	-- 4. Git status (async) -----------------------------------------
-	st.git = nil
+	-- The previous map is deliberately left in place while the refresh runs:
+	-- clearing it blanked every status column for the duration of the job,
+	-- which read as a flash on each render.
 	if config.git_status then
 		git.get_status_map_async(st.root, buf)
 	end

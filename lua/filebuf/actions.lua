@@ -98,6 +98,14 @@ end
 --- autocmd registered in filebuf.setup).
 local indent_cfg = nil
 
+--- Fold levels as strings, so the once-per-line expression returns an
+--- interned constant instead of allocating through tostring.  Levels beyond
+--- this fall back to tostring; max_depth defaults to 20.
+local LEVEL_STR = {}
+for i = 0, 32 do
+	LEVEL_STR[i] = tostring(i)
+end
+
 --- How one level of indent is spelled in the buffer.  Mirrors
 --- line.indent_str / line.indent_level, which drive the rendering side.
 ---@return table  { tabs: boolean, width: number }
@@ -148,6 +156,29 @@ end
 ---@return string
 function _G.FilebufFoldExpr()
 	local lnum = vim.v.lnum
+
+	-- Snapshot fast path.  This expression is evaluated once per line, so on a
+	-- 100k-line tree the version below costs 100k nvim_buf_get_lines calls, a
+	-- table allocation each, plus a tostring -- paid again on every re-render,
+	-- since writing the lines is what makes Neovim recompute the folds.  Off
+	-- the snapshot it is two array reads and no allocation.
+	local st = state.get(vim.api.nvim_get_current_buf())
+	if st and st.snap_clean and st.snap then
+		local snap = st.snap
+		local row = snap.view[lnum]
+		if not row then
+			return "0"
+		end
+		local level = snap.indent[row]
+		if snap.kind[row] % 4 == 1 then -- KIND_DIR
+			local next_row = snap.view[lnum + 1]
+			if next_row and snap.indent[next_row] > level then
+				return ">" .. (level + 1)
+			end
+		end
+		return LEVEL_STR[level] or tostring(level)
+	end
+
 	local lines = vim.api.nvim_buf_get_lines(0, lnum - 1, lnum + 1, false)
 	local line = lines[1]
 	if not line then
@@ -167,7 +198,7 @@ function _G.FilebufFoldExpr()
 			return ">" .. (level + 1)
 		end
 	end
-	return tostring(level)
+	return LEVEL_STR[level] or tostring(level)
 end
 
 ----------------------------------------------------------------------
@@ -224,6 +255,43 @@ function M.restore_folds(buf, open_dirs, entries)
 		for _, e in ipairs(entries) do
 			if e.type == "dir" then
 				open_dir(e.lnum, e.path)
+			end
+		end
+		prof.stop()
+		return
+	end
+
+	-- Nothing to open: zM already left every fold closed.  Worth checking,
+	-- because after the first render open_folds[root] is an empty-but-truthy
+	-- table, and without this the walk below runs over the whole tree to
+	-- discover it has no work to do.
+	if type(open_dirs) == "table" and next(open_dirs) == nil then
+		prof.stop()
+		return
+	end
+
+	local st = state.get(buf)
+	if root and st and st.snap_clean and st.snap and type(open_dirs) == "table" then
+		-- Resolve the wanted paths to rows once, then scan the projection for
+		-- those rows.  Building a path for every directory just to test set
+		-- membership costs one string concat per directory on a tree that can
+		-- have tens of thousands of them; this pays only for the few that are
+		-- actually open.
+		local snapshot = require("filebuf.snapshot")
+		local snap = st.snap
+		local open_rows = {}
+		for path in pairs(open_dirs) do
+			local row = snapshot.row_of_path(snap, path)
+			if row then
+				open_rows[row] = path
+			end
+		end
+		local view = snap.view
+		for lnum = 1, #view do
+			local path = open_rows[view[lnum]]
+			if path then
+				vim.cmd(string.format("silent! %dfoldopen", lnum))
+				recorded[path] = true
 			end
 		end
 		prof.stop()

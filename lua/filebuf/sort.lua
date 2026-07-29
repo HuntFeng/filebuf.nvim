@@ -5,6 +5,16 @@
 -- sorting means reordering siblings while keeping every subtree glued to
 -- its parent.  Both the initial render (scan) and :FilebufSortMethod go
 -- through here so the two can never disagree.
+--
+-- The ordering is computed over *indices*, not entries: one pass derives
+-- each entry's parent from the indent stack, a second buckets children by
+-- parent, each sibling bucket is sorted once, and an iterative DFS emits
+-- the result.  Every entry is written to the output exactly once.
+--
+-- The previous shape recursed per parent group and copied each subtree up
+-- through every level on the way out, so an entry at depth d was appended
+-- d times -- O(n*depth) appends plus a wrapper table per entry per level.
+-- At 100k entries and max_depth 20 that dominated the scan.
 ----------------------------------------------------------------------
 local M = {}
 
@@ -36,83 +46,141 @@ function M.comparator(method)
 	return nil
 end
 
---- Recursively sort entries within each parent group.
---- Entries is a flat depth-first list; siblings at the same indent
---- level are sorted while preserving parent-child relationships.
+--- Precompute one comparable string key per entry.
+---
+--- The comparators above call name:lower() inside table.sort, so it runs
+--- O(n log n) times and allocates a string on every comparison.  A key
+--- array makes it exactly one lower() per entry, and reduces the sort
+--- itself to a plain string compare.
+---
+--- For "type" the type priority is a single leading digit, so the keys
+--- order by type first and name second under a plain string compare.
 ---@param entries table[]
----@param cmp     fun(a: table, b: table): boolean
----@return table[]
-function M.hierarchical(entries, cmp)
-	---@param start_idx number
-	---@param end_idx   number
-	---@return table[]
-	local function sort_range(start_idx, end_idx)
-		if start_idx > end_idx then
-			return {}
+---@param method  string
+---@return string[]|nil  nil when the method has no ordering here
+function M.keys(entries, method)
+	local keys = {}
+	if method == "name" then
+		for i = 1, #entries do
+			keys[i] = entries[i].name:lower()
 		end
-
-		local base_indent = entries[start_idx].indent
-		local result = {}
-		local j = start_idx
-
-		-- Collect siblings at base_indent within this range.
-		local siblings = {}
-		while j <= end_idx do
-			if entries[j].indent == base_indent then
-				siblings[#siblings + 1] = { idx = j, entry = entries[j] }
-				j = j + 1
-			elseif entries[j].indent > base_indent then
-				j = j + 1 -- descendant of previous sibling, handled by recursion
-			else
-				break -- indent < base_indent: back to parent scope
-			end
+		return keys
+	elseif method == "type" then
+		for i = 1, #entries do
+			local e = entries[i]
+			keys[i] = (TYPE_PRIO[e.type] or 5) .. e.name:lower()
 		end
-
-		-- Compute each sibling's descendant range.
-		for k = 1, #siblings do
-			local sib = siblings[k]
-			local next_start = (k < #siblings) and siblings[k + 1].idx or j
-			sib.desc_end = next_start - 1
-		end
-
-		-- Sort siblings.
-		if #siblings > 1 then
-			table.sort(siblings, function(a, b)
-				return cmp(a.entry, b.entry)
-			end)
-		end
-
-		-- Output each sibling followed by its recursively sorted descendants.
-		for _, sib in ipairs(siblings) do
-			result[#result + 1] = sib.entry
-			if sib.entry.type == "dir" and sib.idx + 1 <= sib.desc_end then
-				local children = sort_range(sib.idx + 1, sib.desc_end)
-				for _, child in ipairs(children) do
-					result[#result + 1] = child
-				end
-			end
-		end
-
-		return result
+		return keys
 	end
-
-	if #entries == 0 then
-		return {}
-	end
-	return sort_range(1, #entries)
+	return nil
 end
 
---- Sort a flat entry list in place per the configured sort method.
---- No-op when the method has no comparator.
+--- Reorder a flat depth-first entry list, sorting siblings while keeping
+--- each subtree attached to its parent.
+---
+--- `keys` is optional: when given it must be parallel to `entries` and
+--- siblings are ordered by plain key comparison (see M.keys).  Otherwise
+--- `cmp` is called on the entry tables directly.
+---@param entries table[]
+---@param cmp     (fun(a: table, b: table): boolean)|nil  required when keys is nil
+---@param keys    string[]|nil
+---@return table[]
+function M.hierarchical(entries, cmp, keys)
+	local n = #entries
+	if n == 0 then
+		return {}
+	end
+
+	-- 1. Parent of every entry, from the indent stack.  Only directories
+	--    become ancestors, mirroring buffer.parse_buffer: an entry nested
+	--    under a file belongs to the nearest enclosing directory.
+	local parent = {}
+	local stack = {}
+	local top = 0
+	for i = 1, n do
+		local e = entries[i]
+		local indent = e.indent or 0
+		while top > 0 and (entries[stack[top]].indent or 0) >= indent do
+			top = top - 1
+		end
+		parent[i] = top > 0 and stack[top] or 0
+		if e.type == "dir" then
+			top = top + 1
+			stack[top] = i
+		end
+	end
+
+	-- 2. Bucket child indices by parent, preserving the incoming order so
+	--    an absent comparator leaves the on-disk order intact.
+	local children = {}
+	for i = 1, n do
+		local p = parent[i]
+		local list = children[p]
+		if not list then
+			list = { i }
+			children[p] = list
+		else
+			list[#list + 1] = i
+		end
+	end
+
+	-- 3. Sort each sibling bucket once.  Total O(n log k), k = widest dir.
+	local by_index
+	if keys then
+		by_index = function(a, b)
+			return keys[a] < keys[b]
+		end
+	else
+		by_index = function(a, b)
+			return cmp(entries[a], entries[b])
+		end
+	end
+	for _, list in pairs(children) do
+		if #list > 1 then
+			table.sort(list, by_index)
+		end
+	end
+
+	-- 4. Iterative DFS.  Each entry is appended to the result exactly once.
+	local result = {}
+	local out = 0
+	local frame_list = { children[0] }
+	local frame_pos = { 1 }
+	local depth = 1
+	while depth > 0 do
+		local list = frame_list[depth]
+		local pos = frame_pos[depth]
+		if not list or pos > #list then
+			depth = depth - 1
+		else
+			frame_pos[depth] = pos + 1
+			local i = list[pos]
+			out = out + 1
+			result[out] = entries[i]
+			local kids = children[i]
+			if kids then
+				depth = depth + 1
+				frame_list[depth] = kids
+				frame_pos[depth] = 1
+			end
+		end
+	end
+
+	return result
+end
+
+--- Sort a flat entry list per the configured sort method.
+--- No-op when the method has no ordering available.
 ---@param entries table[]
 ---@param method? string  defaults to config.sort_method
 ---@return table[]  possibly a new list
 function M.apply(entries, method)
-	local cmp = M.comparator(method or require("filebuf.config").sort_method)
-	if not cmp then
+	method = method or require("filebuf.config").sort_method
+	local keys = M.keys(entries, method)
+	if not keys then
 		return entries
 	end
-	return M.hierarchical(entries, cmp)
+	return M.hierarchical(entries, nil, keys)
 end
 
 return M

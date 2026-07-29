@@ -18,6 +18,21 @@ local M = {}
 --- bufnr → state.  Module-local on purpose; see the header.
 local states = {}
 
+--- root → show_hidden, for roots the user has toggled.
+---
+--- filebuf reuses one buffer, so state is reinitialised on every open; without
+--- this a re-open would silently revert the toggle.  Persisting it per root
+--- matches how actions.open_folds already remembers fold state, and is keyed
+--- by root rather than global so two projects do not fight over it.
+local hidden_by_root = {}
+
+--- Remember the show-hidden preference for `root`.
+---@param root string
+---@param show boolean
+function M.set_show_hidden(root, show)
+	hidden_by_root[root] = show and true or nil
+end
+
 ----------------------------------------------------------------------
 -- Lifecycle
 ----------------------------------------------------------------------
@@ -41,6 +56,27 @@ function M.init(buf, root)
 		matches = nil, -- path → true (search highlighting)
 		rendering = false, -- suppress on_lines bookkeeping mid-render
 		attached = false,
+
+		--- The row cache for the last full render (filebuf.snapshot).  Kept
+		--- across renders; freed with the state on BufDelete.
+		snap = nil,
+
+		--- "Show hidden entries" for this buffer: the remembered preference for
+		--- this root, else the configured default.  Owned here rather than in
+		--- config, which toggle_hidden used to mutate globally -- that affected
+		--- every other filebuf and leaked into filebuf.search's fd arguments.
+		show_hidden = hidden_by_root[root] or (require("filebuf.config").show_hidden and true or false),
+
+		--- Whether the buffer still matches snap.view line for line.  While
+		--- true, path resolution and fold levels are answered from the
+		--- snapshot; once an edit lands it goes false and every lookup falls
+		--- back to walking the buffer, which is always correct.
+		snap_clean = false,
+
+		--- Range of lines touched since the last render, for the incremental
+		--- re-parse on :w.  nil means "nothing edited".
+		dirty_lo = nil,
+		dirty_hi = nil,
 
 		-- Transient path→lnum cache, built on first use, cleared on edit.
 		_by_path = nil,
@@ -101,7 +137,7 @@ function M.attach(buf)
 	end
 	st.attached = true
 	vim.api.nvim_buf_attach(buf, false, {
-		on_lines = function(_, b)
+		on_lines = function(_, b, _, first, last_old, last_new)
 			local s = states[b]
 			if not s then
 				return true -- detach
@@ -110,6 +146,17 @@ function M.attach(buf)
 				return false
 			end
 			s._by_path_dirty = true
+
+			-- The snapshot no longer describes the buffer, so snapshot-backed
+			-- lookups stop here and the buffer-walking fallback takes over.
+			s.snap_clean = false
+
+			-- Widen the dirty range (1-based, inclusive).  :w re-parses only
+			-- this window instead of the whole buffer.
+			local lo = first + 1
+			local hi = math.max(last_old, last_new)
+			s.dirty_lo = s.dirty_lo and math.min(s.dirty_lo, lo) or lo
+			s.dirty_hi = s.dirty_hi and math.max(s.dirty_hi, hi) or hi
 			return false
 		end,
 		on_detach = function(_, b)
@@ -223,6 +270,21 @@ end
 ---@param root string
 ---@param fn   fun(lnum: number, path: string, type_: string, indent: number)
 function M.walk(buf, root, fn)
+	-- Snapshot fast path: iterate the visible projection, building a path only
+	-- for the rows the callback actually looks at.  The fallback reads and
+	-- re-parses every buffer line.
+	local st = states[buf]
+	if st and st.snap_clean and st.snap and st.snap.root == root then
+		local snapshot = require("filebuf.snapshot")
+		local snap = st.snap
+		local view = snap.view
+		for lnum = 1, #view do
+			local row = view[lnum]
+			fn(lnum, snapshot.path_of(snap, row), snapshot.type(snap, row), snap.indent[row])
+		end
+		return
+	end
+
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
 	local stack = {} -- { indent, path }
 
@@ -318,6 +380,15 @@ function M.resolve_entry(buf, lnum)
 		return nil
 	end
 
+	-- Snapshot fast path: one array index plus an O(depth) parent walk, no
+	-- buffer reads at all.  Only valid while the buffer is unedited.
+	if st.snap_clean and st.snap then
+		local entry = require("filebuf.snapshot").entry(st.snap, lnum)
+		if entry then
+			return entry
+		end
+	end
+
 	local lines = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)
 	local name, type_, indent = read_line(lines[1])
 	if not name then
@@ -403,6 +474,16 @@ end
 ---@param path string
 ---@return number|nil
 function M.lnum_of(buf, path)
+	local st = states[buf]
+
+	-- Snapshot fast path: descend the child index one path segment at a time,
+	-- O(depth * siblings).  The fallback below builds a path→lnum map over the
+	-- whole buffer, which on a large tree is the most expensive lookup in the
+	-- plugin -- and toggle_hidden used to trigger it on every keypress.
+	if st and st.snap_clean and st.snap then
+		return require("filebuf.snapshot").lnum_of_path(st.snap, path)
+	end
+
 	local map = build_path_map(buf)
 	return map[path]
 end
