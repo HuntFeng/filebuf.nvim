@@ -1,19 +1,14 @@
 ----------------------------------------------------------------------
 -- Tree scanner -- streams find(1) output directly into buffer lines.
 --
--- No in-memory tree, no per-entry tables, no grouping, no sorting, no
--- flattening.  The buffer IS the data store.  find's %d (depth) maps
--- directly to indent, %y maps to the "/" or "@" suffix, and %f is the
--- visible text.
+-- No in-memory tree, no grouping, no sorting, no flattening.  The buffer
+-- IS the data store.  find's %d (depth) maps directly to indent, %y maps
+-- to the "/" / "@" suffix, and %f is the visible text.
 --
--- Hidden (dot-prefixed) and gitignored entries are filtered inline via a
--- skip-depth marker: when a hidden/ignored dir is encountered while
--- show_hidden is off, its entire subtree is skipped without materializing
--- any child entries.
---
--- Ignore checking uses a single git-ls-files hash set (O(1) per entry)
--- instead of per-entry Lua pattern matching against accumulated .gitignore
--- rules.  This drops roughly 640ms on a 100k-entry tree.
+-- Hidden and gitignored subtrees are filtered inline via a skip-depth
+-- marker.  Additionally, ignored *directories* (from git ls-files) are
+-- passed to find -prune so their subtrees are never even stat-ed --
+-- a major win for node_modules and similar.
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
@@ -25,9 +20,7 @@ local M = {}
 -- find(1) execution
 ----------------------------------------------------------------------
 
---- Cached check for GNU find (Linux).  GNU find's -printf uses d_type from
---- the dirent to get the entry type without stat(2), so it is much faster
---- than the libuv per-directory approach.
+--- Cached check for GNU find (Linux).
 local _gnu_find_cache = nil
 local function has_gnu_find()
 	if _gnu_find_cache ~= nil then
@@ -38,32 +31,51 @@ local function has_gnu_find()
 	return _gnu_find_cache
 end
 
---- Run find(1) under `root` returning stdout lines in the format:
----   depth\type\tname\n
---- where depth is the integer depth below root (1 = direct child),
---- type is d/f/l, and name is the basename.
---- Returns nil when find is unavailable or produces no output.
----@param root     string  absolute directory, no trailing slash
----@param maxdepth number  max levels below root to descend
----@return string|nil
-local function run_find(root, maxdepth)
+--- Run find(1) under `root`, optionally pruning ignored directories so
+--- their subtrees are never stat-ed.
+---@param root       string  absolute directory, no trailing slash
+---@param maxdepth   number
+---@param prune_dirs table|nil  relative directory paths to prune
+---@return string|nil  stdout in depth\ttype\tname\n format
+local function run_find(root, maxdepth, prune_dirs)
 	if has_gnu_find() then
-		local cmd = {
-			"find",
-			root,
+		local cmd = { "find", root }
+		-- Insert prune expressions:  \( -path X -prune \) -o ...
+		if prune_dirs and #prune_dirs > 0 then
+			for _, dir in ipairs(prune_dirs) do
+				local escaped = dir:gsub("([%*%?%[%]])", "\\%1")
+				cmd[#cmd + 1] = "("
+				cmd[#cmd + 1] = "-path"
+				cmd[#cmd + 1] = root .. "/" .. escaped
+				cmd[#cmd + 1] = "-prune"
+				cmd[#cmd + 1] = ")"
+				cmd[#cmd + 1] = "-o"
+			end
+		end
+		vim.list_extend(cmd, {
 			"-maxdepth",
 			tostring(maxdepth),
 			"-mindepth",
 			"1",
 			"-printf",
 			"%d\t%y\t%f\n",
-		}
+		})
 		local output = vim.fn.system(cmd)
 		if vim.v.shell_error ~= 0 and #output == 0 then
 			return nil
 		end
 		return output
 	elseif vim.fn.executable("perl") == 1 then
+		-- macOS / BSD: inject prune args into the find portion.
+		local prune_args = ""
+		if prune_dirs and #prune_dirs > 0 then
+			local parts = {}
+			for _, dir in ipairs(prune_dirs) do
+				local escaped = dir:gsub("([%*%?%[%]])", "\\%1")
+				parts[#parts + 1] = "-path " .. vim.fn.shellescape(root .. "/" .. escaped) .. " -prune -o"
+			end
+			prune_args = table.concat(parts, " ") .. " "
+		end
 		local esc_root = vim.fn.shellescape(root)
 		local root_len = #root
 		local perl_script = string.format(
@@ -72,8 +84,9 @@ local function run_find(root, maxdepth)
 		)
 		local esc_perl = vim.fn.shellescape(perl_script)
 		local cmd = string.format(
-			"find %s -maxdepth %d -mindepth 1 -print0 2>/dev/null | perl -0ne %s",
+			"find %s %s-maxdepth %d -mindepth 1 -print0 2>/dev/null | perl -0ne %s",
 			esc_root,
+			prune_args,
 			maxdepth,
 			esc_perl
 		)
@@ -87,21 +100,18 @@ local function run_find(root, maxdepth)
 end
 
 ----------------------------------------------------------------------
--- Common transform: find output → visible entries
+-- Common transform: find output -> visible entries
 ----------------------------------------------------------------------
 
---- Stream through find output, applying hidden/ignored filtering, and
---- call `on_entry` for each visible entry.  Both find_to_lines and
---- scan_disk_entries funnel through here so filtering is identical.
----
---- on_entry receives: name, path, type, indent, is_dir, is_hidden, is_ignored
+--- Stream through find output, applying hidden/ignored filtering, calling
+--- `on_entry` for each visible entry.
 ---@param output      string  raw find stdout
 ---@param root        string  absolute root
 ---@param maxdepth    number  depth cap
 ---@param show_hidden boolean
----@param ignore_set  table|nil  gitignored paths → true
----@param on_entry    fun(name: string, path: string, ftype: string, indent: number, is_dir: boolean)
----@return table  truncated_dirs  dir paths at maxdepth → true
+---@param ignore_set  table|nil  gitignored paths -> true
+---@param on_entry    fun(name, path, ftype, indent, is_dir)
+---@return table  truncated_dirs  dir paths at maxdepth -> true
 local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, on_entry)
 	local truncated_dirs = {}
 	local stack = {} -- { depth, path }
@@ -128,8 +138,7 @@ local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, o
 		local parent_path = #stack > 0 and stack[#stack].path or root
 		local path = parent_path == "/" and ("/" .. name) or (parent_path .. "/" .. name)
 
-		-- Always push dirs for child path computation (even hidden ones — the
-		-- stack is the authority on ancestry regardless of visibility).
+		-- Always push dirs for child path computation (even hidden ones).
 		if is_dir then
 			stack[#stack + 1] = { depth = depth, path = path }
 		end
@@ -165,15 +174,15 @@ local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, o
 end
 
 ----------------------------------------------------------------------
--- Core: find → buffer lines
+-- Core: find -> buffer lines
 ----------------------------------------------------------------------
 
 --- Transform find(1) output directly into buffer lines.
----@param root string   absolute root directory, no trailing slash
+---@param root string   absolute root directory
 ---@param opts? table   { maxdepth?: number }
----@return string[]|nil lines           buffer-ready lines
----@return table|nil    truncated_dirs  dir paths at maxdepth → true
----@return table|nil    ignore_set      gitignored paths → true (or nil)
+---@return string[]|nil lines
+---@return table|nil    truncated_dirs
+---@return table|nil    ignore_set
 function M.find_to_lines(root, opts)
 	prof.start("scan.find_to_lines")
 	opts = opts or {}
@@ -181,17 +190,22 @@ function M.find_to_lines(root, opts)
 	local show_hidden = config.show_hidden
 
 	-- Build gitignore set (1 system call, cached per root).
-	local ignore_set
+	local ignore_set, ignored_dirs
 	if config.respect_ignore then
 		prof.start("scan.find_to_lines.ignore_set")
-		ignore_set = require("filebuf.git").build_ignore_set(root)
+		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
 		prof.stop()
 	end
+
+	-- Only prune at the find level when entries would be filtered out
+	-- anyway.  When show_hidden is on, ignored dirs must still appear
+	-- (dimmed), so we let find list them and filter in Lua.
+	local prune_dirs = (not show_hidden) and ignored_dirs or nil
 
 	-- 1. Run find ----------------------------------------------------
 	prof.start("scan.find_to_lines.find")
 	root = root:gsub("(.)/+$", "%1")
-	local output = run_find(root, maxdepth)
+	local output = run_find(root, maxdepth, prune_dirs)
 	prof.stop()
 	if not output then
 		prof.stop()
@@ -207,7 +221,7 @@ function M.find_to_lines(root, opts)
 		maxdepth,
 		show_hidden,
 		ignore_set,
-		function(name, path, ftype, indent, _)
+		function(name, _, ftype, indent)
 			local suffix = ftype == "d" and "/" or (ftype == "l" and "@" or "")
 			local escaped = name
 			if name:find("[\n\r\t]") then
@@ -227,9 +241,8 @@ end
 ----------------------------------------------------------------------
 
 --- Scan the tree under `root` with the SAME visibility filtering as the
---- current buffer render.  Used as the disk baseline for :w diffing so that
---- hidden/ignored entries the user cannot see are never mistaken for
---- deletions.
+--- current buffer render, so hidden/ignored entries are never mistaken
+--- for deletions.
 ---@param root string   absolute root directory
 ---@param opts? table   { maxdepth?: number }
 ---@return table[]|nil entries  { name, path, type, indent }
@@ -240,13 +253,14 @@ function M.scan_disk_entries(root, opts)
 	local maxdepth = opts.maxdepth or config.max_depth or 20
 	local show_hidden = config.show_hidden
 
-	local ignore_set
+	local ignore_set, ignored_dirs
 	if config.respect_ignore then
-		ignore_set = require("filebuf.git").build_ignore_set(root)
+		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
 	end
+	local prune_dirs = (not show_hidden) and ignored_dirs or nil
 
 	root = root:gsub("(.)/+$", "%1")
-	local output = run_find(root, maxdepth)
+	local output = run_find(root, maxdepth, prune_dirs)
 	if not output then
 		prof.stop()
 		return nil, false
@@ -254,7 +268,7 @@ function M.scan_disk_entries(root, opts)
 
 	local entries = {}
 	local n = 0
-	stream_entries(output, root, maxdepth, show_hidden, ignore_set, function(name, path, ftype, indent, _)
+	stream_entries(output, root, maxdepth, show_hidden, ignore_set, function(name, path, ftype, indent)
 		n = n + 1
 		entries[n] = {
 			name = name,
@@ -272,10 +286,9 @@ end
 -- Single-directory scan (for lazy expand)
 ----------------------------------------------------------------------
 
---- Scan the immediate children of a single directory.  No ignore matching,
---- no sorting — the caller handles filtering and ordering.
----@param dir   string  directory to read
----@param root? string  ignored (kept for API compatibility)
+--- Scan the immediate children of a single directory.
+---@param dir   string
+---@param root? string  kept for API compatibility
 ---@return table[]  { name, path, type, lazy? }
 function M.scan_dir_children(dir, root)
 	local handle = vim.loop.fs_scandir(dir)
@@ -313,10 +326,9 @@ function M.scan_tree(dir)
 	return entries
 end
 
---- Count the entries a recursive expand of `dir` would yield, stopping at
---- `cap`.  Used for the "large expand" confirmation dialog.
+--- Count the entries a recursive expand of `dir` would yield.
 ---@param dir   string
----@param root? string  unused (kept for API compatibility)
+---@param root? string  unused
 ---@param cap?  number
 ---@return number  count
 ---@return boolean capped
