@@ -97,6 +97,7 @@ function M.tree(buf, opts)
 	st.matches = nil
 
 	-- 1. Scan: find → buffer lines ----------------------------------
+  prof.start("render.tree.find_to_lines")
 	git.clear_ignore_cache(st.root)
 	local lines, truncated_dirs, ignore_set = scan.find_to_lines(st.root)
 	if not lines then
@@ -106,8 +107,10 @@ function M.tree(buf, opts)
 	end
 	st.truncated_dirs = truncated_dirs or {}
 	st.ignore_set = ignore_set
+  prof.stop()
 
 	-- 2. Write buffer lines -----------------------------------------
+  prof.start("render.tree.nvim_buf_set_lines")
 	st.rendering = true
 	buffer.without_undo(buf, function()
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -115,17 +118,22 @@ function M.tree(buf, opts)
 	buffer.clear_undo(buf)
 	st.rendering = false
 	vim.bo[buf].modified = false
+  prof.stop()
 
 	-- Invalidate the path→lnum cache — line numbers shifted.
 	st._by_path_dirty = true
 
 	-- 3. Folds ------------------------------------------------------
+  prof.start("render.tree.create_folds")
 	local actions = require("filebuf.actions")
 	actions.create_folds_from_buffer(buf)
+  prof.stop()
 	if open_dirs then
 		actions.open_folds(buf, open_dirs)
 	end
+  prof.start("render.tree.save_fold_state")
 	actions.save_fold_state(buf, st.root)
+  prof.stop()
 
 	-- 4. Git status (async) -----------------------------------------
 	st.git = nil
