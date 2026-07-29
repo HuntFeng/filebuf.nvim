@@ -10,7 +10,14 @@
 -- every fold range from a line's indentation and its trailing "/", so
 -- Neovim maintains them itself and recomputes only what a buffer change
 -- touched.  What is left is open/closed state, which the plugin persists
--- per root in M.closed.
+-- per root in M.open_folds.
+--
+-- That state is authoritative, not derived: it is updated as folds are
+-- opened and closed, never recovered by scanning the buffer and asking
+-- foldclosed() about every directory.  Reading it back cost a full-buffer
+-- walk plus a vim.fn call per directory on every render *and* every fold
+-- keystroke, which on a large tree was the single most expensive thing the
+-- plugin did.
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
@@ -22,10 +29,37 @@ local git = require("filebuf.git")
 
 local M = {}
 
---- Persisted fold-closed state, keyed by root directory.  Each value is a
---- set of paths whose folds were closed; survives buffer close/reopen so
---- the user's fold preferences stick.
-M.closed = {}
+--- Persisted fold state, keyed by root directory.  Each value is the set of
+--- directory paths whose fold is open; survives buffer close/reopen so the
+--- user's fold preferences stick.
+---
+--- Open rather than closed, because "all closed" is the baseline a render
+--- starts from (`zM`): an empty set is the default, so nothing ever has to
+--- enumerate every directory in the tree just to say "untouched".
+M.open_folds = {}
+
+--- The open-fold set for `root`, created on first use.
+---@param root string
+---@return table  path → true
+function M.open_set(root)
+	local set = M.open_folds[root]
+	if not set then
+		set = {}
+		M.open_folds[root] = set
+	end
+	return set
+end
+
+--- Record that `path`'s fold is now open (or, with `open` false, closed).
+---@param root string|nil
+---@param path string|nil
+---@param open boolean
+function M.mark_open(root, path, open)
+	if not root or not path then
+		return
+	end
+	M.open_set(root)[path] = open or nil
+end
 
 --- Required lazily: render needs actions for fold rebuilding, and
 --- actions needs render for expand/reveal re-renders.
@@ -151,6 +185,10 @@ end
 --- Directories are visited in buffer order, so a parent is opened before
 --- its children (`:foldopen` acts on the outermost closed fold at a line).
 ---
+--- The pass also *records* the resulting open set in M.open_folds, which is
+--- why nothing has to read fold state back afterwards: `zM` put every fold
+--- in a known state, and this function is what changes it.
+---
 --- `entries` skips the buffer scan when the caller already holds the
 --- rendered entries in memory (find mode).
 ---@param buf       number
@@ -160,6 +198,13 @@ function M.restore_folds(buf, open_dirs, entries)
 	prof.start("restore_folds")
 	vim.cmd("silent! normal! zM")
 
+	local root = state.root(buf)
+	-- Post-zM every fold is closed; anything opened below is added back.
+	local recorded = {}
+	if root then
+		M.open_folds[root] = recorded
+	end
+
 	if not open_dirs then
 		prof.stop()
 		return
@@ -168,91 +213,67 @@ function M.restore_folds(buf, open_dirs, entries)
 		return open_dirs[path]
 	end
 
+	local function open_dir(lnum, path)
+		if is_open(path) then
+			vim.cmd(string.format("silent! %dfoldopen", lnum))
+			recorded[path] = true
+		end
+	end
+
 	if entries then
 		for _, e in ipairs(entries) do
-			if e.type == "dir" and is_open(e.path) then
-				vim.cmd(string.format("silent! %dfoldopen", e.lnum))
+			if e.type == "dir" then
+				open_dir(e.lnum, e.path)
 			end
 		end
 		prof.stop()
 		return
 	end
 
-	local st = state.get(buf)
-	if not st then
-		prof.stop()
-		return
-	end
-
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local stack = {}
-
-	for lnum, line in ipairs(lines) do
-		local name, type_, indent = read_line(line)
-		if name then
-			while #stack > 0 and stack[#stack].indent >= indent do
-				table.remove(stack)
-			end
-			local parent = #stack > 0 and stack[#stack].path or st.root
-			local path = parent .. "/" .. name
+	if root then
+		state.walk(buf, root, function(lnum, path, type_)
 			if type_ == "dir" then
-				stack[#stack + 1] = { indent = indent, path = path }
-				if is_open(path) then
-					vim.cmd(string.format("silent! %dfoldopen", lnum))
-				end
+				open_dir(lnum, path)
 			end
-		end
+		end)
 	end
 	prof.stop()
 end
 
-----------------------------------------------------------------------
--- Fold state persistence
-----------------------------------------------------------------------
-
---- Persist the closed-fold set for `root` from the current buffer.
---- When `entries` is provided (find mode) they are used for path
---- resolution; otherwise paths are built by scanning the buffer.
----@param buf     number
----@param root    string
----@param entries table[]|nil  pre-rendered entries (each carrying lnum)
-function M.save_fold_state(buf, root, entries)
+--- Record every directory in the subtree at `entry` as open — the bookkeeping
+--- half of `zO`.  With `entry` nil the whole buffer is marked (`zR`).
+---
+--- Neovim opens the nested folds itself but says nothing about which, so
+--- this is the one place a walk is unavoidable.  It is still cheap next to
+--- what zO/zR do first: load the subtree off disk.
+---@param buf    number
+---@param entry? table
+local function mark_subtree_open(buf, entry)
+	local root = state.root(buf)
 	if not root then
 		return
 	end
-	local closed = {}
-	M.closed[root] = closed
+	local set = M.open_set(root)
 
-	if entries then
-		for _, e in ipairs(entries) do
-			if e.type == "dir" and vim.fn.foldclosed(e.lnum) ~= -1 then
-				closed[e.path] = true
-			end
-		end
-		return
-	end
-
-	-- No entry list: scan buffer text and build paths.
-	local st = state.get(buf)
-	if not st then
-		return
-	end
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local stack = {}
-
-	for lnum, line in ipairs(lines) do
-		local name, type_, indent = read_line(line)
-		if name then
-			while #stack > 0 and stack[#stack].indent >= indent do
-				table.remove(stack)
-			end
-			local parent = #stack > 0 and stack[#stack].path or root
-			local path = parent .. "/" .. name
+	if not entry then
+		state.walk(buf, root, function(_, path, type_)
 			if type_ == "dir" then
-				stack[#stack + 1] = { indent = indent, path = path }
-				if vim.fn.foldclosed(lnum) ~= -1 then
-					closed[path] = true
-				end
+				set[path] = true
+			end
+		end)
+		return
+	end
+
+	set[entry.path] = true
+	local resolve = state.range_resolver(buf)
+	for lnum = entry.lnum + 1, vim.api.nvim_buf_line_count(buf) do
+		local e = resolve(lnum)
+		if e then
+			if e.indent <= entry.indent then
+				break -- left the subtree
+			end
+			if e.type == "dir" then
+				set[e.path] = true
 			end
 		end
 	end
@@ -396,7 +417,7 @@ function M.expand_dir(buf, entry)
 	-- that changed — every fold elsewhere in the buffer keeps its state.
 	-- All that is left is opening the directory we just expanded.
 	vim.cmd(string.format("silent! %dfoldopen", entry.lnum))
-	M.save_fold_state(buf, st.root)
+	M.mark_open(st.root, entry.path, true)
 
 	return #child_lines
 end
@@ -414,7 +435,7 @@ function M.expand_dir_recursive(buf, entry)
 		-- Already loaded — just open the folds below it.
 		vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 		vim.cmd("normal! zO")
-		M.save_fold_state(buf, st.root)
+		mark_subtree_open(buf, entry)
 		return
 	end
 
@@ -473,7 +494,7 @@ function M.expand_dir_recursive(buf, entry)
 	-- Folds follow the buffer text; open the whole subtree just loaded.
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	vim.cmd("silent! normal! zO")
-	M.save_fold_state(buf, st.root)
+	mark_subtree_open(buf, entry)
 
 	if total_inserted >= max_entries then
 		vim.notify(
@@ -496,25 +517,11 @@ function M.expand_all_dirs(buf)
 
 	-- Collect truncated dir entries by scanning the buffer.
 	local to_expand = {}
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local stack = {}
-
-	for lnum, line in ipairs(lines) do
-		local name, type_, indent = read_line(line)
-		if name then
-			while #stack > 0 and stack[#stack].indent >= indent do
-				table.remove(stack)
-			end
-			local parent = #stack > 0 and stack[#stack].path or st.root
-			local path = parent .. "/" .. name
-			if type_ == "dir" then
-				stack[#stack + 1] = { indent = indent, path = path }
-				if st.truncated_dirs[path] then
-					to_expand[#to_expand + 1] = state.resolve_entry(buf, lnum)
-				end
-			end
+	state.walk(buf, st.root, function(lnum, path, type_, indent)
+		if type_ == "dir" and st.truncated_dirs[path] then
+			to_expand[#to_expand + 1] = { lnum = lnum, path = path, type = type_, indent = indent, lazy = true }
 		end
-	end
+	end)
 
 	for _, e in ipairs(to_expand) do
 		M.expand_dir(buf, e)
@@ -548,11 +555,13 @@ end
 local function open_ancestor_folds(buf, st, path)
 	local rel = path:sub(#st.root + 2)
 	local prefix = st.root
+	local open = M.open_set(st.root)
 	for component in rel:gmatch("([^/]+)/") do
 		prefix = prefix .. "/" .. component
 		local lnum = state.lnum_of(buf, prefix)
 		if lnum then
 			vim.cmd(string.format("silent! %dfoldopen", lnum))
+			open[prefix] = true
 		end
 	end
 end
@@ -581,7 +590,7 @@ function M.reveal_paths(buf, paths)
 
 	-- When ancestors were expanded we need to re-render.
 	if changed then
-		render().tree(buf, { keep_view = true, open_dirs = state.open_dirs(buf) })
+		render().tree(buf, { keep_view = true })
 	end
 
 	-- Find each target and open ancestor folds.
@@ -595,7 +604,6 @@ function M.reveal_paths(buf, paths)
 			end
 		end
 	end
-	M.save_fold_state(buf, st.root)
 
 	prof.stop()
 	return found
@@ -617,6 +625,32 @@ end
 -- Fold actions
 ----------------------------------------------------------------------
 
+--- Record what a fold command issued at `entry` actually did.
+---
+--- `zo`/`zc` act on the fold at the cursor, which is not always the
+--- directory's own: closing a directory that has no fold of its own (no
+--- children on screen) closes its parent instead.  One foldclosed() call
+--- says which fold moved, and resolving that line names it.
+---@param buf   number
+---@param entry table
+local function sync_fold_at(buf, entry)
+	local root = state.root(buf)
+	if not root then
+		return
+	end
+
+	local start = vim.fn.foldclosed(entry.lnum)
+	if start == -1 then
+		M.mark_open(root, entry.path, true)
+	elseif start == entry.lnum then
+		M.mark_open(root, entry.path, false)
+	else
+		-- An enclosing fold closed instead; name it and record that.
+		local closed = state.resolve_entry(buf, start)
+		M.mark_open(root, closed and closed.path, false)
+	end
+end
+
 --- Open a fold at `entry`.  If the entry is a truncated unexpanded
 --- directory, expand it first (which also opens the fold).
 ---@param buf   number
@@ -634,7 +668,7 @@ function M.fold_open(buf, entry)
 
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	vim.cmd("normal! zo")
-	M.save_fold_state(buf, state.root(buf))
+	sync_fold_at(buf, entry)
 end
 
 --- Close a fold at `entry` and persist fold state.
@@ -648,7 +682,7 @@ function M.fold_close(buf, entry)
 
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	vim.cmd("normal! zc")
-	M.save_fold_state(buf, state.root(buf))
+	sync_fold_at(buf, entry)
 end
 
 --- Toggle a fold at `entry`.  Expands truncated dirs before toggling.
@@ -668,7 +702,7 @@ function M.fold_toggle(buf, entry)
 	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
 	local is_closed = vim.fn.foldclosedend(entry.lnum) ~= -1
 	vim.cmd(is_closed and "normal! zo" or "normal! zc")
-	M.save_fold_state(buf, state.root(buf))
+	sync_fold_at(buf, entry)
 end
 
 --- Recursively open folds at `entry` (zO).  Expands truncated dirs
@@ -688,14 +722,17 @@ end
 function M.fold_open_all(buf)
 	M.expand_all_dirs(buf)
 	vim.cmd("normal! zR")
-	M.save_fold_state(buf, state.root(buf))
+	mark_subtree_open(buf, nil)
 end
 
 --- Close all folds (zM) and persist state.
 ---@param buf number
 function M.fold_close_all(buf)
 	vim.cmd("normal! zM")
-	M.save_fold_state(buf, state.root(buf))
+	local root = state.root(buf)
+	if root then
+		M.open_folds[root] = {}
+	end
 end
 
 ----------------------------------------------------------------------

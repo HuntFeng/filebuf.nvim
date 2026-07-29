@@ -196,7 +196,7 @@ function M.enter(buf)
 	local saved_state = {
 		entries = state.entries(buf),
 		modified = vim.bo[buf].modified,
-		fold_state = vim.deepcopy(actions.closed[root] or {}),
+		open_folds = vim.deepcopy(actions.open_folds[root] or {}),
 	}
 
 	sessions[buf] = {
@@ -286,13 +286,7 @@ function M.exit(buf)
 	if st then
 		local saved = session.saved_state
 		if saved and saved.entries and #saved.entries > 0 then
-			local open_dirs = {}
-			for _, e in ipairs(saved.entries) do
-				if e.type == "dir" and not saved.fold_state[e.path] then
-					open_dirs[e.path] = true
-				end
-			end
-			render.entries(buf, saved.entries, open_dirs)
+			render.entries(buf, saved.entries, saved.open_folds)
 			-- Unsaved edits made before entering find mode are still unsaved.
 			vim.bo[buf].modified = saved.modified
 		end

@@ -142,6 +142,57 @@ local function read_line(line)
 	return name, (is_dir and "dir" or (is_link and "link" or "file")), line_mod.indent_level(line)
 end
 
+--- How many lines one nvim_buf_get_lines call grabs when scanning.  The API
+--- call dominates the cost of reading a line, so anything that reads more
+--- than a handful of lines reads them in blocks.
+local CHUNK = 128
+
+--- Ancestor chain of the line at `lnum`, outermost first.
+---
+--- The parent of a line is the nearest preceding line one indent level
+--- shallower, its grandparent the nearest preceding line two levels
+--- shallower, and so on — so a single upward pass, picking up each
+--- decreasing level in turn, reconstructs the whole chain.  Lines are read
+--- in blocks: a call-per-line walk costs more than everything else in path
+--- resolution put together.
+---@param buf    number
+---@param root   string
+---@param lnum   number  1-based line whose ancestors are wanted
+---@param indent number  indent level of that line
+---@return table[]  { { indent, path }, ... } outermost first
+local function ancestor_stack(buf, root, lnum, indent)
+	local stack = {}
+	local want = indent - 1
+	if want < 0 then
+		return stack
+	end
+
+	local segs = {} -- { name, indent }, deepest first
+	local i = lnum - 1
+	while want >= 0 and i >= 1 do
+		local from = math.max(1, i - CHUNK + 1)
+		local chunk = vim.api.nvim_buf_get_lines(buf, from - 1, i, false)
+		for k = #chunk, 1, -1 do
+			local name, _, ind = read_line(chunk[k])
+			if name and ind == want then
+				segs[#segs + 1] = { name = name, indent = ind }
+				want = want - 1
+				if want < 0 then
+					break
+				end
+			end
+		end
+		i = from - 1
+	end
+
+	local path = root
+	for j = #segs, 1, -1 do
+		path = path .. "/" .. segs[j].name
+		stack[#stack + 1] = { indent = segs[j].indent, path = path }
+	end
+	return stack
+end
+
 --- Resolve the filesystem path of `lnum` by walking up to find ancestor
 --- directories and reconstructing the chain.  O(depth) — typically under
 --- 20 lines per lookup.
@@ -160,26 +211,100 @@ local function resolve_path(buf, lnum)
 		return nil
 	end
 
-	-- Walk up collecting ancestor names at each decreasing indent level.
-	local segs = {}
-	local want = indent - 1
-	local i = lnum - 1
-	while want >= 0 and i >= 1 do
-		local prev_line = (vim.api.nvim_buf_get_lines(buf, i - 1, i, false))[1]
-		local prev_name, _, prev_indent = read_line(prev_line)
-		if prev_name and prev_indent == want then
-			segs[#segs + 1] = prev_name
-			want = want - 1
+	local stack = ancestor_stack(buf, st.root, lnum, indent)
+	local parent = #stack > 0 and stack[#stack].path or st.root
+	return parent .. "/" .. name
+end
+
+--- Walk the whole buffer once, calling `fn(lnum, path, type_, indent)` for
+--- every parseable line.  The single place that turns buffer text into
+--- paths in bulk — path maps, fold state and expansion all share it.
+---@param buf  number
+---@param root string
+---@param fn   fun(lnum: number, path: string, type_: string, indent: number)
+function M.walk(buf, root, fn)
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+	local stack = {} -- { indent, path }
+
+	for lnum, line in ipairs(lines) do
+		local name, type_, indent = read_line(line)
+		if name then
+			while #stack > 0 and stack[#stack].indent >= indent do
+				table.remove(stack)
+			end
+			local parent = #stack > 0 and stack[#stack].path or root
+			local path = parent .. "/" .. name
+			if type_ == "dir" then
+				stack[#stack + 1] = { indent = indent, path = path }
+			end
+			fn(lnum, path, type_, indent)
 		end
-		i = i - 1
+	end
+end
+
+--- A resolver for entries at increasing line numbers — the shape every
+--- viewport walk has.
+---
+--- The ancestor chain is reconstructed once, for the first line asked
+--- about; from there it is maintained by pushing and popping as the
+--- resolver moves down, so every further line costs a block-cached line
+--- read and a couple of table operations instead of its own upward walk.
+---
+--- Lines may be skipped (closed folds), as long as the caller never moves
+--- backwards: anything skipped is a descendant of the line before it, so
+--- the indent-based pop still lands on the right parent.
+---@param buf number
+---@return fun(lnum: number): table|nil  same shape as M.resolve_entry
+function M.range_resolver(buf)
+	local st = states[buf]
+	if not st then
+		return function()
+			return nil
+		end
 	end
 
-	local path = st.root
-	for j = #segs, 1, -1 do
-		path = path .. "/" .. segs[j]
+	-- Block-cached line reader.
+	local block_from, block = 0, nil
+	local function read_at(lnum)
+		if not block or lnum < block_from or lnum >= block_from + #block then
+			block_from = lnum
+			block = vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum - 1 + CHUNK, false)
+		end
+		return block[lnum - block_from + 1]
 	end
-	path = path .. "/" .. name
-	return path
+
+	local stack, seeded = {}, false
+
+	return function(lnum)
+		local name, type_, indent = read_line(read_at(lnum))
+		if not name then
+			return nil
+		end
+
+		if not seeded then
+			seeded = true
+			stack = ancestor_stack(buf, st.root, lnum, indent)
+		end
+
+		while #stack > 0 and stack[#stack].indent >= indent do
+			table.remove(stack)
+		end
+		local parent = #stack > 0 and stack[#stack].path or st.root
+		local path = parent .. "/" .. name
+		if type_ == "dir" then
+			stack[#stack + 1] = { indent = indent, path = path }
+		end
+
+		return {
+			lnum = lnum,
+			path = path,
+			name = name,
+			type = type_,
+			indent = indent,
+			is_hidden = (name:sub(1, 1) == ".") or nil,
+			lazy = (type_ == "dir" and st.truncated_dirs[path]) or nil,
+		}
+	end
 end
 
 --- Build an entry table for the line at `lnum` by walking up the buffer
@@ -264,23 +389,9 @@ local function build_path_map(buf)
 	end
 
 	local map = {}
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local stack = {} -- { indent, path }
-
-	for lnum, line in ipairs(lines) do
-		local name, type_, indent = read_line(line)
-		if name then
-			while #stack > 0 and stack[#stack].indent >= indent do
-				table.remove(stack)
-			end
-			local parent = #stack > 0 and stack[#stack].path or st.root
-			local path = parent .. "/" .. name
-			map[path] = lnum
-			if type_ == "dir" then
-				stack[#stack + 1] = { indent = indent, path = path }
-			end
-		end
-	end
+	M.walk(buf, st.root, function(lnum, path)
+		map[path] = lnum
+	end)
 
 	st._by_path = map
 	st._by_path_dirty = false
@@ -305,8 +416,13 @@ function M.entry_of(buf, path)
 	return lnum and M.resolve_entry(buf, lnum) or nil
 end
 
---- Set of directory paths whose fold is currently open.
---- Scans the buffer once, building paths and checking foldclosed().
+--- Set of directory paths whose fold is currently open, read back from the
+--- window with foldclosed().
+---
+--- Costly (one vim.fn call per directory) and rarely what you want:
+--- actions.open_folds already tracks this as folds are opened and closed.
+--- Kept for the cases that need the window's actual state rather than the
+--- plugin's record of it.
 ---@param buf number
 ---@return table  path → true
 function M.open_dirs(buf)
@@ -316,25 +432,11 @@ function M.open_dirs(buf)
 		return open
 	end
 
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local stack = {} -- { indent, path }
-
-	for lnum, line in ipairs(lines) do
-		local name, type_, indent = read_line(line)
-		if name then
-			while #stack > 0 and stack[#stack].indent >= indent do
-				table.remove(stack)
-			end
-			local parent = #stack > 0 and stack[#stack].path or st.root
-			local path = parent .. "/" .. name
-			if type_ == "dir" then
-				stack[#stack + 1] = { indent = indent, path = path }
-				if vim.fn.foldclosed(lnum) == -1 then
-					open[path] = true
-				end
-			end
+	M.walk(buf, st.root, function(lnum, path, type_)
+		if type_ == "dir" and vim.fn.foldclosed(lnum) == -1 then
+			open[path] = true
 		end
-	end
+	end)
 
 	return open
 end

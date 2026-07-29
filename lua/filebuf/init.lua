@@ -159,10 +159,11 @@ local function toggle_hidden(buf)
 
 	local cursor_entry = state.entry_at_cursor(buf)
 	local cursor_path = cursor_entry and cursor_entry.path
-	local open_dirs = state.open_dirs(buf)
 	config.show_hidden = not config.show_hidden
 
-	render.tree(buf, { open_dirs = open_dirs })
+	-- Folds carry over on their own: render.tree defaults to the tracked
+	-- open set.
+	render.tree(buf)
 
 	if cursor_path then
 		local lnum = state.lnum_of(buf, cursor_path)
@@ -224,7 +225,7 @@ local function setup_keymaps(buf)
 
 	if km.close_filebuf then
 		vim.keymap.set("n", km.close_filebuf, function()
-			actions.save_fold_state(buf, state.root(buf))
+			-- actions.open_folds is already current; nothing to snapshot.
 			vim.api.nvim_buf_delete(buf, { force = true })
 		end, { buffer = buf, desc = "filebuf: close" })
 	end
@@ -399,12 +400,9 @@ function M.open(dir)
 			state.attach(existing_buf)
 			vim.api.nvim_set_current_buf(existing_buf)
 			set_window_options()
-			local closed = actions.closed[dir]
-			render.tree(existing_buf, {
-				open_dirs = closed and function(path)
-					return not closed[path]
-				end or nil,
-			})
+			-- Fold preferences for `dir` persist in actions.open_folds, which
+			-- render.tree picks up on its own.
+			render.tree(existing_buf)
 			prof.stop()
 			return
 		end
@@ -430,12 +428,7 @@ function M.open(dir)
 	set_window_options()
 	set_winbar(buf, "Normal")
 
-	local closed = actions.closed[dir]
-	render.tree(buf, {
-		open_dirs = closed and function(path)
-			return not closed[path]
-		end or nil,
-	})
+	render.tree(buf)
 
 	if config.auto_focus_current_file and current_file ~= "" and vim.startswith(current_file, dir .. "/") then
 		local target = actions.reveal_path(buf, vim.fn.resolve(current_file)) or actions.reveal_path(buf, current_file)
@@ -531,7 +524,7 @@ function M.setup(opts)
 			local st = state.get(buf)
 			if st then
 				local entries = buffer.parse_buffer(buf, st.root)
-				local open_dirs = state.open_dirs(buf)
+				local open_dirs = actions.open_folds[st.root]
 
 				-- Build comparator for the chosen method.
 				local cmp = nil

@@ -184,7 +184,7 @@ function M.close_filebuf(buf)
 	end
 	-- Clear persisted fold state.
 	local actions = require("filebuf.actions")
-	actions.closed = {}
+	actions.open_folds = {}
 end
 
 --- Read the content of a file on disk.

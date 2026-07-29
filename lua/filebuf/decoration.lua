@@ -3,8 +3,11 @@
 -- on every redraw, so git/dir/hidden/link extmarks are always current
 -- without manual clear/refresh.
 --
--- Work is O(visible viewport): each visible line resolves its path by
--- walking up the buffer (typically < 20 lines per lookup for indent).
+-- Work is O(visible viewport): the ancestor chain of the topmost visible
+-- line is reconstructed once, and state.range_resolver carries it down the
+-- viewport from there.  Resolving each line on its own would mean an
+-- upward buffer walk per line, which on a large tree costs far more than
+-- the extmarks do — and on_win runs on every redraw.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
@@ -50,10 +53,12 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 	local matches = st.matches
 	local ignore_set = st.ignore_set
 
+	local resolve = state.range_resolver(bufnr)
+
 	local lnum = toprow + 1 -- toprow is 0-indexed; lines are 1-indexed
 	local count = 0
 	while lnum <= botrow + 1 and count <= height + 2 do
-		local entry = state.resolve_entry(bufnr, lnum)
+		local entry = resolve(lnum)
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
 			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0

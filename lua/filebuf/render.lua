@@ -50,10 +50,9 @@ function M.entries(buf, entries, open_dirs)
 	st.rendering = false
 	vim.bo[buf].modified = false
 
-	-- Restore fold state (find mode preserves the closed set from before).
-	local actions = require("filebuf.actions")
-	actions.restore_folds(buf, open_dirs, entries)
-	actions.save_fold_state(buf, st.root, entries)
+	-- Restore fold state (find mode preserves the open set from before).
+	-- restore_folds records the resulting state as it goes.
+	require("filebuf.actions").restore_folds(buf, open_dirs, entries)
 
 	-- Clear and re-trigger async git status.
 	st.git = nil
@@ -82,16 +81,11 @@ function M.tree(buf, opts)
 
 	local view = opts.keep_view and vim.fn.winsaveview() or nil
 
-	-- Snapshot which directories are open before anything clobbers the folds.
-	-- On a fresh open the buffer is empty, so the snapshot is empty too — we
-	-- rely on the persisted fold state (actions.closed) instead.
-	local open_dirs = opts.open_dirs
-	if st._by_path and not st._by_path_dirty then
-		if open_dirs == nil then
-			open_dirs = state.open_dirs(buf)
-		end
-		require("filebuf.actions").save_fold_state(buf, st.root)
-	end
+	-- Which directories to leave open afterwards.  No need to read the folds
+	-- back off the buffer: actions.open_folds has tracked them all along, and
+	-- it is equally valid on a fresh open, where there are no folds to read.
+	local actions = require("filebuf.actions")
+	local open_dirs = opts.open_dirs or actions.open_folds[st.root]
 
 	-- Clear search-match highlighting (line numbers mean nothing after re-render).
 	st.matches = nil
@@ -125,13 +119,9 @@ function M.tree(buf, opts)
 
 	-- 3. Folds ------------------------------------------------------
 	-- 'foldexpr' derives the fold ranges from the lines just written, so
-	-- this only resets which of them are open.
+	-- this only resets which of them are open — and records that as it goes.
 	prof.start("render.tree.restore_folds")
-	local actions = require("filebuf.actions")
 	actions.restore_folds(buf, open_dirs)
-	prof.stop()
-	prof.start("render.tree.save_fold_state")
-	actions.save_fold_state(buf, st.root)
 	prof.stop()
 
 	-- 4. Git status (async) -----------------------------------------
