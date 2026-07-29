@@ -87,7 +87,7 @@ end
 ---     ignored subtrees were never collected in the first place
 ---
 ---@param buf   number
----@param opts? table  { show_hidden?: boolean, sort_method?: string, keep_view?: boolean }
+---@param opts? table  { show_hidden?, sort_method?, keep_view?, force? }
 ---@return boolean handled
 function M.reproject(buf, opts)
 	opts = opts or {}
@@ -95,7 +95,10 @@ function M.reproject(buf, opts)
 	if not st or not st.snap or st.snap.n == 0 then
 		return false
 	end
-	if vim.bo[buf].modified then
+	-- Unsaved edits would be discarded by the rewrite below.  `force` is for
+	-- the post-save path, where the edits have just been written to disk and
+	-- the rows already reflect them.
+	if vim.bo[buf].modified and not opts.force then
 		return false
 	end
 

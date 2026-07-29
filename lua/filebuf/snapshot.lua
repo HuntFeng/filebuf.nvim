@@ -22,9 +22,9 @@
 -- chain on demand (O(depth)) and thrown away.
 --
 -- Rows are numbered 1..n in find(1) emission order and never renumbered.
--- Display order lives in `order` (a permutation) and the visible
--- projection in `view` / `row_of`, so re-sorting or re-filtering never
--- touches the row data itself.
+-- Display order lives in the child index (siblings are reordered there) and
+-- the visible projection in `view` / `row_of`, so re-sorting or re-filtering
+-- never touches the row data itself.
 ----------------------------------------------------------------------
 local M = {}
 
@@ -41,9 +41,10 @@ local KIND_MASK = 3
 M.F_HIDDEN = 4 -- basename starts with "."
 M.F_IGNORED = 8 -- gitignored
 M.F_TRUNCATED = 16 -- directory at maxdepth, children not loaded
+M.F_DEAD = 32 -- removed by an applied save; skipped by every projection
 
 local KIND_DIR, KIND_LINK = M.KIND_DIR, M.KIND_LINK
-local F_HIDDEN, F_IGNORED, F_TRUNCATED = M.F_HIDDEN, M.F_IGNORED, M.F_TRUNCATED
+local F_HIDDEN, F_IGNORED, F_TRUNCATED, F_DEAD = M.F_HIDDEN, M.F_IGNORED, M.F_TRUNCATED, M.F_DEAD
 
 local TYPE_NAME = { [M.KIND_FILE] = "file", [M.KIND_DIR] = "dir", [M.KIND_LINK] = "link" }
 
@@ -83,6 +84,7 @@ function M.new(root)
 		indent = {},
 		kind = {}, -- kind bits | flag bits
 		parent = {}, -- row index of parent dir, 0 = child of root
+		names = nil, -- sparse row → name, for rows a save created or renamed
 		-- Child index in CSR form: the children of row p are
 		-- child_flat[child_start[p] .. child_start[p + 1] - 1].  Two flat
 		-- integer arrays rather than a table per directory -- at 313k rows
@@ -94,7 +96,7 @@ function M.new(root)
 		view = nil, -- visible projection: view[lnum] = row
 		row_of = nil, -- inverse: row_of[row] = lnum
 		show_hidden = nil, -- which projection `view` currently holds
-		sorted_by = nil, -- which method `order` currently holds
+		sorted_by = nil, -- which method the child index is ordered by
 	}
 end
 
@@ -122,7 +124,7 @@ end
 function M.build(snap, output, maxdepth, ignore_set, pruned)
 	snap.raw = output
 	snap.pruned = pruned and true or false
-	snap.view, snap.row_of, snap.sorted = nil, nil, nil
+	snap.view, snap.row_of, snap.sorted, snap.names = nil, nil, nil, nil
 	snap.child_start, snap.child_flat = nil, nil
 	snap.sorted_by, snap.show_hidden = nil, nil
 
@@ -226,10 +228,22 @@ end
 ----------------------------------------------------------------------
 
 --- Basename of `row`.
+---
+--- Rows created or renamed by an applied save have names that are not in
+--- `raw` (it is the immutable find output), so those live in a sparse
+--- override table.  `snap.names` stays nil until a save mutates the rows, so
+--- the common path is a plain slice.
 ---@param snap table
 ---@param row  number
 ---@return string
 function M.name(snap, row)
+	local names = snap.names
+	if names then
+		local n = names[row]
+		if n then
+			return n
+		end
+	end
 	local o = snap.off[row]
 	return snap.raw:sub(o, o + snap.len[row] - 1)
 end
@@ -266,13 +280,13 @@ end
 ---@param name? string  the row's own name, when the caller already has it
 ---@return string
 function M.path_of(snap, row, name)
-	local raw, off, len, parent = snap.raw, snap.off, snap.len, snap.parent
-	local segs = { name or raw:sub(off[row], off[row] + len[row] - 1) }
+	local raw, off, len, parent, names = snap.raw, snap.off, snap.len, snap.parent, snap.names
+	local segs = { name or (names and names[row]) or raw:sub(off[row], off[row] + len[row] - 1) }
 	local p = parent[row]
 	local k = 1
 	while p and p > 0 do
 		k = k + 1
-		segs[k] = raw:sub(off[p], off[p] + len[p] - 1)
+		segs[k] = (names and names[p]) or raw:sub(off[p], off[p] + len[p] - 1)
 		p = parent[p]
 	end
 	-- segs is deepest-first; reverse into a root-first path.
@@ -349,14 +363,15 @@ local function sort_range(snap, s, e, method)
 	if k < 2 then
 		return
 	end
-	local raw, off, len, kind, flat = snap.raw, snap.off, snap.len, snap.kind, snap.child_flat
+	local raw, off, len, kind, flat, names =
+		snap.raw, snap.off, snap.len, snap.kind, snap.child_flat, snap.names
 
 	local rows, key = {}, {}
 	if method == "name" then
 		for i = 1, k do
 			local r = flat[s + i - 1]
 			rows[i] = r
-			key[r] = raw:sub(off[r], off[r] + len[r] - 1):lower()
+			key[r] = ((names and names[r]) or raw:sub(off[r], off[r] + len[r] - 1)):lower()
 		end
 	else
 		-- Type priority is a single leading digit, so a plain string compare
@@ -364,7 +379,8 @@ local function sort_range(snap, s, e, method)
 		for i = 1, k do
 			local r = flat[s + i - 1]
 			rows[i] = r
-			key[r] = (PRIO[kind[r] % (KIND_MASK + 1)] or 5) .. raw:sub(off[r], off[r] + len[r] - 1):lower()
+			key[r] = (PRIO[kind[r] % (KIND_MASK + 1)] or 5)
+				.. ((names and names[r]) or raw:sub(off[r], off[r] + len[r] - 1)):lower()
 		end
 	end
 
@@ -442,6 +458,11 @@ function M.project(snap, method, show_hidden)
 			frame_pos[depth] = pos + 1
 			local row = flat[pos]
 			local bits = kind[row]
+			-- Removed by an applied save: neither shown nor descended into, so
+			-- the whole deleted subtree disappears without touching its rows.
+			if math.floor(bits / F_DEAD) % 2 == 1 then
+				goto continue
+			end
 			local dimmed = not show_hidden
 				and (math.floor(bits / F_HIDDEN) % 2 == 1 or math.floor(bits / F_IGNORED) % 2 == 1)
 			if not dimmed then
@@ -459,6 +480,7 @@ function M.project(snap, method, show_hidden)
 				end
 			end
 		end
+		::continue::
 	end
 
 	snap.view = view
@@ -482,7 +504,7 @@ local ESCAPE = { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" }
 ---@return string[] lines
 function M.lines(snap)
 	local view = snap.view or select(1, M.project(snap, snap.sorted_by, snap.show_hidden or false))
-	local raw, off, len, kind = snap.raw, snap.off, snap.len, snap.kind
+	local raw, off, len, kind, names = snap.raw, snap.off, snap.len, snap.kind, snap.names
 	local indent = snap.indent
 
 	local use_tabs = not vim.go.expandtab
@@ -500,7 +522,7 @@ function M.lines(snap)
 			prefix = string.rep(unit, level)
 			prefixes[level] = prefix
 		end
-		local name = raw:sub(off[row], off[row] + len[row] - 1)
+		local name = (names and names[row]) or raw:sub(off[row], off[row] + len[row] - 1)
 		if name:find("[\n\r\t]") then
 			name = name:gsub("[\n\r\t]", ESCAPE)
 		end
@@ -537,7 +559,6 @@ function M.entry(snap, lnum)
 	local name = M.name(snap, row)
 	return {
 		lnum = lnum,
-		row = row,
 		path = M.path_of(snap, row, name),
 		name = name,
 		type = M.type(snap, row),
@@ -564,7 +585,7 @@ function M.row_of_path(snap, path)
 		M.build_index(snap)
 	end
 	local start, flat = snap.child_start, snap.child_flat
-	local raw, off, len = snap.raw, snap.off, snap.len
+	local raw, off, len, kind, names = snap.raw, snap.off, snap.len, snap.kind, snap.names
 
 	local row = 0
 	for seg in path:sub(#root + 2):gmatch("[^/]+") do
@@ -572,9 +593,17 @@ function M.row_of_path(snap, path)
 		local seglen = #seg
 		for i = start[row], start[row + 1] - 1 do
 			local c = flat[i]
-			if len[c] == seglen and raw:sub(off[c], off[c] + seglen - 1) == seg then
-				found = c
-				break
+			if math.floor(kind[c] / F_DEAD) % 2 == 0 then
+				local nm = names and names[c]
+				if nm then
+					if nm == seg then
+						found = c
+						break
+					end
+				elseif len[c] == seglen and raw:sub(off[c], off[c] + seglen - 1) == seg then
+					found = c
+					break
+				end
 			end
 		end
 		if not found then
@@ -605,11 +634,247 @@ function M.truncated_paths(snap)
 	local out = {}
 	for row = 1, snap.n do
 		local bits = snap.kind[row]
-		if bits % (KIND_MASK + 1) == KIND_DIR and math.floor(bits / F_TRUNCATED) % 2 == 1 then
+		if
+			bits % (KIND_MASK + 1) == KIND_DIR
+			and math.floor(bits / F_TRUNCATED) % 2 == 1
+			and math.floor(bits / F_DEAD) % 2 == 0
+		then
 			out[M.path_of(snap, row)] = true
 		end
 	end
 	return out
+end
+
+----------------------------------------------------------------------
+-- Post-save mutation
+----------------------------------------------------------------------
+
+local function parent_of(path)
+	return path:match("^(.*)/") or path
+end
+
+local function path_depth(path)
+	return select(2, path:gsub("/", "/"))
+end
+
+--- Add `delta` to the indent of `row` and everything beneath it.
+--- Walks the CSR child index, which still describes the pre-mutation
+--- structure -- a move changes only the moved row's parent, never the shape
+--- of its own subtree.
+---@param snap  table
+---@param row   number
+---@param delta number
+function M.shift_subtree_indent(snap, row, delta)
+	local start, flat, indent = snap.child_start, snap.child_flat, snap.indent
+	indent[row] = indent[row] + delta
+	local stack, top = { row }, 1
+	while top > 0 do
+		local r = stack[top]
+		top = top - 1
+		for i = start[r], start[r + 1] - 1 do
+			local c = flat[i]
+			indent[c] = indent[c] + delta
+			top = top + 1
+			stack[top] = c
+		end
+	end
+end
+
+--- Replay the filesystem ops of a completed save onto the cached rows, so the
+--- snapshot describes the new tree without another find(1).
+---
+--- Safe to do here and nowhere else: these ops have just been applied
+--- successfully, so the result is known rather than guessed.
+---
+--- Descendant paths need no fixing -- a path is built from the parent chain,
+--- so renaming a directory re-points its entire subtree for free.  Deletes
+--- only flag the top row: `project` neither emits nor descends into a dead
+--- row, which removes the subtree with it.
+---
+--- Returns false when the ops cannot be replayed exactly.  Two of the checks
+--- can only be made part-way through, so on false the rows may be partially
+--- mutated: **the caller must follow a false return with a full rescan**,
+--- which is what rebuilds every array (see M.build).  Every derived structure
+--- is dropped before returning so a stale projection cannot be used by
+--- accident.  The declined cases are nested cross-parent moves (the same
+--- subtree would be indent-shifted twice), a create landing under a directory
+--- that is itself being moved, and any op whose path cannot be resolved.
+---
+--- Note the ignore flags for new and renamed rows are computed from the
+--- ignore set of the last scan, since re-reading it means another `git
+--- ls-files`.  A path that becomes gitignored as a result of the save shows
+--- undimmed until the next :FilebufRefresh or FocusGained.
+---
+---@param snap       table
+---@param ops        table       result of compute_diff, already applied
+---@param ignore_set table|nil   absolute ignored paths → true
+---@return boolean applied
+function M.apply_ops(snap, ops, ignore_set)
+	if not snap.child_start then
+		M.build_index(snap)
+	end
+	local kind, indent, parent = snap.kind, snap.indent, snap.parent
+
+	--- Give up, leaving nothing derived behind for a caller to misuse.
+	local function abort()
+		snap.view, snap.row_of, snap.sorted = nil, nil, nil
+		return false
+	end
+
+	-- Nested cross-parent moves would shift the same rows twice.
+	local moves = {}
+	for _, r in ipairs(ops.renamed) do
+		if parent_of(r.old.path) ~= parent_of(r.new.path) then
+			moves[#moves + 1] = r
+		end
+	end
+	for i = 1, #moves do
+		for j = 1, #moves do
+			if i ~= j then
+				local outer = moves[j].old.path .. "/"
+				if moves[i].old.path:sub(1, #outer) == outer then
+					return abort()
+				end
+			end
+		end
+	end
+
+	-- Every op is addressed by its pre-save path, so resolve them all up front,
+	-- before any mutation can invalidate a lookup.  Bailing here leaves the
+	-- snapshot untouched.
+	local del_rows = {}
+	for _, d in ipairs(ops.deleted) do
+		local row = M.row_of_path(snap, d.path)
+		if not row then
+			return abort()
+		end
+		del_rows[#del_rows + 1] = row
+	end
+
+	local ren = {}
+	for _, r in ipairs(ops.renamed) do
+		local row = M.row_of_path(snap, r.old.path)
+		if not row then
+			return abort()
+		end
+		ren[#ren + 1] = { row = row, name = r.new.name, path = r.new.path }
+	end
+
+	local names = snap.names or {}
+	snap.names = names
+
+	-- Parent resolution has to see the post-save tree, because the three op
+	-- kinds refer to each other: renaming a directory in place comes back from
+	-- the diff as delete + create plus a move of every loaded child, so a
+	-- child's new parent is a directory that does not exist as a row yet.  The
+	-- reverse also happens, a create landing inside a renamed directory.
+	--
+	-- So: creates are materialized first, and lookups consult the rows this
+	-- call is about to add and the paths the renames are about to produce
+	-- before falling back to the pre-save index.
+	local fresh = {}
+	local ren_by_newpath = {}
+	local ren_moves = {}
+	for _, r in ipairs(ren) do
+		ren_by_newpath[r.path] = r.row
+	end
+	for _, r in ipairs(moves) do
+		ren_moves[r.new.path] = true
+	end
+
+	local function resolve(path)
+		if path == snap.root then
+			return 0
+		end
+		local row = fresh[path] or ren_by_newpath[path]
+		if row then
+			return row
+		end
+		return M.row_of_path(snap, path)
+	end
+
+	--- Recompute visibility flags, preserving kind and the truncated marker.
+	local function reflag(row, name, path)
+		local bits = kind[row] % (KIND_MASK + 1)
+		if math.floor(kind[row] / F_TRUNCATED) % 2 == 1 then
+			bits = bits + F_TRUNCATED
+		end
+		if name:byte(1) == DOT then
+			bits = bits + F_HIDDEN
+		end
+		if ignore_set and ignore_set[path] then
+			bits = bits + F_IGNORED
+		end
+		kind[row] = bits
+	end
+
+	for _, row in ipairs(del_rows) do
+		if math.floor(kind[row] / F_DEAD) % 2 == 0 then
+			kind[row] = kind[row] + F_DEAD
+		end
+	end
+
+	-- Creates first, shallowest first so a parent exists before its children.
+	if #ops.created > 0 then
+		local creates = {}
+		for _, c in ipairs(ops.created) do
+			creates[#creates + 1] = c
+		end
+		table.sort(creates, function(a, b)
+			return path_depth(a.path) < path_depth(b.path)
+		end)
+
+		for _, c in ipairs(creates) do
+			local pp = parent_of(c.path)
+			local prow = resolve(pp)
+			if prow == nil then
+				return abort()
+			end
+			-- A parent that is itself about to be moved has an indent that is
+			-- not settled yet; not worth reasoning about for the gain.
+			if prow ~= 0 and ren_moves[pp] then
+				return abort()
+			end
+			local row = snap.n + 1
+			snap.n = row
+			names[row] = c.name
+			-- Name lives in the override table; the slice is never read.
+			snap.off[row], snap.len[row] = 1, 0
+			parent[row] = prow
+			indent[row] = (prow == 0) and 0 or indent[prow] + 1
+			kind[row] = c.type == "dir" and KIND_DIR or (c.type == "link" and KIND_LINK or 0)
+			reflag(row, c.name, c.path)
+			fresh[c.path] = row
+		end
+	end
+
+	local shifts = {}
+	for _, r in ipairs(ren) do
+		local np = resolve(parent_of(r.path))
+		if np == nil then
+			return abort()
+		end
+		names[r.row] = r.name
+		if parent[r.row] ~= np then
+			local new_indent = (np == 0) and 0 or indent[np] + 1
+			local delta = new_indent - indent[r.row]
+			parent[r.row] = np
+			if delta ~= 0 then
+				shifts[#shifts + 1] = { r.row, delta }
+			end
+		end
+		reflag(r.row, r.name, r.path)
+	end
+	for _, sh in ipairs(shifts) do
+		M.shift_subtree_indent(snap, sh[1], sh[2])
+	end
+
+	-- Structure changed: the child index and every recorded sibling order are
+	-- stale.
+	M.build_index(snap)
+	snap.sorted = {}
+	snap.view, snap.row_of = nil, nil
+	return true
 end
 
 --- Approximate Lua-heap footprint, for profiling.  Counts array slots and

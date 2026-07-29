@@ -26,6 +26,12 @@ local states = {}
 --- by root rather than global so two projects do not fight over it.
 local hidden_by_root = {}
 
+--- Forget every remembered per-root preference.  Exists so tests do not
+--- inherit each other's toggles; nothing in normal operation calls it.
+function M.reset_preferences()
+	hidden_by_root = {}
+end
+
 --- Remember the show-hidden preference for `root`.
 ---@param root string
 ---@param show boolean

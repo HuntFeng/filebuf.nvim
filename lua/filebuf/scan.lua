@@ -410,47 +410,4 @@ function M.scan_dir_children(dir, root)
 	return children
 end
 
---- Scan the root's immediate children at indent 0.
----@param dir string
----@return table[] entries
-function M.scan_tree(dir)
-	local entries = M.scan_dir_children(dir, dir)
-	for _, e in ipairs(entries) do
-		e.indent = 0
-	end
-	return entries
-end
-
---- Count the entries a recursive expand of `dir` would yield.
----@param dir   string
----@param root? string  unused
----@param cap?  number
----@return number  count
----@return boolean capped
-function M.count_subtree(dir, root, cap)
-	cap = cap or math.huge
-
-	local count = 0
-	local capped = false
-	local pending = { dir }
-	while #pending > 0 and not capped do
-		local current = table.remove(pending)
-		for _, child in ipairs(M.scan_dir_children(current, current)) do
-			local dimmed = child.is_hidden or child.is_ignored
-			if config.show_hidden or not dimmed then
-				count = count + 1
-				if count >= cap then
-					capped = true
-					break
-				end
-				if child.type == "dir" then
-					pending[#pending + 1] = child.path
-				end
-			end
-		end
-	end
-
-	return count, capped
-end
-
 return M

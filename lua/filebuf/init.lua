@@ -11,6 +11,7 @@ local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
 local buffer = require("filebuf.buffer")
 local sync = require("filebuf.sync")
+local snapshot = require("filebuf.snapshot")
 local decoration = require("filebuf.decoration")
 local actions = require("filebuf.actions")
 local search = require("filebuf.search")
@@ -272,6 +273,7 @@ local function save_buffer(buf)
 	-- against a fresh scan, so a file created outside Neovim since the render
 	-- showed up as a deletion the user never asked for.
 	if st.snap_clean and not vim.bo[buf].modified and st.mode ~= "find" then
+		st.matches = nil
 		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 		prof.stop()
 		return
@@ -319,10 +321,22 @@ local function save_buffer(buf)
 		end
 
 		search.clear(buf)
-		-- The applied ops may have created or removed ignored paths, so the
-		-- ignore set has to be re-read here even though renders no longer
-		-- clear it unconditionally.
-		render.tree(buf, { keep_view = true, refresh_ignore = true })
+
+		-- Replay the ops onto the cached rows and re-project, instead of a
+		-- third find(1) for one save.  Safe because these ops just succeeded,
+		-- so the resulting tree is known rather than inferred.  apply_ops
+		-- declines the cases it cannot reproduce exactly (see snapshot.lua),
+		-- and then the full rescan below is what runs.
+		local applied = false
+		if st.snap and st.mode ~= "find" then
+			applied = snapshot.apply_ops(st.snap, ops, st.ignore_set)
+				and render.reproject(buf, { keep_view = true, force = true })
+		end
+		if not applied then
+			-- The ops may have created or removed ignored paths, so the ignore
+			-- set is re-read here even though renders no longer clear it.
+			render.tree(buf, { keep_view = true, refresh_ignore = true })
+		end
 		vim.notify("filebuf: saved", vim.log.levels.INFO)
 	end)
 
