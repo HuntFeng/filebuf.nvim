@@ -30,6 +30,25 @@ local function set_winbar(buf, text)
 	end
 end
 
+--- Apply the window-local fold and display options to the current window.
+--- Folds are computed by 'foldexpr' from the buffer's indentation, so any
+--- window showing a filebuf needs these set before it renders.
+local function set_window_options()
+	-- 'foldexpr' first: setting 'foldmethod' triggers the first evaluation.
+	vim.wo.foldexpr = "v:lua.FilebufFoldExpr()"
+	vim.wo.foldmethod = "expr"
+	vim.wo.foldlevel = 0
+	vim.wo.foldenable = true
+	vim.wo.foldcolumn = "auto:9"
+	vim.wo.foldtext = "v:lua.FilebufFoldText()"
+	vim.wo.winhighlight = "Folded:FilebufFoldLine"
+	vim.opt_local.fillchars:append({
+		foldopen = "\226\150\188",
+		foldclose = "\226\150\182",
+		fold = " ",
+	})
+end
+
 --- Public, user-mutable configuration (see filebuf.config).
 M.config = config
 
@@ -379,6 +398,7 @@ function M.open(dir)
 			st.eager = config.eager_load and true or false
 			state.attach(existing_buf)
 			vim.api.nvim_set_current_buf(existing_buf)
+			set_window_options()
 			local closed = actions.closed[dir]
 			render.tree(existing_buf, {
 				open_dirs = closed and function(path)
@@ -407,16 +427,7 @@ function M.open(dir)
 	setup_keymaps(buf)
 
 	vim.api.nvim_set_current_buf(buf)
-	vim.wo.foldmethod = "manual"
-	vim.wo.foldenable = true
-	vim.wo.foldcolumn = "auto:9"
-	vim.wo.foldtext = "v:lua.FilebufFoldText()"
-	vim.wo.winhighlight = "Folded:FilebufFoldLine"
-	vim.opt_local.fillchars:append({
-		foldopen = "\226\150\188",
-		foldclose = "\226\150\182",
-		fold = " ",
-	})
+	set_window_options()
 	set_winbar(buf, "Normal")
 
 	local closed = actions.closed[dir]
@@ -478,6 +489,15 @@ function M.setup(opts)
 	vim.api.nvim_set_decoration_provider(decoration.ns, {
 		on_start = decoration.on_start,
 		on_win = decoration.on_win,
+	})
+
+	-- The fold expression caches these to keep its per-line cost down.
+	vim.api.nvim_create_autocmd("OptionSet", {
+		group = vim.api.nvim_create_augroup("filebuf_indent_options", { clear = true }),
+		pattern = { "shiftwidth", "tabstop", "expandtab" },
+		callback = function()
+			actions.invalidate_indent_cache()
+		end,
 	})
 
 	local function current_filebuf()

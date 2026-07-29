@@ -6,8 +6,11 @@
 -- internally — the caller resolves the cursor to an entry first so
 -- the functions can be called from arbitrary keymaps or scripts.
 --
--- Fold creation works by scanning buffer text directly (O(n) stack
--- pass); there is no in-memory index to consult.
+-- Folds are not built here: 'foldexpr' (FilebufFoldExpr below) derives
+-- every fold range from a line's indentation and its trailing "/", so
+-- Neovim maintains them itself and recomputes only what a buffer change
+-- touched.  What is left is open/closed state, which the plugin persists
+-- per root in M.closed.
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
@@ -51,134 +54,134 @@ local function read_line(line)
 end
 
 ----------------------------------------------------------------------
--- Fold creation from buffer text
+-- Fold computation ('foldexpr')
 ----------------------------------------------------------------------
 
---- Create a fold spanning each directory and its descendants by scanning
---- buffer text.  Single O(n) stack pass: dirs are pushed when seen and
---- their folds emitted when an entry at ≤ indent arrives.  LIFO order
---- emits inner folds before outer ones, as Neovim requires.
----@param buf number
-function M.create_folds_from_buffer(buf)
-	prof.start("create_folds")
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	if #lines == 0 then
+--- Cached indent settings for the fold expression.  The expression runs
+--- once per buffer line — 100k+ times on a large tree — and reading
+--- vim.go there costs more than the rest of the expression put together,
+--- so the values are cached and invalidated explicitly (see the OptionSet
+--- autocmd registered in filebuf.setup).
+local indent_cfg = nil
+
+--- How one level of indent is spelled in the buffer.  Mirrors
+--- line.indent_str / line.indent_level, which drive the rendering side.
+---@return table  { tabs: boolean, width: number }
+local function fold_indent_cfg()
+	if not indent_cfg then
+		local sw = vim.go.shiftwidth
+		indent_cfg = {
+			tabs = not vim.go.expandtab,
+			width = (sw > 0 and sw) or vim.go.tabstop,
+		}
+	end
+	return indent_cfg
+end
+
+--- Drop the cached indent settings.
+function M.invalidate_indent_cache()
+	indent_cfg = nil
+end
+
+--- Indent depth of a buffer line, plus whether the line holds no entry at
+--- all.  Same result as line.indent_level, without its per-call option
+--- lookups.
+---@param line string
+---@param cfg  table
+---@return number level
+---@return boolean blank
+local function fold_level_of(line, cfg)
+	local ws = (cfg.tabs and line:match("^\t*") or line:match("^ *")) or ""
+	if #ws == #line then
+		return 0, true
+	end
+	if cfg.tabs then
+		return #ws, false
+	end
+	return math.floor(#ws / cfg.width), false
+end
+
+--- Fold-level callback (v:lua.FilebufFoldExpr), evaluated once per line.
+---
+--- A directory owns a fold spanning its descendants: it starts a fold one
+--- level deeper than itself, and its children — indented one level more —
+--- fall inside it.  A directory with nothing deeper after it starts no
+--- fold, so empty and unexpanded folders keep a clean fold column.
+---
+--- The current and the following line arrive in a single
+--- nvim_buf_get_lines call; the following line is what says whether the
+--- directory has children.
+---@return string
+function _G.FilebufFoldExpr()
+	local lnum = vim.v.lnum
+	local lines = vim.api.nvim_buf_get_lines(0, lnum - 1, lnum + 1, false)
+	local line = lines[1]
+	if not line then
+		return "0"
+	end
+
+	local cfg = fold_indent_cfg()
+	local level, blank = fold_level_of(line, cfg)
+	if blank then
+		-- Keep blank lines (mid-edit, mostly) inside the enclosing fold.
+		return "="
+	end
+
+	if line:sub(-1) == "/" and lines[2] then
+		local next_level, next_blank = fold_level_of(lines[2], cfg)
+		if not next_blank and next_level > level then
+			return ">" .. (level + 1)
+		end
+	end
+	return tostring(level)
+end
+
+----------------------------------------------------------------------
+-- Fold state restore
+----------------------------------------------------------------------
+
+--- Close every fold, then re-open the directories `open_dirs` selects.
+---
+--- Nothing here creates folds — 'foldexpr' derives them from the buffer
+--- text.  A render only has to reset the open/closed state, and `zM` gives
+--- a deterministic all-closed baseline: it also pulls 'foldlevel' back to
+--- 0, so folds computed after this point start closed too.
+---
+--- `open_dirs` is either a set of paths to open or a predicate on the path.
+--- Directories are visited in buffer order, so a parent is opened before
+--- its children (`:foldopen` acts on the outermost closed fold at a line).
+---
+--- `entries` skips the buffer scan when the caller already holds the
+--- rendered entries in memory (find mode).
+---@param buf       number
+---@param open_dirs table|fun(path: string): boolean|nil
+---@param entries   table[]|nil  rendered entries, each carrying lnum and path
+function M.restore_folds(buf, open_dirs, entries)
+	prof.start("restore_folds")
+	vim.cmd("silent! normal! zM")
+
+	if not open_dirs then
+		prof.stop()
+		return
+	end
+	local is_open = type(open_dirs) == "function" and open_dirs or function(path)
+		return open_dirs[path]
+	end
+
+	if entries then
+		for _, e in ipairs(entries) do
+			if e.type == "dir" and is_open(e.path) then
+				vim.cmd(string.format("silent! %dfoldopen", e.lnum))
+			end
+		end
 		prof.stop()
 		return
 	end
 
-	-- Clear any existing folds so stale ranges from a previous render
-	-- never interfere.  Must happen before any :fold commands are issued.
-	vim.cmd("silent! normal! zE")
-
-	local stack = {} -- { lnum, indent }
-	local prev_lnum = nil
-	local prev_indent = nil
-	local cmds = {}
-
-	for lnum, line in ipairs(lines) do
-		local name, type_, indent = read_line(line)
-		if name then
-			-- Pop directories whose subtree has ended.
-			while #stack > 0 and stack[#stack].indent >= indent do
-				local d = table.remove(stack)
-				if prev_lnum and prev_indent > d.indent and prev_lnum > d.lnum then
-					cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev_lnum)
-				end
-			end
-
-			if type_ == "dir" then
-				stack[#stack + 1] = { lnum = lnum, indent = indent }
-			end
-
-			prev_lnum = lnum
-			prev_indent = indent
-		end
-	end
-
-	-- Close any remaining dirs on the stack.
-	while #stack > 0 do
-		local d = table.remove(stack)
-		if prev_lnum and prev_indent > d.indent and prev_lnum > d.lnum then
-			cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev_lnum)
-		end
-	end
-
-	if #cmds > 0 then
-		vim.cmd(table.concat(cmds, "|"))
-	end
-	prof.stop()
-end
-
-----------------------------------------------------------------------
--- Fold rebuild & open (for find-mode and full-tree renders)
-----------------------------------------------------------------------
-
---- Destroy all folds, recreate them from an entry list (find mode), then
---- re-open the directories `open_dirs` selects.
----
---- `open_dirs` is either a set of paths to open or a predicate on the path.
----@param buf       number
----@param entries   table[]  rendered entries (1:1 with buffer lines)
----@param open_dirs table|fun(path: string): boolean|nil
-function M.rebuild_folds(buf, entries, open_dirs)
-	vim.cmd("silent! normal! zE")
-	-- Use the entry-list path for find mode (those entries are in memory).
-	local stack = {}
-	local prev
-	local cmds = {}
-
-	for _, e in ipairs(entries) do
-		while #stack > 0 and stack[#stack].indent >= e.indent do
-			local d = table.remove(stack)
-			if prev and prev.indent > d.indent and prev.lnum > d.lnum then
-				cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev.lnum)
-			end
-		end
-		if e.type == "dir" then
-			stack[#stack + 1] = { lnum = e.lnum, indent = e.indent }
-		end
-		prev = e
-	end
-	while #stack > 0 do
-		local d = table.remove(stack)
-		if prev and prev.indent > d.indent and prev.lnum > d.lnum then
-			cmds[#cmds + 1] = string.format("%d,%dfold", d.lnum, prev.lnum)
-		end
-	end
-
-	if #cmds > 0 then
-		vim.cmd(table.concat(cmds, "|"))
-	end
-
-	if not open_dirs then
-		return
-	end
-	local is_open = type(open_dirs) == "function" and open_dirs or function(path)
-		return open_dirs[path]
-	end
-	for _, e in ipairs(entries) do
-		if e.type == "dir" and is_open(e.path) then
-			vim.cmd(string.format("silent! %dfoldopen", e.lnum))
-		end
-	end
-end
-
---- Open folds for the directories in `open_dirs`.  Scans buffer text once
---- to build paths and check fold status.
----@param buf       number
----@param open_dirs table|fun(path: string): boolean
-function M.open_folds(buf, open_dirs)
-	if not open_dirs then
-		return
-	end
 	local st = state.get(buf)
 	if not st then
+		prof.stop()
 		return
-	end
-
-	local is_open = type(open_dirs) == "function" and open_dirs or function(path)
-		return open_dirs[path]
 	end
 
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
@@ -200,6 +203,7 @@ function M.open_folds(buf, open_dirs)
 			end
 		end
 	end
+	prof.stop()
 end
 
 ----------------------------------------------------------------------
@@ -388,10 +392,9 @@ function M.expand_dir(buf, entry)
 		vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, child_lines)
 	end)
 
-	-- Rebuild all folds and mark path cache dirty.
-	M.create_folds_from_buffer(buf)
-
-	-- Open the fold for the newly expanded dir.
+	-- 'foldexpr' picks the new lines up on its own, and only over the range
+	-- that changed — every fold elsewhere in the buffer keeps its state.
+	-- All that is left is opening the directory we just expanded.
 	vim.cmd(string.format("silent! %dfoldopen", entry.lnum))
 	M.save_fold_state(buf, st.root)
 
@@ -467,7 +470,10 @@ function M.expand_dir_recursive(buf, entry)
 		end
 	end
 
-	M.create_folds_from_buffer(buf)
+	-- Folds follow the buffer text; open the whole subtree just loaded.
+	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
+	vim.cmd("silent! normal! zO")
+	M.save_fold_state(buf, st.root)
 
 	if total_inserted >= max_entries then
 		vim.notify(

@@ -52,7 +52,7 @@ function M.entries(buf, entries, open_dirs)
 
 	-- Restore fold state (find mode preserves the closed set from before).
 	local actions = require("filebuf.actions")
-	actions.rebuild_folds(buf, entries, open_dirs)
+	actions.restore_folds(buf, open_dirs, entries)
 	actions.save_fold_state(buf, st.root, entries)
 
 	-- Clear and re-trigger async git status.
@@ -124,16 +124,15 @@ function M.tree(buf, opts)
 	st._by_path_dirty = true
 
 	-- 3. Folds ------------------------------------------------------
-  prof.start("render.tree.create_folds")
+	-- 'foldexpr' derives the fold ranges from the lines just written, so
+	-- this only resets which of them are open.
+	prof.start("render.tree.restore_folds")
 	local actions = require("filebuf.actions")
-	actions.create_folds_from_buffer(buf)
-  prof.stop()
-	if open_dirs then
-		actions.open_folds(buf, open_dirs)
-	end
-  prof.start("render.tree.save_fold_state")
+	actions.restore_folds(buf, open_dirs)
+	prof.stop()
+	prof.start("render.tree.save_fold_state")
 	actions.save_fold_state(buf, st.root)
-  prof.stop()
+	prof.stop()
 
 	-- 4. Git status (async) -----------------------------------------
 	st.git = nil
