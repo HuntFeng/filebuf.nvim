@@ -375,22 +375,23 @@ local function has_gnu_find()
 end
 
 --- Execute find(1) for `root`, returning the stdout text or nil on failure.
---- The output format is always:  depth\0type\0relpath\n  (one entry per line,
---- TAB-delimited fields).
+--- The output format is always:  type\tparent_dir\tname\n  (one record per
+--- line).  Emitting the parent directory and the basename as separate fields
+--- means the parser never splits a path itself, and `parent_dir` arrives as
+--- exactly the absolute key the entry is grouped under.
 ---@param root string  absolute directory, no trailing slash
 ---@return string|nil
 local function run_find(root)
 	if has_gnu_find() then
 		-- Linux: GNU find -printf with d_type (no stat overhead).
-		-- %d = depth (root = 0, root's children = 1), %y = type (d/f/l),
-		-- %P = path relative to root without a leading "./".
+		-- %y = type (d/f/l), %h = leading directories, %f = basename.
 		local cmd = {
 			"find",
 			root,
 			"-mindepth",
 			"1",
 			"-printf",
-			"%d\t%y\t%P\t\n",
+			"%y\t%h\t%f\n",
 		}
 		local output = vim.fn.system(cmd)
 		if vim.v.shell_error ~= 0 and #output == 0 then
@@ -403,11 +404,8 @@ local function run_find(root)
 		-- is slower than d_type, but still beats per-directory fs_scandir
 		-- because it is a single process chain — no libuv round-trips.
 		local esc_root = vim.fn.shellescape(root)
-		local prefix_len = #root + 1 -- strip "root/" prefix
-		local perl_script = string.format(
-			[[chomp;@s=lstat($_);next unless @s;$t=-d _?"d":(-l _?"l":"f");$r=substr($_,%d);$d=($r=~tr|/|/|);print "$d\t$t\t$r\n";]],
-			prefix_len
-		)
+		local perl_script =
+			[[chomp;@s=lstat($_);next unless @s;$t=-d _?"d":(-l _?"l":"f");$i=rindex($_,"/");print $t,"\t",substr($_,0,$i),"\t",substr($_,$i+1),"\n";]]
 		local esc_perl = vim.fn.shellescape(perl_script)
 		local cmd = string.format("find %s -mindepth 1 -print0 2>/dev/null | perl -0ne %s", esc_root, esc_perl)
 		local output = vim.fn.system(cmd)
@@ -441,76 +439,121 @@ function M.walk_find(root, cap)
 	prof.start("scan.walk_find")
 	cap = cap or math.huge
 	local show_hidden = config.show_hidden
+	-- find(1) reports the parent of a child as `root` verbatim, so a trailing
+	-- slash here would never match the keys `tree` is built with (and would
+	-- produce "//" in entry paths).
+	root = root:gsub("(.)/+$", "%1")
 
 	-- 1. Run find ----------------------------------------------------
+	prof.start("scan.walk_find.find")
 	local output = run_find(root)
+	prof.stop()
 	if not output then
 		prof.stop()
 		return nil, 0, false
 	end
 
-	-- 2. Parse: group entries by parent relative path -----------------
+	-- 2. Parse: group entries by absolute parent directory -------------
+	--
+	-- This loop runs once per file in the tree, so everything avoidable is
+	-- kept out of it:
+	--
+	--   * find hands us the fields pre-split (type, parent dir, basename), so
+	--     there is no path splitting and no root-relative → absolute concat.
+	--   * find emits a directory's entries consecutively, so the per-directory
+	--     work — child list, ignore matcher, skip test — is done once per
+	--     parent rather than once per entry.
+	--   * subtrees that can't be displayed are never materialized.  flatten()
+	--     only descends into *visible* directories, so with show_hidden off
+	--     everything below a hidden/ignored directory is dropped anyway; not
+	--     building it skips a table, a concat and an ignore match per entry.
+	prof.start("scan.walk_find.parse")
 	local tree = {}
 	local total_parsed = 0
+	local respect_ignore = config.respect_ignore
+	-- Directories whose contents can't be displayed → their descendants are
+	-- skipped outright.  nil while show_hidden is on, since nothing is skipped.
+	local skipped = not show_hidden and {} or nil
 
-	-- Output format per record:  depth\ttype\trelpath\t\n
+	local cur_parent, cur_list, cur_n, cur_matcher, cur_check, cur_skip
+
+	-- Output format per record:  type\tparent_dir\tname\n
 	-- We use TAB (not NUL) as the field delimiter because NUL bytes
 	-- are painful to pass through vim.fn.system across platforms.
-	local pos = 1
-	local output_len = #output
-	while pos <= output_len and total_parsed < cap do
-		local tab1 = output:find("\t", pos, true)
-		if not tab1 then
-			break
-		end
-		local depth_str = output:sub(pos, tab1 - 1)
-
-		local tab2 = output:find("\t", tab1 + 1, true)
-		if not tab2 then
-			break
-		end
-		local ftype = output:sub(tab1 + 1, tab2 - 1)
-
-		local tab3 = output:find("\t", tab2 + 1, true)
-		if not tab3 then
-			break
-		end
-		local relpath = output:sub(tab2 + 1, tab3 - 1)
-
-		-- Advance past the trailing TAB and newline to the next record.
-		pos = tab3 + 2
-
-		local name = relpath:match("[^/]+$") or relpath
-		local parent = relpath:match("^(.*)/[^/]+$") or ""
-		local is_dir = ftype == "d"
-
-		local entry = {
-			name = name,
-			path = root .. "/" .. relpath,
-			type = is_dir and "dir" or (ftype == "l" and "link" or "file"),
-			lazy = is_dir or nil,
-		}
-
-		-- Hidden: dot-prefixed names.
-		if name:sub(1, 1) == "." then
-			entry.is_hidden = true
-		end
-
-		-- Ignored: check against accumulated .gitignore / .ignore rules.
-		if config.respect_ignore and name ~= ".ignore" then
-			local parent_abs = parent ~= "" and (root .. "/" .. parent) or root
-			local matcher, pc = ignore_patterns_for(root, parent_abs)
-			if pc > 0 and ignore.matches(matcher, entry.path, name, is_dir) then
-				entry.is_ignored = true
+	for ftype, parent, name in output:gmatch("([^\t]*)\t([^\t]*)\t([^\n]*)\n") do
+		if parent ~= cur_parent then
+			prof.start("parse.parent_switch")
+			cur_parent = parent
+			cur_skip = skipped ~= nil and skipped[parent] or false
+			if not cur_skip then
+				cur_list = tree[parent]
+				if cur_list then
+					cur_n = #cur_list
+				else
+					cur_list = {}
+					tree[parent] = cur_list
+					cur_n = 0
+				end
+				if respect_ignore then
+					prof.start("parse.ignore_patterns")
+					local matcher, pc = ignore_patterns_for(root, parent)
+					prof.stop()
+					cur_matcher = matcher
+					cur_check = pc > 0
+				end
 			end
+			prof.stop()
 		end
 
-		if not tree[parent] then
-			tree[parent] = {}
+		local is_dir = ftype == "d"
+		if cur_skip then
+			prof.start("parse.skip_prop")
+			-- Propagate the skip downward: this directory's own children must
+			-- find their parent in the set too.
+			if is_dir then
+				skipped[parent .. "/" .. name] = true
+			end
+			prof.stop()
+		else
+			local path = parent == "/" and ("/" .. name) or (parent .. "/" .. name)
+			-- Hidden: dot-prefixed names (46 = ".").
+			local is_hidden = name:byte(1) == 46 or nil
+			-- Ignored: check against accumulated .gitignore / .ignore rules.
+			-- .ignore itself is never tagged as ignored.
+			local is_ignored
+			if cur_check and name ~= ".ignore" then
+				prof.start("parse.ignore_match")
+				if ignore.matches(cur_matcher, path, name, is_dir) then
+					is_ignored = true
+				end
+				prof.stop()
+			end
+
+			prof.start("parse.entry_create")
+			if skipped ~= nil and (is_hidden or is_ignored) then
+				if is_dir then
+					skipped[path] = true
+				end
+			else
+				cur_n = cur_n + 1
+				cur_list[cur_n] = {
+					name = name,
+					path = path,
+					type = is_dir and "dir" or (ftype == "l" and "link" or "file"),
+					lazy = is_dir or nil,
+					is_hidden = is_hidden,
+					is_ignored = is_ignored,
+				}
+				total_parsed = total_parsed + 1
+				if total_parsed >= cap then
+					prof.stop()
+					break
+				end
+			end
+			prof.stop()
 		end
-		table.insert(tree[parent], entry)
-		total_parsed = total_parsed + 1
 	end
+	prof.stop()
 
 	-- If we got nothing, signal the caller to fall back to walk().
 	if total_parsed == 0 then
@@ -519,20 +562,23 @@ function M.walk_find(root, cap)
 	end
 
 	-- 3. Sort each directory's children ------------------------------
+	prof.start("scan.walk_find.sort")
 	for _, children in pairs(tree) do
 		sort_children(children)
 	end
+	prof.stop()
 
 	-- 4. Flatten in DFS order with inline visibility filter -----------
+	prof.start("scan.walk_find.flatten")
 	local entries = {}
 	local n = 0
 	local truncated = false
 
-	local function flatten(parent_rel, indent)
+	local function flatten(parent, indent)
 		if truncated then
 			return
 		end
-		local children = tree[parent_rel]
+		local children = tree[parent]
 		if not children then
 			return
 		end
@@ -541,6 +587,8 @@ function M.walk_find(root, cap)
 				truncated = true
 				return
 			end
+			-- With show_hidden off the parse pass already dropped everything
+			-- invisible, so this only ever filters in the show_hidden case.
 			local visible = show_hidden or not (entry.is_hidden or entry.is_ignored)
 			if visible then
 				entry.indent = indent
@@ -548,9 +596,8 @@ function M.walk_find(root, cap)
 				entries[n] = entry
 			end
 			if visible and entry.type == "dir" then
-				local dir_rel = entry.path:sub(#root + 2)
 				local before = n
-				flatten(dir_rel, indent + 1)
+				flatten(entry.path, indent + 1)
 				if n == before then
 					entry.expanded_empty = true
 				end
@@ -559,7 +606,8 @@ function M.walk_find(root, cap)
 		end
 	end
 
-	flatten("", 0)
+	flatten(root, 0)
+	prof.stop()
 
 	prof.stop()
 	return entries, n, truncated

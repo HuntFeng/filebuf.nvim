@@ -101,6 +101,7 @@ function M.compile(patterns)
 		exact_dir = {}, -- name -> true, directories only
 		ext_any = {}, -- ".log" -> true, hashed off the name's extension
 		ext_dir = {},
+		needs_ext = false, -- any ext rule at all?  if not, skip extracting one
 		tails = {}, -- suffixes that aren't a dot extension ("~", "_test")
 		complex = {},
 	}
@@ -132,6 +133,7 @@ function M.compile(patterns)
 				else
 					compiled.ext_any[pat.ext] = true
 				end
+				compiled.needs_ext = true
 			else
 				compiled.tails[#compiled.tails + 1] = pat
 			end
@@ -190,9 +192,13 @@ function M.matches(compiled, full_path, name, is_dir)
 			return true
 		end
 
-		local dot = name:match("^.*(%.[^.]*)$")
-		if dot and (compiled.ext_any[dot] or (is_dir and compiled.ext_dir[dot])) then
-			return true
+		if compiled.needs_ext then
+			-- Unanchored, so this scans forward to the last dot instead of
+			-- backtracking from the end of the name.
+			local dot = name:match("%.[^.]*$")
+			if dot and (compiled.ext_any[dot] or (is_dir and compiled.ext_dir[dot])) then
+				return true
+			end
 		end
 
 		for _, pat in ipairs(compiled.tails) do
