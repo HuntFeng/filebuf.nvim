@@ -1,9 +1,13 @@
 ----------------------------------------------------------------------
 -- Tree scanner -- streams find(1) output directly into buffer lines.
 --
--- No in-memory tree, no grouping, no sorting, no flattening.  The buffer
--- IS the data store.  find's %d (depth) maps directly to indent, %y maps
--- to the "/" / "@" suffix, and %f is the visible text.
+-- No in-memory tree, no grouping, no flattening.  The buffer IS the data
+-- store.  find's %d (depth) maps directly to indent, %y maps to the
+-- "/" / "@" suffix, and %f is the visible text.
+--
+-- The one thing find(1) cannot give us is order: its output is directory
+-- order, so siblings get reordered once (filebuf.sort) before the lines
+-- are built.
 --
 -- Hidden and gitignored subtrees are filtered inline via a skip-depth
 -- marker.  Additionally, ignored *directories* (from git ls-files) are
@@ -13,6 +17,7 @@
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
 local line_mod = require("filebuf.line")
+local sort = require("filebuf.sort")
 
 local M = {}
 
@@ -212,24 +217,40 @@ function M.find_to_lines(root, opts)
 		return nil
 	end
 
-	-- 2. Stream through output, build buffer lines --------------------
+	-- 2. Stream through output, collect entries -----------------------
 	prof.start("scan.find_to_lines.transform")
-	local lines = {}
+	local entries = {}
+	local n = 0
 	local truncated_dirs = stream_entries(
 		output,
 		root,
 		maxdepth,
 		show_hidden,
 		ignore_set,
-		function(name, _, ftype, indent)
-			local suffix = ftype == "d" and "/" or (ftype == "l" and "@" or "")
-			local escaped = name
-			if name:find("[\n\r\t]") then
-				escaped = name:gsub("[\n\r\t]", { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" })
-			end
-			lines[#lines + 1] = line_mod.indent_str(indent) .. escaped .. suffix
+		function(name, path, ftype, indent)
+			n = n + 1
+			entries[n] = {
+				name = name,
+				path = path,
+				type = ftype == "d" and "dir" or (ftype == "l" and "link" or "file"),
+				indent = indent,
+			}
 		end
 	)
+	prof.stop()
+
+	-- 3. Order siblings (find(1) emits directory order) ---------------
+	prof.start("scan.find_to_lines.sort")
+	entries = sort.apply(entries)
+	prof.stop()
+
+	-- 4. Entries -> buffer lines --------------------------------------
+	prof.start("scan.find_to_lines.format")
+	local fmt = line_mod.formatter()
+	local lines = {}
+	for i = 1, #entries do
+		lines[i] = fmt(entries[i])
+	end
 	prof.stop()
 
 	prof.stop()
@@ -311,6 +332,12 @@ function M.scan_dir_children(dir, root)
 			type = is_dir and "dir" or (ftype == "link" and "link" or "file"),
 			lazy = is_dir or nil,
 		}
+	end
+
+	-- All children are siblings, so a plain sort is enough here.
+	local cmp = sort.comparator(config.sort_method)
+	if cmp then
+		table.sort(children, cmp)
 	end
 	return children
 end
