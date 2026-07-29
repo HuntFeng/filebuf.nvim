@@ -34,7 +34,7 @@ describe("find mode", function()
 		end
 		find.enter(buf)
 
-		assert.equals("find", vim.b[buf].filebuf_mode, "should be in find mode")
+		assert.equals("find", helpers.state(buf).mode, "should be in find mode")
 	end)
 
 	it("exits find mode with <Esc> and clears the mode flag", function()
@@ -49,10 +49,10 @@ describe("find mode", function()
 			return "file"
 		end
 		find.enter(buf)
-		assert.equals("find", vim.b[buf].filebuf_mode)
+		assert.equals("find", helpers.state(buf).mode)
 
 		find.exit(buf)
-		assert.equals("normal", vim.b[buf].filebuf_mode, "mode should return to normal")
+		assert.equals("normal", helpers.state(buf).mode, "mode should return to normal")
 	end)
 
 	it("restores the prior buffer view when exiting find mode", function()
@@ -89,12 +89,18 @@ describe("find mode", function()
 		buf = helpers.open_filebuf(tmpdir)
 
 		-- Manually set up a find-mode state (simulating what enter would do).
-		vim.b[buf].filebuf_mode = "find"
-		-- Simulate a query tree with only the .txt file.
-		vim.b[buf].filebuf_query_entries = {
-			{ name = "dir", type = "dir", path = tmpdir .. "/dir", indent = 0 },
-			{ name = "inquery.txt", type = "file", path = tmpdir .. "/dir/inquery.txt", indent = 1 },
-		}
+		-- The session itself is module-local to filebuf.find, so the baseline is
+		-- injected by stubbing the accessor the save path actually calls.
+		local find = require("filebuf.find")
+		local real_query_entries, real_exit = find.query_entries, find.exit
+		helpers.state(buf).mode = "find"
+		find.query_entries = function()
+			return {
+				{ name = "dir", type = "dir", path = tmpdir .. "/dir", indent = 0 },
+				{ name = "inquery.txt", type = "file", path = tmpdir .. "/dir/inquery.txt", indent = 1 },
+			}
+		end
+		find.exit = function() end
 
 		-- Render those entries.
 		local lines = { "dir/", "  inquery.txt" }
@@ -108,8 +114,10 @@ describe("find mode", function()
 		assert.equals("should survive", helpers.read_file(tmpdir .. "/dir/notinquery.lua"))
 
 		-- Clean up the mode state.
-		vim.b[buf].filebuf_mode = "normal"
-		vim.b[buf].filebuf_query_entries = nil
+		find.query_entries, find.exit = real_query_entries, real_exit
+		if helpers.state(buf) then
+			helpers.state(buf).mode = "normal"
+		end
 	end)
 
 	it("cancels find mode entry if the user provides an empty pattern", function()
@@ -122,7 +130,7 @@ describe("find mode", function()
 		end
 		find.enter(buf)
 
-		assert.equals("normal", vim.b[buf].filebuf_mode, "should stay in normal mode with empty pattern")
+		assert.equals("normal", helpers.state(buf).mode, "should stay in normal mode with empty pattern")
 		assert.same(original_lines, helpers.get_buffer_lines(buf), "buffer should be unchanged")
 	end)
 
@@ -134,11 +142,11 @@ describe("find mode", function()
 			return "txt"
 		end
 		find.enter(buf)
-		assert.equals("find", vim.b[buf].filebuf_mode)
+		assert.equals("find", helpers.state(buf).mode)
 
 		-- Cleanup should be idempotent.
 		find.cleanup(buf)
-		assert.equals("normal", vim.b[buf].filebuf_mode)
+		assert.equals("normal", helpers.state(buf).mode)
 
 		find.cleanup(buf) -- second call should not error
 	end)

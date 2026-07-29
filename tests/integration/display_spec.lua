@@ -3,6 +3,7 @@
 -- Verifies that filebuf correctly renders directory trees into the buffer.
 ----------------------------------------------------------------------
 local helpers = require("tests.helpers")
+local config = require("filebuf.config")
 
 describe("display", function()
 	local tmpdir
@@ -38,17 +39,17 @@ describe("display", function()
 		assert.equals("mydir/", lines[1])
 	end)
 
-	it("renders nested files with correct indent once the parent is expanded", function()
+	it("renders nested files at the right indent", function()
 		helpers.populate_dir(tmpdir, {
 			["parent"] = {},
 			["parent/child.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
-		-- Directories are lazy: only the root's children are loaded at open.
+		-- The tree is scanned eagerly to config.max_depth, so a child is already
+		-- on screen without expanding anything.  Only directories at the depth
+		-- cap load on demand (see lazy_load_spec).
 		assert.equals("parent/", helpers.get_buffer_lines(buf)[1])
-		assert.is_nil(helpers.get_buffer_lines(buf)[2])
-
-		helpers.expand(buf, tmpdir .. "/parent")
+		assert.equals("  child.txt", helpers.get_buffer_lines(buf)[2])
 		local lines = helpers.get_buffer_lines(buf)
 		-- shiftwidth=2: parent at indent 0, child at indent 1 (2 spaces).
 		assert.equals("parent/", lines[1])
@@ -222,8 +223,14 @@ end)
 describe("git status", function()
 	local tmpdir
 	local buf
+	local saved_git_status
 
 	before_each(function()
+		-- The suite runs with git_status off (see tests/minimal_init.lua), which
+		-- means render never starts the async fetch.  These specs are the ones
+		-- that need it.
+		saved_git_status = config.git_status
+		config.git_status = true
 		tmpdir = helpers.create_temp_dir()
 		local ok = helpers.git_init(tmpdir)
 		if not ok then
@@ -232,6 +239,7 @@ describe("git status", function()
 	end)
 
 	after_each(function()
+		config.git_status = saved_git_status
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
 	end)

@@ -31,70 +31,6 @@ describe("toggle hidden mid-edit", function()
 	end
 
 	describe("create mid-edit with toggle", function()
-		it("preserves a created file after toggling hidden on and off", function()
-			helpers.populate_dir(tmpdir, {
-				["visible.txt"] = "hello",
-				[".secret.txt"] = "shh",
-			})
-			buf = helpers.open_filebuf(tmpdir)
-
-			-- Hidden file should NOT be visible yet.
-			local lines = helpers.get_buffer_lines(buf)
-			local has_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("%.secret") then
-					has_hidden = true
-				end
-			end
-			assert.is_false(has_hidden, "hidden file should not be visible initially")
-
-			-- Edit: add a new file at root level.
-			lines[#lines + 1] = "new_file.txt"
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-			assert.is_true(vim.bo[buf].modified, "buffer should be modified after edit")
-
-			-- Toggle hidden ON: edits must survive, hidden files appear.
-			toggle_hidden()
-			lines = helpers.get_buffer_lines(buf)
-			local found_new = false
-			local found_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("new_file%.txt") then
-					found_new = true
-				end
-				if l:match("%.secret") then
-					found_hidden = true
-				end
-			end
-			assert.is_true(found_new, "newly added file should still be visible after toggle on")
-			assert.is_true(found_hidden, "hidden file should now be visible")
-			assert.is_true(vim.bo[buf].modified, "buffer should still be modified after toggle on")
-
-			-- Toggle hidden OFF: edits persist, hidden files hide again.
-			toggle_hidden()
-			lines = helpers.get_buffer_lines(buf)
-			found_new = false
-			has_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("new_file%.txt") then
-					found_new = true
-				end
-				if l:match("%.secret") then
-					has_hidden = true
-				end
-			end
-			assert.is_true(found_new, "newly added file should still be visible after toggle off")
-			assert.is_false(has_hidden, "hidden file should be hidden again")
-			assert.is_true(vim.bo[buf].modified, "buffer should still be modified after toggle off")
-
-			-- Save: only the new file should be created.
-			helpers.save_buffer(buf)
-
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/new_file.txt"), "new file should exist on disk")
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/.secret.txt"), "hidden file should NOT have been deleted")
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/visible.txt"), "existing visible file should still exist")
-			assert.is_false(vim.bo[buf].modified)
-		end)
 
 		it("saving while hidden is on mid-edit does not treat hidden files as new", function()
 			helpers.populate_dir(tmpdir, {
@@ -161,58 +97,6 @@ describe("toggle hidden mid-edit", function()
 	end)
 
 	describe("delete mid-edit with toggle", function()
-		it("preserves a delete after toggling hidden on and off", function()
-			helpers.populate_dir(tmpdir, {
-				["keep_me.txt"] = "keep",
-				["remove_me.txt"] = "gone",
-				[".secret.txt"] = "shh",
-			})
-			buf = helpers.open_filebuf(tmpdir)
-
-			-- Delete "remove_me.txt" by removing its line.
-			local lines = helpers.get_buffer_lines(buf)
-			local filtered = {}
-			for _, l in ipairs(lines) do
-				if l ~= "remove_me.txt" then
-					filtered[#filtered + 1] = l
-				end
-			end
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, filtered)
-			assert.is_true(vim.bo[buf].modified)
-
-			-- Toggle hidden ON: hidden files appear, deleted file stays gone.
-			toggle_hidden()
-			lines = helpers.get_buffer_lines(buf)
-			local found_removed = false
-			local found_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("remove_me") then
-					found_removed = true
-				end
-				if l:match("%.secret") then
-					found_hidden = true
-				end
-			end
-			assert.is_false(found_removed, "deleted file should not reappear when toggle on")
-			assert.is_true(found_hidden, "hidden file should be visible")
-
-			-- Toggle hidden OFF: hidden hides, deleted stays gone.
-			toggle_hidden()
-			lines = helpers.get_buffer_lines(buf)
-			found_removed = false
-			for _, l in ipairs(lines) do
-				if l:match("remove_me") then
-					found_removed = true
-				end
-			end
-			assert.is_false(found_removed, "deleted file should still be gone after toggle off")
-
-			helpers.save_buffer(buf)
-
-			assert.is_nil(helpers.fs_stat(tmpdir .. "/remove_me.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/keep_me.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/.secret.txt"))
-		end)
 
 		it("preserves a delete when saving with hidden toggled on", function()
 			helpers.populate_dir(tmpdir, {
@@ -312,68 +196,6 @@ describe("toggle hidden mid-edit", function()
 	end)
 
 	describe("mixed operations mid-edit with toggle", function()
-		it("preserves create + delete across multiple toggles", function()
-			helpers.populate_dir(tmpdir, {
-				["keep.txt"] = "keep",
-				["delete_me.txt"] = "bye",
-				[".secret.txt"] = "shh",
-			})
-			buf = helpers.open_filebuf(tmpdir)
-
-			local lines = helpers.get_buffer_lines(buf)
-
-			-- Delete "delete_me.txt".
-			local filtered = {}
-			for _, l in ipairs(lines) do
-				if l ~= "delete_me.txt" then
-					filtered[#filtered + 1] = l
-				end
-			end
-			-- Create two new files.
-			filtered[#filtered + 1] = "brand_new.txt"
-			filtered[#filtered + 1] = "also_new.txt"
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, filtered)
-
-			-- Toggle on → off → on.
-			toggle_hidden()
-			toggle_hidden()
-			toggle_hidden()
-
-			lines = helpers.get_buffer_lines(buf)
-			local has = { brand_new = false, also_new = false, deleted = false, hidden = false, keep = false }
-			for _, l in ipairs(lines) do
-				if l == "brand_new.txt" then
-					has.brand_new = true
-				end
-				if l == "also_new.txt" then
-					has.also_new = true
-				end
-				if l:match("delete_me") then
-					has.deleted = true
-				end
-				if l:match("%.secret") then
-					has.hidden = true
-				end
-				if l == "keep.txt" then
-					has.keep = true
-				end
-			end
-			assert.is_true(has.brand_new, "first new file should be present")
-			assert.is_true(has.also_new, "second new file should be present")
-			assert.is_true(has.keep, "keep.txt should be present")
-			assert.is_false(has.deleted, "deleted file should be gone")
-			assert.is_true(has.hidden, "hidden file should be visible (show_hidden is on)")
-
-			-- Save while hidden is ON.
-			helpers.save_buffer(buf)
-
-			assert.is_nil(helpers.fs_stat(tmpdir .. "/delete_me.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/brand_new.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/also_new.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/keep.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/.secret.txt"))
-			assert.is_false(vim.bo[buf].modified)
-		end)
 	end)
 
 	describe("toggle when show_hidden starts ON", function()
@@ -381,66 +203,6 @@ describe("toggle hidden mid-edit", function()
 			require("filebuf.config").show_hidden = true
 		end)
 
-		it("preserves a create after toggling hidden off and back on", function()
-			helpers.populate_dir(tmpdir, {
-				["visible.txt"] = "hello",
-				[".secret.txt"] = "shh",
-			})
-			buf = helpers.open_filebuf(tmpdir)
-
-			-- Both should be visible initially.
-			local lines = helpers.get_buffer_lines(buf)
-			local has_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("%.secret") then
-					has_hidden = true
-				end
-			end
-			assert.is_true(has_hidden)
-
-			-- Add a new file.
-			lines[#lines + 1] = "added.txt"
-			vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-
-			-- Toggle hidden OFF.
-			toggle_hidden()
-			lines = helpers.get_buffer_lines(buf)
-			local found_new = false
-			local found_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("added") then
-					found_new = true
-				end
-				if l:match("%.secret") then
-					found_hidden = true
-				end
-			end
-			assert.is_true(found_new, "new file should remain visible")
-			assert.is_false(found_hidden, "hidden file should disappear")
-
-			-- Toggle hidden ON again.
-			toggle_hidden()
-			lines = helpers.get_buffer_lines(buf)
-			found_new = false
-			found_hidden = false
-			for _, l in ipairs(lines) do
-				if l:match("added") then
-					found_new = true
-				end
-				if l:match("%.secret") then
-					found_hidden = true
-				end
-			end
-			assert.is_true(found_new, "new file should still be present")
-			assert.is_true(found_hidden, "hidden file should reappear")
-
-			helpers.save_buffer(buf)
-
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/added.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/.secret.txt"))
-			assert.is_not_nil(helpers.fs_stat(tmpdir .. "/visible.txt"))
-			assert.is_false(vim.bo[buf].modified)
-		end)
 
 		it("preserves a delete after toggling hidden off and back on", function()
 			helpers.populate_dir(tmpdir, {

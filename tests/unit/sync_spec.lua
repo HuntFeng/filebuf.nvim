@@ -208,13 +208,16 @@ describe("sync.lua", function()
 			assert.equals("/root/b/file.txt", ops.renamed[1].new.path)
 		end)
 
-		it("prefers same-parent match when multiple same-name candidates exist", function()
+		it("prefers a same-parent match over a same-name one elsewhere", function()
+			-- The name has to agree with the path's basename; buffer.parse_buffer
+			-- derives one from the other, and a mismatched fixture would exercise
+			-- the name-based phase instead of the same-parent phase under test.
 			local disk = {
 				entry("file.txt", "file", "/root/a/file.txt", 1, 1),
 				entry("file.txt", "file", "/root/sub/file.txt", 1, 2),
 			}
 			local buf = {
-				entry("file.txt", "file", "/root/sub/file_renamed.txt", 1, 1),
+				entry("file_renamed.txt", "file", "/root/sub/file_renamed.txt", 1, 1),
 			}
 			local ops = sync.compute_diff(buf, disk)
 			-- The buffer entry at /root/sub/file_renamed.txt matches:

@@ -15,7 +15,7 @@ local config = require("filebuf.config")
 --- Sorted list of the paths in a match set, for stable assertions.
 local function match_paths(buf)
 	local paths = {}
-	for path in pairs(vim.b[buf].filebuf_search_matches or {}) do
+	for path in pairs((helpers.state(buf).matches or {})) do
 		paths[#paths + 1] = path
 	end
 	table.sort(paths)
@@ -24,7 +24,7 @@ end
 
 --- Locate a display entry by absolute path.
 local function entry_at(buf, path)
-	for _, e in ipairs(vim.b[buf].filebuf_display_entries or {}) do
+	for _, e in ipairs(helpers.display_entries(buf)) do
 		if e.path == path then
 			return e
 		end
@@ -112,7 +112,7 @@ describe("search", function()
 	-- run: reveal + highlight + cursor
 	------------------------------------------------------------------
 
-	it("run reveals the hit's ancestor chain and highlights it", function()
+	it("run finds and highlights a deeply nested hit", function()
 		helpers.populate_dir(tmpdir, {
 			["a"] = {},
 			["a/b"] = {},
@@ -120,8 +120,8 @@ describe("search", function()
 			["a/b/c/needle.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
-		assert.same({ "a/" }, helpers.get_buffer_lines(buf))
-
+		-- With eager loading the full tree is already on screen; search.run
+		-- finds the hit among them and records it in the match set.
 		assert.equals(1, search.run(buf, "needle"))
 		assert.same({ "a/", "  b/", "    c/", "      needle.txt" }, helpers.get_buffer_lines(buf))
 		assert.same({ tmpdir .. "/a/b/c/needle.txt" }, match_paths(buf))
@@ -138,25 +138,26 @@ describe("search", function()
 		assert.equals("  needle.txt", helpers.get_buffer_lines(buf)[lnum])
 	end)
 
-	it("run does not expand sibling subfolders without hits", function()
+	it("run does not alter lines outside the ancestor chain of a hit", function()
 		helpers.populate_dir(tmpdir, {
 			["a"] = {},
-			["a/sibling"] = {},
-			["a/sibling/untouched.txt"] = "",
 			["a/b"] = {},
 			["a/b/needle.txt"] = "",
+			["a/sibling"] = {},
+			["a/sibling/untouched.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
-		search.run(buf, "needle")
-
-		-- The sibling is listed as a child of the expanded "a" ...
+		local before = helpers.get_buffer_lines(buf)
 		assert.is_not_nil(entry_at(buf, tmpdir .. "/a/sibling"))
-		assert.is_true(entry_at(buf, tmpdir .. "/a/sibling").lazy, "sibling must stay lazy")
-		-- ... but nothing inside it was loaded.
-		assert.is_nil(entry_at(buf, tmpdir .. "/a/sibling/untouched.txt"))
+		assert.is_not_nil(entry_at(buf, tmpdir .. "/a/sibling/untouched.txt"))
+
+		search.run(buf, "needle")
+		-- Finding needle.txt must not change unrelated buffer lines.
+		assert.same(before, helpers.get_buffer_lines(buf))
+		assert.same({ tmpdir .. "/a/b/needle.txt" }, match_paths(buf))
 	end)
 
-	it("run reveals hits in several different subtrees", function()
+	it("run matches hits across several different subtrees", function()
 		helpers.populate_dir(tmpdir, {
 			["alpha"] = {},
 			["alpha/deep"] = {},
@@ -172,8 +173,8 @@ describe("search", function()
 			tmpdir .. "/alpha/deep/needle.txt",
 			tmpdir .. "/zulu/needle.txt",
 		}, match_paths(buf))
-		-- The unrelated subtree was never touched.
-		assert.is_nil(entry_at(buf, tmpdir .. "/unrelated/other.txt"))
+		-- The unrelated entry is still there — it was never removed.
+		assert.is_not_nil(entry_at(buf, tmpdir .. "/unrelated/other.txt"))
 	end)
 
 	it("run leaves the buffer untouched when there are no hits", function()
@@ -225,8 +226,8 @@ describe("search", function()
 		buf = helpers.open_filebuf(tmpdir)
 		assert.equals(1, search.run(buf, "needledir"))
 		assert.same({ tmpdir .. "/a/needledir" }, match_paths(buf))
-		-- Revealed but not expanded — its own contents stay unloaded.
-		assert.is_nil(entry_at(buf, tmpdir .. "/a/needledir/inside.txt"))
+		-- The directory itself is the match — its contents are still present.
+		assert.is_not_nil(entry_at(buf, tmpdir .. "/a/needledir/inside.txt"))
 	end)
 
 	it("run queries the disk even when the pattern already matches on screen", function()
@@ -260,7 +261,7 @@ describe("search", function()
 		-- Put the cursor on the already-visible top-level hit, mimicking what
 		-- the native search does before the fallback runs.
 		assert.is_not_nil(helpers.reveal(buf, tmpdir .. "/zzz_needle.txt"))
-		for _, e in ipairs(vim.b[buf].filebuf_display_entries) do
+		for _, e in ipairs(helpers.display_entries(buf)) do
 			if e.name == "zzz_needle.txt" then
 				vim.api.nvim_win_set_cursor(0, { e.lnum, 0 })
 			end
@@ -343,7 +344,7 @@ describe("search", function()
 		assert.equals(1, #match_paths(buf))
 
 		search.clear(buf)
-		assert.is_nil(vim.b[buf].filebuf_search_matches)
+		assert.is_nil(helpers.state(buf).matches)
 	end)
 
 	it("a save clears the match set (lnums are invalidated)", function()

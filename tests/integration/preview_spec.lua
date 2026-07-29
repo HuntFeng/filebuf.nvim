@@ -20,7 +20,7 @@ describe("preview", function()
 		buf = helpers.open_filebuf(tmpdir)
 		-- Expand subdir so we can see nested files.
 		local actions = require("filebuf.actions")
-		local entries = vim.b[buf].filebuf_display_entries
+		local entries = helpers.display_entries(buf)
 		for _, e in ipairs(entries) do
 			if e.type == "dir" then
 				actions.expand_dir(buf, e)
@@ -49,7 +49,7 @@ describe("preview", function()
 
 	--- Move cursor to the entry named `name` and return its lnum.
 	local function move_to(name)
-		local entries = vim.b[buf].filebuf_display_entries
+		local entries = helpers.display_entries(buf)
 		for _, e in ipairs(entries) do
 			if e.name == name then
 				vim.api.nvim_win_set_cursor(0, { e.lnum, 0 })
