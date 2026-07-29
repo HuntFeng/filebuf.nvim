@@ -60,25 +60,6 @@ function M.indent_level(line)
 	return result
 end
 
-local ESCAPE = { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" }
-
---- Build the display line for an entry.  Directories get a trailing "/",
---- symlinks a trailing "@".  Control characters are escaped in shell $'...'
---- notation so nvim_buf_set_lines accepts the line and parse_line can undo it.
----@param entry table  { name, type, indent? }
----@return string
-function M.format_line(entry)
-	local prefix = M.indent_str(entry.indent or 0)
-	local suffix = entry.type == "dir" and "/" or (entry.type == "link" and "@" or "")
-	local name = entry.name
-	-- Only run the escape gsub when there is something to escape; virtually no
-	-- filename contains a control character, and running it unconditionally cost
-	-- ~100ms per render on a 100k-entry tree.
-	if name:find("[\n\r\t]") then
-		name = name:gsub("[\n\r\t]", ESCAPE)
-	end
-	return prefix .. name .. suffix
-end
 
 --- Build a formatter for one bulk render.
 ---

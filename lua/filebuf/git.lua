@@ -81,24 +81,6 @@ function M.parse_status_output(root, output)
 	return status_map
 end
 
---- Run `git status --porcelain` synchronously and return a path→status map.
---- Prefer get_status_map_async for interactive use so git doesn't block the UI.
----@param root string
----@return table|nil
-function M.get_status_map(root)
-	prof.start("get_git_status_map")
-	local cmd =
-		string.format("git -C %s status --porcelain --ignored=matching --untracked-files=all", vim.fn.shellescape(root))
-	local output = vim.fn.system(cmd)
-	if vim.v.shell_error ~= 0 then
-		prof.stop()
-		return nil
-	end
-	local status_map = M.parse_status_output(root, output)
-	prof.stop()
-	return status_map
-end
-
 --- Run `git status --porcelain` asynchronously via jobstart.  When complete,
 --- the result is stored on the buffer's filebuf state so the decoration
 --- provider picks it up on the next redraw.  This keeps git's ~25 ms latency

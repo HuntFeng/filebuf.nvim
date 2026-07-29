@@ -56,7 +56,6 @@ function M.init(buf, root)
 		--- and the path is removed from this set.
 		truncated_dirs = {},
 
-		eager = false,
 		mode = "normal", -- "normal" | "find"
 		git = nil, -- path → status map
 		matches = nil, -- path → true (search highlighting)
@@ -502,30 +501,4 @@ function M.entry_of(buf, path)
 	local lnum = M.lnum_of(buf, path)
 	return lnum and M.resolve_entry(buf, lnum) or nil
 end
-
---- Set of directory paths whose fold is currently open, read back from the
---- window with foldclosed().
----
---- Costly (one vim.fn call per directory) and rarely what you want:
---- actions.open_folds already tracks this as folds are opened and closed.
---- Kept for the cases that need the window's actual state rather than the
---- plugin's record of it.
----@param buf number
----@return table  path → true
-function M.open_dirs(buf)
-	local st = states[buf]
-	local open = {}
-	if not st then
-		return open
-	end
-
-	M.walk(buf, st.root, function(lnum, path, type_)
-		if type_ == "dir" and vim.fn.foldclosed(lnum) == -1 then
-			open[path] = true
-		end
-	end)
-
-	return open
-end
-
 return M

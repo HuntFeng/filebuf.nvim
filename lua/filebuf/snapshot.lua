@@ -877,20 +877,4 @@ function M.apply_ops(snap, ops, ignore_set)
 	return true
 end
 
---- Approximate Lua-heap footprint, for profiling.  Counts array slots and
---- the retained output; excludes the interned name strings, which are
---- shared with the buffer text.
----@param snap table
----@return number bytes
-function M.footprint(snap)
-	local slots = snap.n * 5 -- off, len, indent, kind, parent
-	if snap.view then
-		slots = slots + #snap.view + snap.n -- view + row_of
-	end
-	if snap.child_start then
-		slots = slots + snap.n * 2 + 2 -- child_start + child_flat
-	end
-	return slots * 8 + #snap.raw
-end
-
 return M

@@ -204,12 +204,9 @@ function M.scan_into(snap, root, opts)
 	end
 
 	-- Build gitignore set (1 system call, cached per root).
-	local ignore_set, ignored_dirs
-	if config.respect_ignore then
 		prof.start("scan.scan_into.ignore_set")
 		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
 		prof.stop()
-	end
 
 	-- Pruning keeps a cold open fast, at the cost of the snapshot not holding
 	-- the ignored subtrees -- recorded as snap.pruned so a later "show hidden"
@@ -246,84 +243,6 @@ function M.scan_into(snap, root, opts)
 	return lines, ignore_set
 end
 
-----------------------------------------------------------------------
--- Core: find -> buffer lines (no snapshot)
-----------------------------------------------------------------------
-
---- Transform find(1) output directly into buffer lines.
----@param root string   absolute root directory
----@param opts? table   { maxdepth?: number }
----@return string[]|nil lines
----@return table|nil    truncated_dirs
----@return table|nil    ignore_set
-function M.find_to_lines(root, opts)
-	prof.start("scan.find_to_lines")
-	opts = opts or {}
-	local maxdepth = opts.maxdepth or config.max_depth or 20
-	local show_hidden = config.show_hidden
-
-	-- Build gitignore set (1 system call, cached per root).
-	local ignore_set, ignored_dirs
-	if config.respect_ignore then
-		prof.start("scan.find_to_lines.ignore_set")
-		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
-		prof.stop()
-	end
-
-	-- Only prune at the find level when entries would be filtered out
-	-- anyway.  When show_hidden is on, ignored dirs must still appear
-	-- (dimmed), so we let find list them and filter in Lua.
-	local prune_dirs = (not show_hidden) and ignored_dirs or nil
-
-	-- 1. Run find ----------------------------------------------------
-	prof.start("scan.find_to_lines.find")
-	root = root:gsub("(.)/+$", "%1")
-	local output = run_find(root, maxdepth, prune_dirs)
-	prof.stop()
-	if not output then
-		prof.stop()
-		return nil
-	end
-
-	-- 2. Stream through output, collect entries -----------------------
-	prof.start("scan.find_to_lines.transform")
-	local entries = {}
-	local n = 0
-	local truncated_dirs = stream_entries(
-		output,
-		root,
-		maxdepth,
-		show_hidden,
-		ignore_set,
-		function(name, path, ftype, indent)
-			n = n + 1
-			entries[n] = {
-				name = name,
-				path = path,
-				type = ftype == "d" and "dir" or (ftype == "l" and "link" or "file"),
-				indent = indent,
-			}
-		end
-	)
-	prof.stop()
-
-	-- 3. Order siblings (find(1) emits directory order) ---------------
-	prof.start("scan.find_to_lines.sort")
-	entries = sort.apply(entries)
-	prof.stop()
-
-	-- 4. Entries -> buffer lines --------------------------------------
-	prof.start("scan.find_to_lines.format")
-	local fmt = line_mod.formatter()
-	local lines = {}
-	for i = 1, #entries do
-		lines[i] = fmt(entries[i])
-	end
-	prof.stop()
-
-	prof.stop()
-	return lines, truncated_dirs, ignore_set
-end
 
 ----------------------------------------------------------------------
 -- Disk scan for save diffing (same filtering as the buffer)
@@ -343,9 +262,7 @@ function M.scan_disk_entries(root, opts)
 	local show_hidden = config.show_hidden
 
 	local ignore_set, ignored_dirs
-	if config.respect_ignore then
 		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
-	end
 	local prune_dirs = (not show_hidden) and ignored_dirs or nil
 
 	root = root:gsub("(.)/+$", "%1")

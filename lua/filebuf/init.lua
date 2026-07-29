@@ -371,7 +371,6 @@ function M.open(dir)
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if state.is_filebuf(existing_buf) then
 			local st = state.init(existing_buf, dir)
-			st.eager = config.eager_load and true or false
 			state.attach(existing_buf)
 			vim.api.nvim_set_current_buf(existing_buf)
 			set_window_options()
@@ -394,7 +393,6 @@ function M.open(dir)
 	vim.bo[buf].buflisted = false
 
 	local st = state.init(buf, dir)
-	st.eager = config.eager_load and true or false
 	state.attach(buf)
 
 	setup_keymaps(buf)

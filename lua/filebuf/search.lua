@@ -96,9 +96,6 @@ function M.build_fd_argv(root, pattern, show_hidden)
 	if show_hidden then
 		argv[#argv + 1] = "-H"
 	end
-	if not config.respect_ignore then
-		argv[#argv + 1] = "-I"
-	end
 	if literal then
 		argv[#argv + 1] = "--fixed-strings"
 	end
@@ -112,9 +109,8 @@ end
 --- Query the tree under `root` for `pattern` synchronously.
 ---
 --- Mirrors config so results can actually be displayed: hidden entries are
---- only searched when show_hidden is on, and ignored entries only when
---- respect_ignore is off — revealing a hit that filter_visible would drop is
---- pointless.
+--- only searched when show_hidden is on — revealing a hit that filter_visible
+--- would drop is pointless.
 ---@param root    string
 ---@param pattern string  a Vim search pattern
 ---@param show_hidden? boolean  defaults to config.show_hidden

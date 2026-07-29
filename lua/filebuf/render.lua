@@ -246,18 +246,6 @@ function M.tree(buf, opts)
 		git.get_status_map_async(st.root, buf)
 	end
 
-	-- 5. Warn on eager truncation -----------------------------------
-	if st.truncated and not st.truncated_notified then
-		st.truncated_notified = true
-		vim.notify(
-			string.format(
-				"filebuf: stopped the eager scan at %d entries; deeper folders load on demand (use %s to search the rest)",
-				config.eager_max_entries,
-				tostring(config.keymaps.find_mode or "g/")
-			),
-			vim.log.levels.WARN
-		)
-	end
 
 	if view then
 		vim.fn.winrestview(view)

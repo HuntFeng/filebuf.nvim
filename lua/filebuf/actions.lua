@@ -419,205 +419,10 @@ local function resolve_dir_entry(buf, entry)
 	return find_parent_dir(buf, entry)
 end
 
-----------------------------------------------------------------------
--- Lazy expansion
-----------------------------------------------------------------------
-
---- Expand a truncated directory: scan its children, insert them into
---- the buffer after the directory line, and rebuild folds.
---- Idempotent — if the entry is already expanded, this is a no-op.
----@param buf   number
----@param entry table  the lazy directory entry
----@return number  how many entries were gained (0 when already expanded)
-function M.expand_dir(buf, entry)
-	local st = state.get(buf)
-	if not st or not entry or entry.type ~= "dir" or not entry.lazy then
-		return 0
-	end
-
-	-- Get one level of children.
-	local children = scan.scan_dir_children(entry.path, st.root)
-	if #children == 0 then
-		-- Empty dir — remove from truncated set so we don't try again.
-		st.truncated_dirs[entry.path] = nil
-		return 0
-	end
-
-	-- Remove from truncated set.
-	st.truncated_dirs[entry.path] = nil
-
-	-- Format children as buffer lines.
-	local child_indent = entry.indent + 1
-	local child_lines = {}
-	for _, child in ipairs(children) do
-		local suffix = child.type == "dir" and "/" or (child.type == "link" and "@" or "")
-		local name = child.name
-		if name:find("[\n\r\t]") then
-			name = name:gsub("[\n\r\t]", { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" })
-		end
-		child_lines[#child_lines + 1] = line_mod.indent_str(child_indent) .. name .. suffix
-		-- Mark children that are dirs as truncated (they're at least as deep as
-		-- the parent was, and we haven't loaded their children).
-		if child.type == "dir" then
-			st.truncated_dirs[child.path] = true
-		end
-	end
-
-	-- Find insertion point: after the directory entry, before the next
-	-- sibling at the same or lesser indent level.
-	local insert_at = entry.lnum
-	local total = vim.api.nvim_buf_line_count(buf)
-	while insert_at < total do
-		local next_line = (vim.api.nvim_buf_get_lines(buf, insert_at, insert_at + 1, false))[1]
-		local _, _, next_indent = read_line(next_line)
-		if next_indent and next_indent <= entry.indent then
-			break
-		end
-		insert_at = insert_at + 1
-	end
-
-	-- Insert lines (insert_at is 0-indexed for nvim_buf_set_lines).
-	buffer.without_undo(buf, function()
-		vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, child_lines)
-	end)
-
-	-- 'foldexpr' picks the new lines up on its own, and only over the range
-	-- that changed — every fold elsewhere in the buffer keeps its state.
-	-- All that is left is opening the directory we just expanded.
-	vim.cmd(string.format("silent! %dfoldopen", entry.lnum))
-	M.mark_open(st.root, entry.path, true)
-
-	return #child_lines
-end
-
---- Recursively expand a directory and every nested directory within it.
----@param buf   number
----@param entry table
-function M.expand_dir_recursive(buf, entry)
-	local st = state.get(buf)
-	if not st or not entry or entry.type ~= "dir" then
-		return
-	end
-
-	if not entry.lazy then
-		-- Already loaded — just open the folds below it.
-		vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-		vim.cmd("normal! zO")
-		mark_subtree_open(buf, entry)
-		return
-	end
-
-	-- Expand level by level.  scan_dir_children is fast (one fs_scandir),
-	-- and we insert after the parent line.
-	local pending = { { parent_lnum = entry.lnum, parent_indent = entry.indent, dir = entry.path } }
-	local total_inserted = 0
-	local max_entries = config.max_expand_entries
-
-	while #pending > 0 and total_inserted < max_entries do
-		local item = table.remove(pending)
-		st.truncated_dirs[item.dir] = nil
-
-		local children = scan.scan_dir_children(item.dir, st.root)
-		if #children > 0 then
-			local child_indent = item.parent_indent + 1
-			local child_lines = {}
-			for _, child in ipairs(children) do
-				local suffix = child.type == "dir" and "/" or (child.type == "link" and "@" or "")
-				local name = child.name
-				if name:find("[\n\r\t]") then
-					name = name:gsub("[\n\r\t]", { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" })
-				end
-				child_lines[#child_lines + 1] = line_mod.indent_str(child_indent) .. name .. suffix
-				total_inserted = total_inserted + 1
-				if child.type == "dir" then
-					pending[#pending + 1] = {
-						parent_lnum = item.parent_lnum + #child_lines,
-						parent_indent = child_indent,
-						dir = child.path,
-					}
-				end
-				if total_inserted >= max_entries then
-					break
-				end
-			end
-
-			-- Find insertion point.
-			local insert_at = item.parent_lnum
-			local total = vim.api.nvim_buf_line_count(buf)
-			while insert_at < total do
-				local next_line = (vim.api.nvim_buf_get_lines(buf, insert_at, insert_at + 1, false))[1]
-				local _, _, next_indent = read_line(next_line)
-				if next_indent and next_indent <= item.parent_indent then
-					break
-				end
-				insert_at = insert_at + 1
-			end
-
-			buffer.without_undo(buf, function()
-				vim.api.nvim_buf_set_lines(buf, insert_at, insert_at, false, child_lines)
-			end)
-		end
-	end
-
-	-- Folds follow the buffer text; open the whole subtree just loaded.
-	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-	vim.cmd("silent! normal! zO")
-	mark_subtree_open(buf, entry)
-
-	if total_inserted >= max_entries then
-		vim.notify(
-			string.format(
-				"filebuf: stopped after loading %d entries (max_expand_entries); expand deeper folders individually",
-				max_entries
-			),
-			vim.log.levels.WARN
-		)
-	end
-end
-
---- Expand every truncated directory currently on screen (one level each).
----@param buf number
-function M.expand_all_dirs(buf)
-	local st = state.get(buf)
-	if not st then
-		return
-	end
-
-	-- Collect truncated dir entries by scanning the buffer.
-	local to_expand = {}
-	state.walk(buf, st.root, function(lnum, path, type_, indent)
-		if type_ == "dir" and st.truncated_dirs[path] then
-			to_expand[#to_expand + 1] = { lnum = lnum, path = path, type = type_, indent = indent, lazy = true }
-		end
-	end)
-
-	for _, e in ipairs(to_expand) do
-		M.expand_dir(buf, e)
-	end
-end
 
 ----------------------------------------------------------------------
 -- Reveal (load the ancestor chain of a path)
 ----------------------------------------------------------------------
-
---- Mark every ancestor directory of `path` as needing expansion.
----@return boolean changed
-local function mark_ancestors(st, path)
-	if not vim.startswith(path, st.root .. "/") then
-		return false
-	end
-	local rel = path:sub(#st.root + 2)
-	local prefix = st.root
-	local changed = false
-	for component in rel:gmatch("([^/]+)/") do
-		prefix = prefix .. "/" .. component
-		if st.truncated_dirs[prefix] then
-			st.truncated_dirs[prefix] = nil
-			changed = true
-		end
-	end
-	return changed
-end
 
 --- Open the folds of every ancestor directory of `path`.
 local function open_ancestor_folds(buf, st, path)
@@ -646,19 +451,6 @@ function M.reveal_paths(buf, paths)
 	if not st then
 		prof.stop()
 		return {}
-	end
-
-	-- Expand truncated ancestors.
-	local changed = false
-	for _, path in ipairs(paths) do
-		if mark_ancestors(st, path) then
-			changed = true
-		end
-	end
-
-	-- When ancestors were expanded we need to re-render.
-	if changed then
-		render().tree(buf, { keep_view = true })
 	end
 
 	-- Find each target and open ancestor folds.
@@ -719,18 +511,12 @@ local function sync_fold_at(buf, entry)
 	end
 end
 
---- Open a fold at `entry`.  If the entry is a truncated unexpanded
---- directory, expand it first (which also opens the fold).
+--- Open a fold at `entry`.
 ---@param buf   number
 ---@param entry table
 function M.fold_open(buf, entry)
 	entry = resolve_dir_entry(buf, entry)
 	if not entry then
-		return
-	end
-
-	if entry.lazy then
-		M.expand_dir(buf, entry)
 		return
 	end
 
@@ -753,17 +539,12 @@ function M.fold_close(buf, entry)
 	sync_fold_at(buf, entry)
 end
 
---- Toggle a fold at `entry`.  Expands truncated dirs before toggling.
+--- Toggle a fold at `entry`.
 ---@param buf   number
 ---@param entry table
 function M.fold_toggle(buf, entry)
 	entry = resolve_dir_entry(buf, entry)
 	if not entry then
-		return
-	end
-
-	if entry.lazy then
-		M.expand_dir(buf, entry)
 		return
 	end
 
@@ -773,8 +554,7 @@ function M.fold_toggle(buf, entry)
 	sync_fold_at(buf, entry)
 end
 
---- Recursively open folds at `entry` (zO).  Expands truncated dirs
---- recursively first.
+--- Recursively open folds at `entry` (zO).
 ---@param buf   number
 ---@param entry table
 function M.fold_open_recursive(buf, entry)
@@ -782,13 +562,14 @@ function M.fold_open_recursive(buf, entry)
 	if not entry then
 		return
 	end
-	M.expand_dir_recursive(buf, entry)
+	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
+	vim.cmd("normal! zO")
+	mark_subtree_open(buf, entry)
 end
 
---- Open all folds (zR).  Expands all truncated dirs first.
+--- Open all folds (zR).
 ---@param buf number
 function M.fold_open_all(buf)
-	M.expand_all_dirs(buf)
 	vim.cmd("normal! zR")
 	mark_subtree_open(buf, nil)
 end
