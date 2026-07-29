@@ -44,6 +44,10 @@ local config = {
 	--- least this many entries.  Set to false (or 0) to never ask.
 	expand_confirm_threshold = 1000,
 
+	--- Maximum directory depth to load on initial scan.  Directories at this
+	--- depth are listed but their children load on demand when expanded.
+	max_depth = 20,
+
 	--- When true (default), filebuf disables netrw and intercepts directory
 	--- opens so `nvim <dir>` and `:e <dir>` open filebuf instead of netrw.
 	--- Set to false if you need netrw for remote file editing (scp://, etc.).

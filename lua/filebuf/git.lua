@@ -166,4 +166,60 @@ function M.dir_status(entry, status_map)
 	return s.aggregated
 end
 
+----------------------------------------------------------------------
+-- Ignore-set cache — git ls-files instead of Lua pattern matching.
+----------------------------------------------------------------------
+
+--- Run `git ls-files --others --ignored --exclude-standard --directory`
+--- and return a hash set of absolute paths that are gitignored.
+--- Cached per root for the lifetime of the scan; cleared on re-render.
+---@param root string
+---@return table  set of absolute paths → true
+local _ignore_cache = {}
+
+--- Drop the cached ignore set for `root`, or all roots when root is nil.
+--- Call before a fresh scan so edits to .gitignore take effect.
+function M.clear_ignore_cache(root)
+	if root then
+		_ignore_cache[root] = nil
+	else
+		_ignore_cache = {}
+	end
+end
+
+function M.build_ignore_set(root)
+	if _ignore_cache[root] then
+		return _ignore_cache[root]
+	end
+	local cmd = {
+		"git",
+		"-C",
+		root,
+		"ls-files",
+		"--others",
+		"--ignored",
+		"--exclude-standard",
+		"--directory",
+	}
+	local output = vim.fn.system(cmd)
+	if vim.v.shell_error ~= 0 then
+		_ignore_cache[root] = {}
+		return _ignore_cache[root]
+	end
+	local set = {}
+	for line in output:gmatch("[^\r\n]+") do
+		local path = line
+		-- Directories from --directory end with "/"; strip it so both files and
+		-- dirs map to a clean absolute path.
+		if path:sub(-1) == "/" then
+			path = path:sub(1, -2)
+		end
+		if path ~= "" then
+			set[root .. "/" .. path] = true
+		end
+	end
+	_ignore_cache[root] = set
+	return set
+end
+
 return M

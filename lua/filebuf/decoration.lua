@@ -1,13 +1,10 @@
 ----------------------------------------------------------------------
--- Decoration provider.  Registered once in setup(); Neovim calls on_win on
--- every redraw, so git/dir/hidden/link extmarks are always current without
--- manual clear/refresh.
+-- Decoration provider.  Registered once in setup(); Neovim calls on_win
+-- on every redraw, so git/dir/hidden/link extmarks are always current
+-- without manual clear/refresh.
 --
--- Work is O(visible viewport) unconditionally.  It used to re-parse the entire
--- buffer on every redraw while the buffer was modified — ~130ms per redraw on a
--- 100k-entry tree, i.e. visible lag on every keystroke.  Now each visible line
--- resolves through state.entry(), which is an array read while the index is
--- current and a short backward walk past the last edit.
+-- Work is O(visible viewport): each visible line resolves its path by
+-- walking up the buffer (typically < 20 lines per lookup for indent).
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
@@ -40,8 +37,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 		prof.stop()
 		return false
 	end
-	-- During a render, buffer content and folds are both mid-flight.  Skip all
-	-- extmark work — the redraw after st.rendering clears paints everything.
+	-- During a render, buffer content and folds are both mid-flight.
 	if st.rendering then
 		prof.stop()
 		return false
@@ -52,17 +48,21 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 	local iw = line_mod.indent_width()
 	local status_map = config.git_status and st.git or nil
 	local matches = st.matches
+	local ignore_set = st.ignore_set
 
 	local lnum = toprow + 1 -- toprow is 0-indexed; lines are 1-indexed
 	local count = 0
 	while lnum <= botrow + 1 and count <= height + 2 do
-		local entry = state.entry(bufnr, lnum)
+		local entry = state.resolve_entry(bufnr, lnum)
 		if entry then
 			local name_start = use_tabs and entry.indent or (entry.indent * iw)
-			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0 -- "/" or "@"
+			local suffix = (entry.type == "dir" or entry.type == "link") and 1 or 0
 			local name_end = name_start + #entry.name + suffix
 
-			if entry.type == "dir" and not entry.is_hidden and not entry.is_ignored then
+			-- Check if ignored via gitignore set.
+			local is_ignored = ignore_set and ignore_set[entry.path]
+
+			if entry.type == "dir" and not entry.is_hidden and not is_ignored then
 				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
 					end_col = name_end,
 					hl_group = "Directory",
@@ -78,7 +78,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 				})
 			end
 
-			if entry.is_hidden or entry.is_ignored then
+			if entry.is_hidden or is_ignored then
 				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
 					end_col = name_end,
 					hl_group = entry.type == "dir" and "FilebufHiddenDir" or "FilebufHiddenFile",

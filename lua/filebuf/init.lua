@@ -1,16 +1,11 @@
 ----------------------------------------------------------------------
--- filebuf — edit the filesystem as an editable buffer.
+-- filebuf - edit the filesystem as an editable buffer.
 --
--- The tree is rendered into one buffer with indent-based folding; edits are
--- diffed against disk and applied on :w.  The buffer text is the source of
--- truth: it holds names, types and structure, and filebuf.state indexes only
--- the one thing a line cannot carry — its absolute path.
+-- The buffer text is the source of truth: it holds names, types and
+-- structure.  There is no in-memory index - the absolute path of any
+-- line is derived on demand by walking up the buffer.
 --
--- This file wires the modules together and exposes the public API; the heavy
--- lifting lives in:
---   state (per-buffer index) / render (the only writer of buffer text)
---   scan / buffer / sync / git / decoration
---   actions (public fold & lazy-expand API)
+-- This file wires the modules together and exposes the public API.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
@@ -20,14 +15,13 @@ local decoration = require("filebuf.decoration")
 local actions = require("filebuf.actions")
 local search = require("filebuf.search")
 local find = require("filebuf.find")
+local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local render = require("filebuf.render")
 
 local M = {}
 
 --- Set winbar on every window that displays `buf`.
---- vim.wo.winbar is window-local; when multiple windows show the same
---- filebuf buffer, we must update each one so the mode line stays in sync.
 ---@param buf number
 ---@param text string
 local function set_winbar(buf, text)
@@ -40,13 +34,10 @@ end
 M.config = config
 
 --- Public fold / lazy-expand / entry-open API.
---- Callable from user keymaps, autocommands, or scripts.
----@see filebuf.actions
 M.actions = actions
 
---- Per-buffer state accessor (root, index, expanded set).  Exposed for tests
+--- Per-buffer state accessor (root, expanded set).  Exposed for tests
 --- and for user scripts that need to resolve a line to an entry.
----@see filebuf.state
 M.state = state
 
 --- Enable/disable the profiler; report to :messages.
@@ -63,12 +54,9 @@ end
 
 local SORT_METHODS = { "type", "name", "modified", "created" }
 
---- Toggle show_hidden and re-render, preserving the cursor entry and fold state.
----
---- Unsaved edits survive: they are diffed against the disk state for the *old*
---- filter, then replayed onto the freshly scanned tree for the new one — the
---- same shape as rebasing a patch.  Sampling disk on both sides is what removed
---- the need for a long-lived clean snapshot to diff against later.
+--- Toggle show_hidden and re-render.  Because the buffer IS the data
+--- store there is no edit-replay path; a fresh scan replaces the buffer
+--- content.  Unsaved edits must be saved or discarded first.
 ---@param buf number
 local function toggle_hidden(buf)
 	prof.start("toggle_hidden")
@@ -78,38 +66,19 @@ local function toggle_hidden(buf)
 		return
 	end
 
-	local cursor_entry = state.entry_at_cursor(buf)
-	local cursor_path = cursor_entry and cursor_entry.path
-
-	local ops
 	if vim.bo[buf].modified then
-		local buf_entries = state.entries(buf)
-		ops = sync.compute_diff(buf_entries, render.scan(buf))
-
-		if #ops.errors > 0 then
-			sync.report_errors(buf, ops.errors)
-			vim.notify("filebuf: fix errors before toggling hidden files", vim.log.levels.WARN)
-			prof.stop()
-			return
-		end
-		-- Clear stale diagnostics from a previously failed save.
-		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
+		vim.notify("filebuf: buffer modified - save or discard edits before toggling hidden files", vim.log.levels.WARN)
+		prof.stop()
+		return
 	end
 
+	local cursor_entry = state.entry_at_cursor(buf)
+	local cursor_path = cursor_entry and cursor_entry.path
 	local open_dirs = state.open_dirs(buf)
 	config.show_hidden = not config.show_hidden
 
-	if ops then
-		-- Replay the edits onto the newly visible tree, then render the result.
-		local entries = render.scan(buf)
-		sync.apply_ops_to_entries(entries, ops)
-		render.entries(buf, entries, open_dirs)
-		vim.bo[buf].modified = true
-	else
-		render.tree(buf, { open_dirs = open_dirs })
-	end
+	render.tree(buf, { open_dirs = open_dirs })
 
-	-- Restore the cursor to the same entry (accounts for shifted line numbers).
 	if cursor_path then
 		local lnum = state.lnum_of(buf, cursor_path)
 		if lnum then
@@ -126,7 +95,6 @@ end
 local function setup_keymaps(buf)
 	local km = config.keymaps
 
-	-- Uniform entry-action keymaps: resolve cursor entry, call an actions function.
 	local ENTRY_KEYMAPS = {
 		fold_open = { actions.fold_open, "filebuf: open fold" },
 		fold_close = { actions.fold_close, "filebuf: close fold" },
@@ -150,7 +118,6 @@ local function setup_keymaps(buf)
 		end
 	end
 
-	-- Buffer-wide action keymaps (no entry resolution needed).
 	local BUF_KEYMAPS = {
 		fold_open_all = { actions.fold_open_all, "filebuf: open all folds" },
 		fold_close_all = { actions.fold_close_all, "filebuf: close all folds" },
@@ -164,14 +131,12 @@ local function setup_keymaps(buf)
 		end
 	end
 
-	-- toggle_hidden (custom — toggles config.show_hidden)
 	if km.toggle_hidden then
 		vim.keymap.set("n", km.toggle_hidden, function()
 			toggle_hidden(buf)
 		end, { buffer = buf, desc = "filebuf: toggle hidden files" })
 	end
 
-	-- close_filebuf (custom — persists folds before deleting buffer)
 	if km.close_filebuf then
 		vim.keymap.set("n", km.close_filebuf, function()
 			actions.save_fold_state(buf, state.root(buf))
@@ -179,7 +144,6 @@ local function setup_keymaps(buf)
 		end, { buffer = buf, desc = "filebuf: close" })
 	end
 
-	-- find_mode (custom — enter async find mode)
 	if km.find_mode then
 		vim.keymap.set("n", km.find_mode, function()
 			find.enter(buf)
@@ -188,21 +152,18 @@ local function setup_keymaps(buf)
 end
 
 --- Build a confirmation message from diff ops and ask the user to confirm.
---- Returns true if the user confirms, false if they cancel.
----@param ops table  result of sync.compute_diff()
----@param root string  filebuf root directory (for relative paths)
+---@param ops  table
+---@param root string
 ---@return boolean
 local function confirm_save(ops, root)
 	local lines = { "Apply the following changes to the filesystem?" }
 
-	-- Format a path relative to the filebuf root.
 	local function rel(p)
-		return p:sub(#root + 2) -- strip root .. "/"
+		return p:sub(#root + 2)
 	end
 
-	local MAX_SHOWN = 20 -- cap per category to keep the dialog readable
+	local MAX_SHOWN = 20
 
-	-- Creates
 	if #ops.created > 0 then
 		lines[#lines + 1] = ""
 		lines[#lines + 1] = string.format("Create (%d):", #ops.created)
@@ -215,7 +176,6 @@ local function confirm_save(ops, root)
 		end
 	end
 
-	-- Deletes
 	if #ops.deleted > 0 then
 		lines[#lines + 1] = ""
 		lines[#lines + 1] = string.format("Delete (%d):", #ops.deleted)
@@ -228,13 +188,12 @@ local function confirm_save(ops, root)
 		end
 	end
 
-	-- Renames
 	if #ops.renamed > 0 then
 		lines[#lines + 1] = ""
 		lines[#lines + 1] = string.format("Rename (%d):", #ops.renamed)
 		for i = 1, math.min(#ops.renamed, MAX_SHOWN) do
 			local r = ops.renamed[i]
-			lines[#lines + 1] = "  ~ " .. rel(r.old.path) .. " → " .. rel(r.new.path)
+			lines[#lines + 1] = "  ~ " .. rel(r.old.path) .. " -> " .. rel(r.new.path)
 		end
 		if #ops.renamed > MAX_SHOWN then
 			lines[#lines + 1] = string.format("  ... and %d more", #ops.renamed - MAX_SHOWN)
@@ -247,10 +206,6 @@ local function confirm_save(ops, root)
 end
 
 --- True when the buffer text still matches the last render exactly.
----
---- A clean :w is the common case, and comparing the parsed buffer positionally
---- against the disk scan settles it in a couple of milliseconds instead of
---- running the full rename-matching diff.
 ---@param buf_entries  table[]
 ---@param disk_entries table[]
 ---@return boolean
@@ -281,14 +236,17 @@ local function save_buffer(buf)
 	local ok, result = pcall(function()
 		local buf_entries = buffer.parse_buffer(buf, dir)
 
-		-- In find mode the diff is scoped to the query results, so entries that
-		-- simply didn't match aren't mistaken for deletions.  Otherwise the
-		-- baseline is disk as it is right now, for exactly the scope on screen.
-		local disk_entries = find.query_entries(buf) or render.scan(buf)
+		-- In find mode the diff is scoped to the query results.
+		local disk_entries = find.query_entries(buf) or scan.scan_disk_entries(st.root)
 
-		if identical(buf_entries, disk_entries) then
+		if disk_entries and identical(buf_entries, disk_entries) then
 			pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 			vim.bo[buf].modified = false
+			return
+		end
+
+		if not disk_entries then
+			vim.notify("filebuf: cannot read disk state - is find(1) available?", vim.log.levels.ERROR)
 			return
 		end
 
@@ -298,10 +256,8 @@ local function save_buffer(buf)
 			sync.report_errors(buf, ops.errors)
 			error("filebuf: validation failed")
 		end
-		-- Clear any stale diagnostics on successful validation (safe-wrapped).
 		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 
-		-- Save confirmation (when enabled and there are actual changes).
 		local has_changes = #ops.renamed > 0 or #ops.created > 0 or #ops.deleted > 0
 		if config.save_confirmation and has_changes then
 			if not confirm_save(ops, dir) then
@@ -312,9 +268,8 @@ local function save_buffer(buf)
 
 		prof.start("save.apply_ops")
 		sync.apply_ops(ops)
-		prof.stop() -- save.apply_ops
+		prof.stop()
 
-		-- A save in find mode commits the edits, so drop back to the full tree.
 		if st.mode == "find" then
 			find.exit(buf)
 		end
@@ -325,11 +280,7 @@ local function save_buffer(buf)
 	end)
 
 	if not ok and not tostring(result):match("validation failed") then
-		-- Unexpected error: extract a clean one-line message from the
-		-- traceback so the user isn't faced with a wall of paths.
 		local msg = tostring(result)
-		-- Take the last meaningful line (the actual error), skipping
-		-- stack-trace lines that start with a tab or "./".
 		for line in msg:gmatch("[^\n]+") do
 			local trimmed = line:match("^%s*(.*)%s*$")
 			if not trimmed:match("^[\t%.]") and not trimmed:match("^%[C]") then
@@ -337,12 +288,12 @@ local function save_buffer(buf)
 			end
 		end
 		vim.notify(
-			string.format("filebuf: save error — %s\nNothing was saved; your files are unchanged.", msg),
+			string.format("filebuf: save error - %s\nNothing was saved; your files are unchanged.", msg),
 			vim.log.levels.ERROR
 		)
 	end
 
-	prof.stop() -- save_filebuf
+	prof.stop()
 end
 
 ----------------------------------------------------------------------
@@ -350,21 +301,11 @@ end
 ----------------------------------------------------------------------
 
 --- Open the filebuf browser rooted at `dir` (default: cwd).
----
---- With config.eager_load the whole tree is scanned up front (capped by
---- eager_max_entries) so every entry is a real buffer line and Vim's `/` can
---- find it; directories still start folded, so the view is the same.  With
---- eager_load off, only the root's children are loaded and each directory's
---- children appear when it is expanded or when a search reveals a path.
----
---- Edits apply to disk only on :w; type mismatches block the save.
 ---@param dir string|nil
 function M.open(dir)
 	prof.start("open_filebuf")
-	dir = (dir or vim.fn.getcwd()):gsub("/$", "") -- normalize trailing slash
+	dir = (dir or vim.fn.getcwd()):gsub("/$", "")
 
-	-- If a filebuf already exists and is a real filebuf (not a hollow
-	-- session-restored shell), switch to it and re-render at the new root.
 	local existing_buf = vim.fn.bufnr("Filebuf")
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if state.is_filebuf(existing_buf) then
@@ -381,15 +322,13 @@ function M.open(dir)
 			prof.stop()
 			return
 		end
-		-- Stale session-restored buffer: wipe so we create a fresh one below.
 		pcall(vim.api.nvim_buf_delete, existing_buf, { force = true })
 	end
 
-	-- Capture the file being edited so we can auto-focus it once the tree exists.
 	local current_file = vim.api.nvim_buf_get_name(0)
 
 	local buf = vim.api.nvim_create_buf(true, true)
-	vim.api.nvim_buf_set_name(buf, "Filebuf") -- so :w triggers BufWriteCmd
+	vim.api.nvim_buf_set_name(buf, "Filebuf")
 	vim.bo[buf].filetype = "filebuf"
 	vim.bo[buf].bufhidden = "wipe"
 	vim.bo[buf].buftype = "acwrite"
@@ -401,10 +340,6 @@ function M.open(dir)
 
 	setup_keymaps(buf)
 
-	-- Manual folding: each directory + descendants form a fold, closed
-	-- initially.  Window options go first so the render's fold work sees them.
-	-- Unexpanded directories have no children on screen and therefore no fold —
-	-- the trailing "/" is their only cue.
 	vim.api.nvim_set_current_buf(buf)
 	vim.wo.foldmethod = "manual"
 	vim.wo.foldenable = true
@@ -412,15 +347,12 @@ function M.open(dir)
 	vim.wo.foldtext = "v:lua.FilebufFoldText()"
 	vim.wo.winhighlight = "Folded:FilebufFoldLine"
 	vim.opt_local.fillchars:append({
-		foldopen = "▼",
-		foldclose = "▶",
+		foldopen = "\226\150\188",
+		foldclose = "\226\150\182",
 		fold = " ",
 	})
 	set_winbar(buf, "Normal")
 
-	-- Restore saved fold state.  What was persisted is the *closed* set, so any
-	-- directory the user hadn't closed reopens and anything newly revealed
-	-- defaults to closed.
 	local closed = actions.closed[dir]
 	render.tree(buf, {
 		open_dirs = closed and function(path)
@@ -428,9 +360,6 @@ function M.open(dir)
 		end or nil,
 	})
 
-	-- Auto-focus the file that was being edited before :Filebuf.  When lazy,
-	-- its ancestors aren't loaded yet, so reveal_path expands the chain down to
-	-- it (opening folds on the way) before we place the cursor.
 	if config.auto_focus_current_file and current_file ~= "" and vim.startswith(current_file, dir .. "/") then
 		local target = actions.reveal_path(buf, vim.fn.resolve(current_file)) or actions.reveal_path(buf, current_file)
 		if target then
@@ -448,7 +377,6 @@ function M.open(dir)
 		end,
 	})
 
-	-- Drop find-mode session and per-buffer state when the buffer goes away.
 	vim.api.nvim_create_autocmd({ "BufDelete", "BufUnload" }, {
 		group = group,
 		buffer = buf,
@@ -472,23 +400,20 @@ function M.setup(opts)
 	opts = opts or {}
 	local merged = vim.tbl_deep_extend("force", config, opts)
 	for k, v in pairs(merged) do
-		config[k] = v -- mutate in place so all modules see the update
+		config[k] = v
 	end
 
 	config.define_highlights()
 
-	-- Hijack netrw so directory opens use filebuf instead.
 	if config.hijack_netrw then
 		require("filebuf.hijack").setup()
 	end
 
-	-- Register the decoration provider once; it refreshes extmarks on redraw.
 	vim.api.nvim_set_decoration_provider(decoration.ns, {
 		on_start = decoration.on_start,
 		on_win = decoration.on_win,
 	})
 
-	--- Resolve the current buffer as a filebuf, or warn and return nil.
 	local function current_filebuf()
 		local buf = vim.api.nvim_get_current_buf()
 		if state.is_filebuf(buf) then
@@ -517,7 +442,52 @@ function M.setup(opts)
 		local method = args.args and args.args:match("^%s*(%S+)%s*$")
 		if method and vim.tbl_contains(SORT_METHODS, method) then
 			config.sort_method = method
-			render.tree(buf, { keep_view = true })
+			-- Sort by re-parsing the buffer and rewriting in sorted order.
+			-- With buffer-as-data there is no in-memory tree to sort in place.
+			local st = state.get(buf)
+			if st then
+				local entries = buffer.parse_buffer(buf, st.root)
+				local open_dirs = state.open_dirs(buf)
+				-- Sort within each parent group (group by indent ancestry).
+				local sorted = {}
+				local i = 1
+				while i <= #entries do
+					local parent_indent = entries[i].indent - 1
+					-- Collect siblings: entries at same level under same parent.
+					local group = {}
+					while i <= #entries and entries[i].indent > parent_indent do
+						if entries[i].indent == parent_indent + 1 then
+							group[#group + 1] = entries[i]
+						end
+						i = i + 1
+					end
+					-- Sort the sibling group.
+					if #group > 1 and method == "name" then
+						table.sort(group, function(a, b)
+							return a.name:lower() < b.name:lower()
+						end)
+					elseif #group > 1 and method == "type" then
+						local PRIO = { dir = 1, link = 2, file = 3 }
+						table.sort(group, function(a, b)
+							local pa = PRIO[a.type] or 5
+							local pb = PRIO[b.type] or 5
+							if pa ~= pb then
+								return pa < pb
+							end
+							return a.name:lower() < b.name:lower()
+						end)
+					end
+					-- Rebuild with sorted group plus their descendants.
+					-- This is a simplified sort that only reorders top-level
+					-- siblings; full hierarchical sort would need recursion.
+					for _, e in ipairs(group) do
+						sorted[#sorted + 1] = e
+					end
+				end
+				if #sorted > 0 then
+					render.entries(buf, sorted, open_dirs)
+				end
+			end
 			vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
 		else
 			vim.notify(
