@@ -54,6 +54,72 @@ end
 
 local SORT_METHODS = { "type", "name", "modified", "created" }
 
+--- Recursively sort entries within each parent group.
+--- Entries is a flat depth-first list; siblings at the same indent
+--- level are sorted while preserving parent-child relationships.
+---@param entries table[]
+---@param cmp     fun(a: table, b: table): boolean
+---@return table[]
+local function hierarchical_sort(entries, cmp)
+	---@param start_idx number
+	---@param end_idx   number
+	---@return table[]
+	local function sort_range(start_idx, end_idx)
+		if start_idx > end_idx then
+			return {}
+		end
+
+		local base_indent = entries[start_idx].indent
+		local result = {}
+		local j = start_idx
+
+		-- Collect siblings at base_indent within this range.
+		local siblings = {}
+		while j <= end_idx do
+			if entries[j].indent == base_indent then
+				siblings[#siblings + 1] = { idx = j, entry = entries[j] }
+				j = j + 1
+			elseif entries[j].indent > base_indent then
+				j = j + 1 -- descendant of previous sibling, handled by recursion
+			else
+				break -- indent < base_indent: back to parent scope
+			end
+		end
+
+		-- Compute each sibling's descendant range.
+		for k = 1, #siblings do
+			local sib = siblings[k]
+			local next_start = (k < #siblings) and siblings[k + 1].idx or j
+			sib.desc_end = next_start - 1
+		end
+
+		-- Sort siblings.
+		if #siblings > 1 then
+			table.sort(siblings, function(a, b)
+				return cmp(a.entry, b.entry)
+			end)
+		end
+
+		-- Output each sibling followed by its recursively sorted descendants.
+		for _, sib in ipairs(siblings) do
+			result[#result + 1] = sib.entry
+			if sib.entry.type == "dir" and sib.idx + 1 <= sib.desc_end then
+				local children = sort_range(sib.idx + 1, sib.desc_end)
+				for _, child in ipairs(children) do
+					result[#result + 1] = child
+				end
+			end
+		end
+
+		return result
+	end
+
+	if #entries == 0 then
+		return {}
+	end
+	return sort_range(1, #entries)
+end
+
 --- Toggle show_hidden and re-render.  Because the buffer IS the data
 --- store there is no edit-replay path; a fresh scan replaces the buffer
 --- content.  Unsaved edits must be saved or discarded first.
@@ -442,50 +508,34 @@ function M.setup(opts)
 		local method = args.args and args.args:match("^%s*(%S+)%s*$")
 		if method and vim.tbl_contains(SORT_METHODS, method) then
 			config.sort_method = method
-			-- Sort by re-parsing the buffer and rewriting in sorted order.
-			-- With buffer-as-data there is no in-memory tree to sort in place.
 			local st = state.get(buf)
 			if st then
 				local entries = buffer.parse_buffer(buf, st.root)
 				local open_dirs = state.open_dirs(buf)
-				-- Sort within each parent group (group by indent ancestry).
-				local sorted = {}
-				local i = 1
-				while i <= #entries do
-					local parent_indent = entries[i].indent - 1
-					-- Collect siblings: entries at same level under same parent.
-					local group = {}
-					while i <= #entries and entries[i].indent > parent_indent do
-						if entries[i].indent == parent_indent + 1 then
-							group[#group + 1] = entries[i]
+
+				-- Build comparator for the chosen method.
+				local cmp = nil
+				if method == "name" then
+					cmp = function(a, b)
+						return a.name:lower() < b.name:lower()
+					end
+				elseif method == "type" then
+					local PRIO = { dir = 1, link = 2, file = 3 }
+					cmp = function(a, b)
+						local pa = PRIO[a.type] or 5
+						local pb = PRIO[b.type] or 5
+						if pa ~= pb then
+							return pa < pb
 						end
-						i = i + 1
-					end
-					-- Sort the sibling group.
-					if #group > 1 and method == "name" then
-						table.sort(group, function(a, b)
-							return a.name:lower() < b.name:lower()
-						end)
-					elseif #group > 1 and method == "type" then
-						local PRIO = { dir = 1, link = 2, file = 3 }
-						table.sort(group, function(a, b)
-							local pa = PRIO[a.type] or 5
-							local pb = PRIO[b.type] or 5
-							if pa ~= pb then
-								return pa < pb
-							end
-							return a.name:lower() < b.name:lower()
-						end)
-					end
-					-- Rebuild with sorted group plus their descendants.
-					-- This is a simplified sort that only reorders top-level
-					-- siblings; full hierarchical sort would need recursion.
-					for _, e in ipairs(group) do
-						sorted[#sorted + 1] = e
+						return a.name:lower() < b.name:lower()
 					end
 				end
-				if #sorted > 0 then
-					render.entries(buf, sorted, open_dirs)
+
+				if cmp then
+					local sorted = hierarchical_sort(entries, cmp)
+					if #sorted > 0 then
+						render.entries(buf, sorted, open_dirs)
+					end
 				end
 			end
 			vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
