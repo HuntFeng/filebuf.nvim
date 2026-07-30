@@ -88,14 +88,18 @@ local SORT_METHODS = sort.METHODS
 ---@param buf number
 local function toggle_hidden(buf)
 	prof.start("toggle_hidden")
+
+	prof.start("toggle_hidden.guard")
 	local st = state.get(buf)
 	if not st then
+		prof.stop()
 		prof.stop()
 		return
 	end
 
 	if vim.bo[buf].modified then
 		vim.notify("filebuf: buffer modified - save or discard edits before toggling hidden files", vim.log.levels.WARN)
+		prof.stop()
 		prof.stop()
 		return
 	end
@@ -104,21 +108,34 @@ local function toggle_hidden(buf)
 	local cursor_path = cursor_entry and cursor_entry.path
 	local want = not st.show_hidden
 	state.set_show_hidden(st.root, want)
+	prof.stop() -- toggle_hidden.guard
 
 	-- Folds carry over on their own: both paths default to the tracked open set.
-	if not render.reproject(buf, { show_hidden = want }) then
+	prof.start("toggle_hidden.reproject")
+	local reprojected = render.reproject(buf, { show_hidden = want })
+	prof.stop() -- toggle_hidden.reproject
+
+	if not reprojected then
+		prof.start("toggle_hidden.tree")
 		render.tree(buf, { show_hidden = want, keep_view = true })
+		prof.stop() -- toggle_hidden.tree
 	end
 
+	prof.start("toggle_hidden.cursor")
 	if cursor_path then
 		local lnum = state.lnum_of(buf, cursor_path)
 		if lnum then
 			pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
 		end
 	end
+	prof.stop() -- toggle_hidden.cursor
 
 	vim.notify("filebuf: hidden files " .. (st.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
-	prof.stop()
+
+	if prof.enabled then
+		prof.report()
+	end
+	prof.stop() -- toggle_hidden
 end
 
 --- Set up buffer-local keymaps from config.
