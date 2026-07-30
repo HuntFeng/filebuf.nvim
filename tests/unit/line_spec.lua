@@ -1,6 +1,6 @@
 ----------------------------------------------------------------------
 -- Unit tests for line.lua — entry ↔ buffer-text formatting.
--- Tests pure functions: format_line, parse_line, indent_level, indent_str.
+-- Tests pure functions: formatter, parse_line, indent_level, indent_str.
 ----------------------------------------------------------------------
 local line = require("filebuf.line")
 
@@ -12,56 +12,62 @@ describe("line.lua", function()
 	end)
 
 	------------------------------------------------------------------
-	-- format_line
+	-- formatter
 	------------------------------------------------------------------
-	describe("format_line", function()
+	describe("formatter", function()
+		local fmt
+
+		before_each(function()
+			fmt = line.formatter()
+		end)
+
 		it("formats a dir entry with trailing / and indent", function()
 			local entry = { name = "mydir", type = "dir", indent = 1 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			-- shiftwidth=2, indent=1 → 2 spaces, then "mydir/"
 			assert.equals("  mydir/", result)
 		end)
 
 		it("formats a file entry with no suffix", function()
 			local entry = { name = "myfile", type = "file", indent = 0 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			assert.equals("myfile", result)
 		end)
 
 		it("formats a link entry with trailing @", function()
 			local entry = { name = "mylink", type = "link", indent = 2 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			-- shiftwidth=2, indent=2 → 4 spaces, then "mylink@"
 			assert.equals("    mylink@", result)
 		end)
 
 		it("formats a root-level entry with no indent", function()
 			local entry = { name = "rootfile", type = "file", indent = 0 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			assert.equals("rootfile", result)
 		end)
 
 		it("formats a deeply-indented entry", function()
 			local entry = { name = "deep", type = "dir", indent = 3 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			assert.equals("      deep/", result) -- 6 spaces
 		end)
 
 		it("escapes newline in names as $'\\n'", function()
 			local entry = { name = "a\nb", type = "file", indent = 0 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			assert.equals("a$'\\n'b", result)
 		end)
 
 		it("escapes return in names as $'\\r'", function()
 			local entry = { name = "a\rb", type = "file", indent = 0 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			assert.equals("a$'\\r'b", result)
 		end)
 
 		it("escapes tab in names as $'\\t'", function()
 			local entry = { name = "a\tb", type = "file", indent = 0 }
-			local result = line.format_line(entry)
+			local result = fmt(entry)
 			assert.equals("a$'\\t'b", result)
 		end)
 	end)
@@ -124,27 +130,33 @@ describe("line.lua", function()
 	-- Round-trip
 	------------------------------------------------------------------
 	describe("round-trip", function()
-		it("parse_line(format_line(entry)) preserves name and type for dir", function()
+		local fmt
+
+		before_each(function()
+			fmt = line.formatter()
+		end)
+
+		it("parse_line(formatter(entry)) preserves name and type for dir", function()
 			local entry = { name = "testdir", type = "dir", indent = 1 }
-			local formatted = line.format_line(entry)
+			local formatted = fmt(entry)
 			local name, is_dir, is_link = line.parse_line(formatted)
 			assert.equals("testdir", name)
 			assert.is_true(is_dir)
 			assert.is_false(is_link)
 		end)
 
-		it("parse_line(format_line(entry)) preserves name and type for file", function()
+		it("parse_line(formatter(entry)) preserves name and type for file", function()
 			local entry = { name = "testfile", type = "file", indent = 2 }
-			local formatted = line.format_line(entry)
+			local formatted = fmt(entry)
 			local name, is_dir, is_link = line.parse_line(formatted)
 			assert.equals("testfile", name)
 			assert.is_false(is_dir)
 			assert.is_false(is_link)
 		end)
 
-		it("parse_line(format_line(entry)) preserves name and type for link", function()
+		it("parse_line(formatter(entry)) preserves name and type for link", function()
 			local entry = { name = "testlink", type = "link", indent = 0 }
-			local formatted = line.format_line(entry)
+			local formatted = fmt(entry)
 			local name, is_dir, is_link = line.parse_line(formatted)
 			assert.equals("testlink", name)
 			assert.is_false(is_dir)
@@ -153,7 +165,7 @@ describe("line.lua", function()
 
 		it("round-trips names with special characters", function()
 			local entry = { name = "file\nwith\ttabs\r", type = "file", indent = 0 }
-			local formatted = line.format_line(entry)
+			local formatted = fmt(entry)
 			local name, is_dir, is_link = line.parse_line(formatted)
 			assert.equals("file\nwith\ttabs\r", name)
 			assert.is_false(is_dir)

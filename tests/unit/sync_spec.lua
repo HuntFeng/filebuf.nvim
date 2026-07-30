@@ -144,7 +144,7 @@ describe("sync.lua", function()
 		end)
 
 		it("renames a childless directory in place rather than delete+create", function()
-			-- Every directory is lazy-loaded, so an unexpanded dir has no
+			-- Every directory is loaded, so an unexpanded dir has no
 			-- children in the buffer.  Delete+create would destroy the whole
 			-- unloaded subtree, so this must become a real rename.
 			local disk = { entry("olddir", "dir", "/root/olddir", 0, 1) }

@@ -18,14 +18,6 @@ describe("preview", function()
 			["subdir/nested.py"] = "def foo():\n    pass\n",
 		})
 		buf = helpers.open_filebuf(tmpdir)
-		-- Expand subdir so we can see nested files.
-		local actions = require("filebuf.actions")
-		local entries = helpers.display_entries(buf)
-		for _, e in ipairs(entries) do
-			if e.type == "dir" then
-				actions.expand_dir(buf, e)
-			end
-		end
 	end)
 
 	after_each(function()

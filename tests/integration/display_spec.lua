@@ -108,10 +108,8 @@ describe("hidden files", function()
 
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
-		-- Disable ignore-file support so fd/find sees all entries.
-		-- Hidden files (dotfiles) are still tagged is_hidden and filtered
+		-- Hidden files (dotfiles) are tagged is_hidden and filtered
 		-- by filter_visible when show_hidden=false.
-		require("filebuf.config").respect_ignore = false
 	end)
 
 	after_each(function()
@@ -242,17 +240,6 @@ describe("git status", function()
 		config.git_status = saved_git_status
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
-	end)
-
-	it("returns nil git status outside a git repo", function()
-		-- Use a non-git temp dir.
-		local non_git = helpers.create_temp_dir()
-		helpers.populate_dir(non_git, { ["f.txt"] = "" })
-		local git = require("filebuf.git")
-		local map = git.get_status_map(non_git)
-		-- get_status_map returns nil when not in a git repo.
-		assert.is_nil(map)
-		helpers.cleanup_dir(non_git)
 	end)
 
 	it("detects untracked files", function()

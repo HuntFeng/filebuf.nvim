@@ -39,7 +39,6 @@ describe("search", function()
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
 		config.show_hidden = false
-		config.respect_ignore = false
 		config.search_max_results = 500
 	end)
 
@@ -47,7 +46,6 @@ describe("search", function()
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
 		config.show_hidden = false
-		config.respect_ignore = false
 		config.search_max_results = 500
 	end)
 

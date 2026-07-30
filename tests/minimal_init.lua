@@ -31,6 +31,5 @@ require("filebuf").setup({
 	permanent_delete = true, -- files are actually deleted (no trash)
 	git_status = false, -- no git integration during tests
 	hijack_netrw = false, -- don't intercept directory opens during tests
-	respect_ignore = false, -- simplify scan behavior
 	auto_focus_current_file = false, -- no auto-focus during tests
 })

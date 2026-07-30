@@ -66,7 +66,7 @@ describe("rename", function()
 	end)
 
 	it("moves a file to a different parent by changing its indent", function()
-		-- Directories are lazy: load sourcedir so move_me.txt is a buffer line.
+		-- Verify sourcedir is in the buffer so move_me.txt is visible.
 		assert.is_true(helpers.expand(buf, tmpdir .. "/sourcedir"))
 		local lines = helpers.get_buffer_lines(buf)
 

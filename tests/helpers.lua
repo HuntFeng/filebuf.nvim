@@ -143,16 +143,14 @@ function M.count_scans(fn)
 	return n
 end
 
---- Expand one lazy directory by absolute path.  Every directory is
---- lazy-loaded, so a nested entry only becomes a buffer line once its parent
---- has been expanded.
+--- Verify that a directory entry exists in the buffer.  With eager
+--- loading all entries are already buffer lines, so no expansion is needed.
 ---@param buf  number
----@param path string  absolute path of the directory to expand
----@return boolean  true when the directory was found and expanded
+---@param path string  absolute path of the directory
+---@return boolean  true when the directory was found
 function M.expand(buf, path)
 	local entry = M.entry_for(buf, path)
 	if entry and entry.type == "dir" then
-		require("filebuf.actions").expand_dir(buf, entry)
 		return true
 	end
 	return false

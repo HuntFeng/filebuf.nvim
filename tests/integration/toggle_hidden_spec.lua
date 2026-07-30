@@ -14,14 +14,12 @@ describe("toggle hidden mid-edit", function()
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
 		require("filebuf.config").show_hidden = false
-		require("filebuf.config").respect_ignore = false
 	end)
 
 	after_each(function()
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
 		require("filebuf.config").show_hidden = false
-		require("filebuf.config").respect_ignore = false
 	end)
 
 	--- Invoke :FilebufToggleHidden — the user-facing command that mirrors

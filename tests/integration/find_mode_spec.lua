@@ -12,14 +12,12 @@ describe("find mode", function()
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
 		config.show_hidden = false
-		config.respect_ignore = false
 	end)
 
 	after_each(function()
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
 		config.show_hidden = false
-		config.respect_ignore = false
 	end)
 
 	it("enters find mode and sets the mode flag", function()

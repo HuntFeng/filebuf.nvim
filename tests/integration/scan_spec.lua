@@ -45,7 +45,6 @@ describe("scan", function()
 
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
-		config.respect_ignore = false
 		config.show_hidden = false
 		config.sort_method = "type"
 		git.clear_ignore_cache()
@@ -53,7 +52,6 @@ describe("scan", function()
 
 	after_each(function()
 		helpers.cleanup_dir(tmpdir)
-		config.respect_ignore = false
 		config.show_hidden = false
 		config.sort_method = "type"
 		git.clear_ignore_cache()
@@ -134,14 +132,13 @@ describe("scan", function()
 	-- gitignore
 	------------------------------------------------------------------
 
-	it("omits gitignored files when respect_ignore is on", function()
+	it("omits gitignored files", function()
 		helpers.git_init(tmpdir)
 		helpers.populate_dir(tmpdir, {
 			[".gitignore"] = "ignored.txt\n",
 			["ignored.txt"] = "",
 			["kept.txt"] = "",
 		})
-		config.respect_ignore = true
 		git.clear_ignore_cache()
 		assert.same({ "kept.txt" }, scan_dir(tmpdir, { show_hidden = false }))
 	end)
@@ -155,7 +152,6 @@ describe("scan", function()
 			["src"] = {},
 			["src/main.lua"] = "",
 		})
-		config.respect_ignore = true
 		git.clear_ignore_cache()
 		assert.same({ "src/", "  main.lua" }, scan_dir(tmpdir, { show_hidden = false }))
 	end)
@@ -168,16 +164,14 @@ describe("scan", function()
 			["sub/skipme.txt"] = "",
 			["sub/keep.txt"] = "",
 		})
-		config.respect_ignore = true
 		git.clear_ignore_cache()
 		assert.same({ "sub/", "  keep.txt" }, scan_dir(tmpdir, { show_hidden = false }))
 	end)
 
-	it("ignores nothing when respect_ignore is off", function()
+	it("returns all files in non-git directories regardless of .gitignore", function()
 		-- No git_init here on purpose: a real .git directory would show up under
 		-- show_hidden and has nothing to do with what this asserts.
 		helpers.populate_dir(tmpdir, { [".gitignore"] = "ignored.txt\n", ["ignored.txt"] = "" })
-		config.respect_ignore = false
 		git.clear_ignore_cache()
 		assert.same({ ".gitignore", "ignored.txt" }, scan_dir(tmpdir, { show_hidden = true }))
 	end)
@@ -185,7 +179,6 @@ describe("scan", function()
 	it("picks up a rewritten .gitignore once the cache is cleared", function()
 		helpers.git_init(tmpdir)
 		helpers.populate_dir(tmpdir, { [".gitignore"] = "a.txt\n", ["a.txt"] = "", ["b.txt"] = "" })
-		config.respect_ignore = true
 		git.clear_ignore_cache()
 		assert.same({ "b.txt" }, scan_dir(tmpdir, { show_hidden = false }))
 
@@ -205,7 +198,6 @@ describe("scan", function()
 			["vendor/lib.lua"] = "",
 			["main.lua"] = "",
 		})
-		config.respect_ignore = true
 		git.clear_ignore_cache()
 		local _, snap = scan_dir_snap(tmpdir, { show_hidden = false })
 		assert.is_true(snap.pruned)
@@ -219,7 +211,6 @@ describe("scan", function()
 			["vendor"] = {},
 			["vendor/lib.lua"] = "",
 		})
-		config.respect_ignore = true
 		git.clear_ignore_cache()
 		local _, snap = scan_dir_snap(tmpdir, { show_hidden = true })
 		assert.is_false(snap.pruned)
