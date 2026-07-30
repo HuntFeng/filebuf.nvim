@@ -607,6 +607,38 @@ function M.entry(snap, lnum)
 	}
 end
 
+--- Produce entry tables for all visible rows in display order.
+---
+--- An in-memory substitute for scan.scan_disk_entries during save: every
+--- entry the snapshot holds is already what find(1) returned on the last
+--- render, and snapshot.apply_ops keeps the cache current across saves.
+--- Avoiding a fresh find(1) per save is the single largest save optimisation.
+---@param snap table
+---@param show_hidden boolean
+---@return table[] entries  { name, path, type, indent, mtime, ctime }
+function M.to_entries(snap, show_hidden)
+	if not snap.view or snap.show_hidden ~= show_hidden then
+		M.project(snap, snap.sorted_by or require("filebuf.config").sort_method, show_hidden)
+	end
+	local view, indent, names = snap.view, snap.indent, snap.names
+	local mtime, ctime = snap.mtime, snap.ctime
+	local entries, n = {}, 0
+	for lnum = 1, #view do
+		local row = view[lnum]
+		local name = (names and names[row]) or snap.raw:sub(snap.off[row], snap.off[row] + snap.len[row] - 1)
+		n = n + 1
+		entries[n] = {
+			name = name,
+			path = M.path_of(snap, row, name),
+			type = M.type(snap, row),
+			indent = indent[row],
+			mtime = mtime and mtime[row],
+			ctime = ctime and ctime[row],
+		}
+	end
+	return entries
+end
+
 --- Resolve an absolute path to a row by descending the children index one
 --- segment at a time -- O(depth * siblings) with no path map anywhere.
 ---@param snap table

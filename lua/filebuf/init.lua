@@ -283,7 +283,12 @@ local function save_buffer(buf)
 		local buf_entries = buffer.parse_buffer(buf, dir)
 
 		-- In find mode the diff is scoped to the query results.
-		local disk_entries = find.query_entries(buf) or scan.scan_disk_entries(st.root)
+		-- Otherwise the snapshot (already in memory from the last render) is
+		-- the disk baseline.  A fresh find(1) is only the last-resort fallback
+		-- when there is no snapshot yet.
+		local disk_entries = find.query_entries(buf)
+			or (st.snap and snapshot.to_entries(st.snap, st.show_hidden))
+			or scan.scan_disk_entries(st.root)
 
 		prof.start("save_filebuf.identical")
 		if disk_entries and identical(buf_entries, disk_entries) then
