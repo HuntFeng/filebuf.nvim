@@ -267,7 +267,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 	st.deep_scan_job = nil
 
 	if not output then
-		pcall(vim.api.nvim_buf_set_option, buf, "modifiable", true)
+		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		vim.notify("filebuf: deep scan failed — showing partial tree", vim.log.levels.WARN)
 		return
@@ -275,14 +275,14 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Guard: a newer render has already replaced the shallow view.
 	if st.render_serial ~= capture_serial then
-		pcall(vim.api.nvim_buf_set_option, buf, "modifiable", true)
+		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		return
 	end
 
 	-- Guard: user edited the buffer during the deep scan.
 	if vim.bo[buf].modified then
-		pcall(vim.api.nvim_buf_set_option, buf, "modifiable", true)
+		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		vim.notify(
 			"filebuf: deep scan complete — buffer has unsaved edits, use :FilebufRefresh to load full tree",
@@ -293,7 +293,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Guard: snapshot no longer matches the buffer (another safety).
 	if not st.snap_clean then
-		pcall(vim.api.nvim_buf_set_option, buf, "modifiable", true)
+		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		return
 	end
@@ -326,7 +326,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 		end
 	end
 
-	pcall(vim.api.nvim_buf_set_option, buf, "modifiable", true)
+	pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 	set_winbar(buf, "Normal")
 end
 
