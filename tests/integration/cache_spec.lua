@@ -190,6 +190,9 @@ describe("row cache", function()
 	end)
 
 	it("still diffs and applies when something was edited", function()
+		-- Since 1a94d5f the save path diffs against the cached snapshot
+		-- instead of calling scan_disk_entries, so the baseline scan count
+		-- stays at zero.
 		local baseline_scans = 0
 		local real_disk = scan.scan_disk_entries
 		scan.scan_disk_entries = function(...)
@@ -200,7 +203,7 @@ describe("row cache", function()
 		helpers.save_buffer(buf)
 		scan.scan_disk_entries = real_disk
 
-		assert.equals(1, baseline_scans)
+		assert.equals(0, baseline_scans)
 		assert.is_not_nil(helpers.fs_stat(tmpdir .. "/created_by_test.txt"))
 	end)
 
