@@ -505,6 +505,13 @@ function M.setup(opts)
 	vim.api.nvim_create_autocmd("FocusGained", {
 		group = vim.api.nvim_create_augroup("filebuf_refresh_on_focus", { clear = true }),
 		callback = function()
+			for _, b in ipairs(state.buffers()) do
+				local st = state.get(b)
+				if st and st.mode == "normal" and vim.api.nvim_buf_is_valid(b) and not vim.bo[b].modified then
+					set_winbar(b, "Refreshing...")
+				end
+			end
+
 			if focus_timer then
 				focus_timer:stop()
 			end
@@ -516,6 +523,7 @@ function M.setup(opts)
 						if st.mode == "normal" then
 							require("filebuf.git").clear_ignore_cache(st.root)
 							render.tree(b, { keep_view = true, refresh_ignore = true })
+							set_winbar(b, "Normal")
 						end
 					end
 				end
