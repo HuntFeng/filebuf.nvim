@@ -99,13 +99,7 @@ function M.get_status_map_async(root, bufnr)
 			end
 			local output = table.concat(data or {}, "\n")
 			st.git = M.parse_status_output(root, output)
-			-- Nudge the decoration provider so the new status extmarks appear.
-			-- This used to be redraw! (with bang), which clears and repaints the
-			-- whole screen and so re-runs on_win for every visible line in every
-			-- window.  Invalidating just this buffer's extmark range gets the
-			-- same result without the full-screen repaint.
-			pcall(vim.api.nvim__buf_redraw_range, bufnr, 0, -1)
-			pcall(vim.cmd, "redraw")
+			pcall(vim.cmd, "redraw!")
 		end,
 		on_exit = function(_, exit_code)
 			if exit_code ~= 0 then

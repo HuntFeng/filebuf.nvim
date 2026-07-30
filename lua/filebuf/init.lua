@@ -310,6 +310,7 @@ local function save_buffer(buf)
 				vim.notify("filebuf: save cancelled", vim.log.levels.INFO)
 				return
 			end
+      require("filebuf.git").get_status_map_async(st.root, buf)  -- refresh git status after cancel
 		end
 
 		prof.start("save.apply_ops")
