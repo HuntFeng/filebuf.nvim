@@ -26,6 +26,8 @@
 -- the visible projection in `view` / `row_of`, so re-sorting or re-filtering
 -- never touches the row data itself.
 ----------------------------------------------------------------------
+local prof = require("filebuf.profiler")
+
 local M = {}
 
 ----------------------------------------------------------------------
@@ -747,6 +749,7 @@ end
 ---@param ignore_set table|nil   absolute ignored paths → true
 ---@return boolean applied
 function M.apply_ops(snap, ops, ignore_set)
+	prof.start("snapshot.apply_ops")
 	if not snap.child_start then
 		M.build_index(snap)
 	end
@@ -754,6 +757,7 @@ function M.apply_ops(snap, ops, ignore_set)
 
 	--- Give up, leaving nothing derived behind for a caller to misuse.
 	local function abort()
+		prof.stop()
 		snap.view, snap.row_of, snap.sorted = nil, nil, nil
 		return false
 	end
@@ -920,6 +924,7 @@ function M.apply_ops(snap, ops, ignore_set)
 	M.build_index(snap)
 	snap.sorted = {}
 	snap.view, snap.row_of = nil, nil
+	prof.stop()
 	return true
 end
 

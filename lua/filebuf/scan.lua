@@ -342,17 +342,23 @@ function M.scan_disk_entries(root, opts)
 	local maxdepth = opts.maxdepth or config.max_depth or 20
 	local show_hidden = config.show_hidden
 
+	prof.start("scan.scan_disk_entries.ignore_set")
 	local ignore_set, ignored_dirs
 	ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
+	prof.stop()
+
 	local prune_dirs = (not show_hidden) and ignored_dirs or nil
 
 	root = root:gsub("(.)/+$", "%1")
+	prof.start("scan.scan_disk_entries.find")
 	local output = run_find(root, maxdepth, prune_dirs)
+	prof.stop()
 	if not output then
 		prof.stop()
 		return nil, false
 	end
 
+	prof.start("scan.scan_disk_entries.stream")
 	local entries = {}
 	local n = 0
 	stream_entries(output, root, maxdepth, show_hidden, ignore_set, function(name, path, ftype, indent, _, mtime, ctime)
@@ -366,6 +372,7 @@ function M.scan_disk_entries(root, opts)
 			ctime = ctime,
 		}
 	end)
+	prof.stop()
 
 	prof.stop()
 	return entries, false

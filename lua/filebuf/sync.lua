@@ -262,7 +262,10 @@ end
 ---   3. Creates (shallowest first, with mkdir -p semantics).
 ---@param ops table  result of compute_diff()
 function M.apply_ops(ops)
+	prof.start("sync.apply_ops")
+
 	-- 1. Renames.
+	prof.start("sync.apply_ops.renames")
 	for _, r in ipairs(ops.renamed) do
 		vim.fn.mkdir(vim.fn.fnamemodify(r.new.path, ":h"), "p")
 		local ok, err = pcall(vim.loop.fs_rename, r.old.path, r.new.path)
@@ -270,10 +273,12 @@ function M.apply_ops(ops)
 			vim.notify("filebuf: cannot rename – " .. (err or r.old.path), vim.log.levels.ERROR)
 		end
 	end
+	prof.stop()
 
 	-- 2. Deletes, deepest path first, so children go before their parents.
 	-- Depth is the "/" count, not the string length: "/a/bbbbbbbb" is longer
 	-- than "/a/b/c" but shallower, and sorting by length got that backwards.
+	prof.start("sync.apply_ops.deletes")
 	local to_delete = ops.deleted
 	table.sort(to_delete, function(a, b)
 		return depth(a.path) > depth(b.path)
@@ -305,8 +310,10 @@ function M.apply_ops(ops)
 			pcall(vim.loop.fs_unlink, de.path)
 		end
 	end
+	prof.stop()
 
 	-- 3. Creates, parents before children (dirs before files at equal depth).
+	prof.start("sync.apply_ops.creates")
 	table.sort(ops.created, function(a, b)
 		local da, db = depth(a.path), depth(b.path)
 		if da ~= db then
@@ -330,6 +337,9 @@ function M.apply_ops(ops)
 			end
 		end
 	end
+	prof.stop()
+
+	prof.stop()
 end
 
 return M

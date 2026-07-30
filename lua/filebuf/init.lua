@@ -285,11 +285,14 @@ local function save_buffer(buf)
 		-- In find mode the diff is scoped to the query results.
 		local disk_entries = find.query_entries(buf) or scan.scan_disk_entries(st.root)
 
+		prof.start("save_filebuf.identical")
 		if disk_entries and identical(buf_entries, disk_entries) then
+			prof.stop()
 			pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 			vim.bo[buf].modified = false
 			return
 		end
+		prof.stop()
 
 		if not disk_entries then
 			vim.notify("filebuf: cannot read disk state - is find(1) available?", vim.log.levels.ERROR)
@@ -304,14 +307,17 @@ local function save_buffer(buf)
 		end
 		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 
+		prof.start("save_filebuf.pre_apply")
 		local has_changes = #ops.renamed > 0 or #ops.created > 0 or #ops.deleted > 0
 		if config.save_confirmation and has_changes then
 			if not confirm_save(ops, dir) then
+				prof.stop()
 				vim.notify("filebuf: save cancelled", vim.log.levels.INFO)
 				return
 			end
 			require("filebuf.git").get_status_map_async(st.root, buf) -- refresh git status after cancel
 		end
+		prof.stop()
 
 		prof.start("save_filebuf.apply_ops")
 		sync.apply_ops(ops)
