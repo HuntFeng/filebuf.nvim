@@ -148,7 +148,8 @@ function M.build(snap, output, maxdepth, ignore_set, pruned)
 
 	local off, len, indent, kind, parent, mtime, ctime =
 		newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows)
-	snap.off, snap.len, snap.indent, snap.kind, snap.parent, snap.mtime, snap.ctime = off, len, indent, kind, parent, mtime, ctime
+	snap.off, snap.len, snap.indent, snap.kind, snap.parent, snap.mtime, snap.ctime =
+		off, len, indent, kind, parent, mtime, ctime
 
 	-- Basename index over the ignore set (see above).
 	local ignore_names = nil
@@ -382,9 +383,9 @@ local function sort_range(snap, s, e, method)
 	local raw, off, len, kind, flat, names = snap.raw, snap.off, snap.len, snap.kind, snap.child_flat, snap.names
 
 	local rows, key = {}, {}
-  local cmp = function(a, b)
-    return key[a] < key[b]
-  end
+	local cmp = function(a, b)
+		return key[a] < key[b]
+	end
 	if method == "name" then
 		for i = 1, k do
 			local r = flat[s + i - 1]
@@ -411,12 +412,11 @@ local function sort_range(snap, s, e, method)
 			local r = flat[s + i - 1]
 			rows[i] = r
 			-- Key is 0-padded timestamp + lowercased name for deterministic order.
-			key[r] = string.format("%020d", ts[r] or 0)
-				.. (name_of[r] or raw:sub(off[r], off[r] + len[r] - 1)):lower()
+			key[r] = string.format("%020d", ts[r] or 0) .. (name_of[r] or raw:sub(off[r], off[r] + len[r] - 1)):lower()
 		end
-    cmp = function(a, b)
-        return key[a] > key[b] -- newer first
-    end
+		cmp = function(a, b)
+			return key[a] > key[b] -- newer first
+		end
 	else
 		return -- unknown method, keep emission order
 	end

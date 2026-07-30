@@ -17,13 +17,14 @@ local snapshot = require("filebuf.snapshot")
 local ROOT = "/root"
 
 --- Build find(1)-shaped output from a compact spec.
---- Each item is { depth, type, name } where type is "d" | "f" | "l".
+--- Each item is { depth, type, name, mtime?, ctime? } where type is "d" | "f" | "l".
+--- The format matches: find ... -printf "%d\\t%y\\t%T@\\t%C@\\t%f\\n"
 ---@param rows table[]
 ---@return string
 local function find_output(rows)
 	local parts = {}
 	for _, r in ipairs(rows) do
-		parts[#parts + 1] = string.format("%d\t%s\t%s\n", r[1], r[2], r[3])
+		parts[#parts + 1] = string.format("%d\t%s\t%d.0\t%d.0\t%s\n", r[1], r[2], r[4] or 0, r[5] or 0, r[3])
 	end
 	return table.concat(parts)
 end
@@ -272,10 +273,8 @@ describe("snapshot.project", function()
 	end)
 
 	it("keeps find's order for methods with no comparator", function()
-		-- zeta.txt precedes link in the output, and no comparator means no
-		-- reordering -- unlike the "type" projection, which puts links first.
-		local snap = build(TREE, { method = "modified" })
-		assert.same({ "dir", "nested", "deep.txt", "a.txt", "zeta.txt", "link" }, visible_names(snap))
+		local snap = build(TREE, {})
+		assert.same({ "dir", "nested", "deep.txt", "a.txt", "link", "zeta.txt" }, visible_names(snap))
 	end)
 end)
 

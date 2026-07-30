@@ -57,9 +57,10 @@ describe("sort.comparator", function()
 	end)
 
 	it("returns nil for methods with no ordering available", function()
-		assert.is_nil(sort.comparator("modified"))
-		assert.is_nil(sort.comparator("created"))
 		assert.is_nil(sort.comparator("nonsense"))
+		-- The comparator now supports modified and created.
+		assert.is_function(sort.comparator("modified"))
+		assert.is_function(sort.comparator("created"))
 	end)
 end)
 

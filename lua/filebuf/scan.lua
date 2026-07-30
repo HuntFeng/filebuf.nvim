@@ -123,7 +123,9 @@ local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, o
 	local stack = {} -- { depth, path }
 	local skip_below = nil
 
-	for depth_str, ftype, mtime_str, ctime_str, name in output:gmatch("([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\n]*)\n") do
+	for depth_str, ftype, mtime_str, ctime_str, name in
+		output:gmatch("([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\n]*)\n")
+	do
 		local depth = tonumber(depth_str)
 		if not depth then
 			goto continue
