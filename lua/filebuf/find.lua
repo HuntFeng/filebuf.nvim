@@ -182,6 +182,10 @@ function M.enter(buf)
 	end
 	local root = st.root
 
+	-- Cancel any in-flight deep scan so find mode and the snap-load
+	-- completion don't race on the same buffer.
+	require("filebuf.render").cancel_deep_scan(buf)
+
 	-- Tear down any existing session so re-pressing g/ restarts cleanly.
 	if sessions[buf] then
 		M.exit(buf)

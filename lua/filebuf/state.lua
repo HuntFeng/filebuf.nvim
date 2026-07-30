@@ -86,6 +86,14 @@ function M.init(buf, root)
 		-- Transient path→lnum cache, built on first use, cleared on edit.
 		_by_path = nil,
 		_by_path_dirty = true,
+
+		--- Incremented on every buffer write.  The deep-scan callback captures
+		--- the value at shallow-render time so it can bail when a newer render
+		--- has already replaced the shallow view.
+		render_serial = 0,
+
+		--- job_id of the ongoing async deep scan, or nil.
+		deep_scan_job = nil,
 	}
 	return states[buf]
 end

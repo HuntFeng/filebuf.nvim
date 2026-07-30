@@ -37,6 +37,35 @@ local function has_gnu_find()
 	return _gnu_find_cache
 end
 
+--- Build the GNU find(1) command table.
+---@param root       string
+---@param maxdepth   number
+---@param prune_dirs table|nil
+---@return table cmd
+local function build_gnu_find_cmd(root, maxdepth, prune_dirs)
+	local cmd = { "find", root }
+	if prune_dirs and #prune_dirs > 0 then
+		for _, dir in ipairs(prune_dirs) do
+			local escaped = dir:gsub("([%*%?%[%]])", "\\%1")
+			cmd[#cmd + 1] = "("
+			cmd[#cmd + 1] = "-path"
+			cmd[#cmd + 1] = root .. "/" .. escaped
+			cmd[#cmd + 1] = "-prune"
+			cmd[#cmd + 1] = ")"
+			cmd[#cmd + 1] = "-o"
+		end
+	end
+	vim.list_extend(cmd, {
+		"-maxdepth",
+		tostring(maxdepth),
+		"-mindepth",
+		"1",
+		"-printf",
+		"%d\t%y\t%T@\t%C@\t%f\n",
+	})
+	return cmd
+end
+
 --- Run find(1) under `root`, optionally pruning ignored directories so
 --- their subtrees are never stat-ed.
 ---@param root       string  absolute directory, no trailing slash
@@ -45,27 +74,7 @@ end
 ---@return string|nil  stdout in depth\ttype\tname\n format
 local function run_find(root, maxdepth, prune_dirs)
 	if has_gnu_find() then
-		local cmd = { "find", root }
-		-- Insert prune expressions:  \( -path X -prune \) -o ...
-		if prune_dirs and #prune_dirs > 0 then
-			for _, dir in ipairs(prune_dirs) do
-				local escaped = dir:gsub("([%*%?%[%]])", "\\%1")
-				cmd[#cmd + 1] = "("
-				cmd[#cmd + 1] = "-path"
-				cmd[#cmd + 1] = root .. "/" .. escaped
-				cmd[#cmd + 1] = "-prune"
-				cmd[#cmd + 1] = ")"
-				cmd[#cmd + 1] = "-o"
-			end
-		end
-		vim.list_extend(cmd, {
-			"-maxdepth",
-			tostring(maxdepth),
-			"-mindepth",
-			"1",
-			"-printf",
-			"%d\t%y\t%T@\t%C@\t%f\n",
-		})
+		local cmd = build_gnu_find_cmd(root, maxdepth, prune_dirs)
 		local output = vim.fn.system(cmd)
 		if vim.v.shell_error ~= 0 and #output == 0 then
 			return nil
@@ -103,6 +112,75 @@ local function run_find(root, maxdepth, prune_dirs)
 		return output
 	end
 	return nil
+end
+
+--- Run find(1) asynchronously via jobstart, collecting stdout with live
+--- progress callbacks.
+---
+--- Only supports GNU find.  Returns nil for non-GNU systems; the caller
+--- should fall back to a synchronous full-depth scan.
+---
+---@param root        string
+---@param maxdepth    number
+---@param prune_dirs  table|nil
+---@param on_progress fun(count: number)|nil  called via vim.schedule
+---@param on_done     fun(output: string|nil)  called via vim.schedule
+---@return number|nil job_id
+function M.run_find_async(root, maxdepth, prune_dirs, on_progress, on_done)
+	if not has_gnu_find() then
+		return nil
+	end
+
+	local cmd = build_gnu_find_cmd(root, maxdepth, prune_dirs)
+	local chunks = {}
+	local tail = "" -- leftover partial line from the previous chunk
+	local count = 0
+	local last_report = 0
+	local REPORT_EVERY = 5000
+
+	return vim.fn.jobstart(cmd, {
+		stdout_buffered = false,
+		on_stdout = function(_, data)
+			if not data or #data == 0 then
+				return
+			end
+			-- Prepend the leftover partial line from the previous chunk.
+			data[1] = tail .. data[1]
+			-- All elements except the last are complete lines.
+			for i = 1, #data - 1 do
+				local line = data[i]
+				if line ~= "" then
+					chunks[#chunks + 1] = line
+					count = count + 1
+				end
+			end
+			-- The last element may be incomplete — save it.
+			tail = data[#data] or ""
+			if on_progress and count - last_report >= REPORT_EVERY then
+				last_report = count
+				vim.schedule(function()
+					on_progress(count)
+				end)
+			end
+		end,
+		on_exit = function(_, exit_code)
+			-- Flush the leftover tail (complete line, or empty if the
+			-- output ended with \n).
+			if tail ~= "" then
+				chunks[#chunks + 1] = tail
+				count = count + 1
+				tail = ""
+			end
+			local output = table.concat(chunks, "\n")
+			vim.schedule(function()
+				if exit_code ~= 0 and #output == 0 then
+					on_done(nil)
+				else
+					on_done(output)
+				end
+			end)
+		end,
+	})
 end
 
 ----------------------------------------------------------------------

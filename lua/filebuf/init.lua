@@ -402,7 +402,7 @@ function M.open(dir)
 	set_window_options()
 	set_winbar(buf, "Normal")
 
-	render.tree(buf)
+	render.tree(buf, { shallow_first = true })
 
 	if config.auto_focus_current_file and current_file ~= "" and vim.startswith(current_file, dir .. "/") then
 		local target = actions.reveal_path(buf, vim.fn.resolve(current_file)) or actions.reveal_path(buf, current_file)
@@ -426,6 +426,7 @@ function M.open(dir)
 		buffer = buf,
 		callback = function()
 			find.cleanup(buf)
+			render.cancel_deep_scan(buf)
 			state.clear(buf)
 		end,
 	})
@@ -566,6 +567,9 @@ function M.setup(opts)
 		local st = state.get(buf)
 		if st then
 			require("filebuf.git").clear_ignore_cache(st.root)
+		end
+		if st and st.deep_scan_job then
+			render.cancel_deep_scan(buf)
 		end
 		render.tree(buf, { keep_view = true, refresh_ignore = true })
 	end, { desc = "Re-read the tree from disk, discarding the cached rows" })
