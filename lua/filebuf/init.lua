@@ -527,8 +527,6 @@ function M.setup(opts)
 				if not render.reproject(buf, { sort_method = method }) then
 					local entries = buffer.parse_buffer(buf, st.root)
 					local open_dirs = actions.open_folds[st.root]
-					-- sort.apply is a no-op for methods with no ordering here
-					-- ("modified" / "created"), so nothing is re-rendered then.
 					local sorted = sort.apply(entries, method)
 					if sorted ~= entries and #sorted > 0 then
 						render.entries(buf, sorted, open_dirs)

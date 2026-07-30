@@ -15,6 +15,8 @@
 -- through every level on the way out, so an entry at depth d was appended
 -- d times -- O(n*depth) appends plus a wrapper table per entry per level.
 -- At 100k entries and max_depth 20 that dominated the scan.
+--
+-- TODO: reuse sortings here in snapshot.lua
 ----------------------------------------------------------------------
 local M = {}
 
@@ -41,8 +43,29 @@ function M.comparator(method)
 			end
 			return a.name:lower() < b.name:lower()
 		end
+	elseif method == "modified" then
+		return function(a, b)
+			local ta, tb = a.mtime, b.mtime
+			if not ta or not tb then
+				return false
+			end
+			if ta ~= tb then
+				return ta > tb -- newer first
+			end
+			return a.name:lower() < b.name:lower()
+		end
+	elseif method == "created" then
+		return function(a, b)
+			local ta, tb = a.ctime, b.ctime
+			if not ta or not tb then
+				return false
+			end
+			if ta ~= tb then
+				return ta > tb -- newer first
+			end
+			return a.name:lower() < b.name:lower()
+		end
 	end
-	-- "modified" / "created" would need per-entry stat data.
 	return nil
 end
 
@@ -69,6 +92,26 @@ function M.keys(entries, method)
 		for i = 1, #entries do
 			local e = entries[i]
 			keys[i] = (TYPE_PRIO[e.type] or 5) .. e.name:lower()
+		end
+		return keys
+	elseif method == "modified" then
+		for i = 1, #entries do
+			local e = entries[i]
+			local ts = e.mtime
+			if not ts then
+				return nil
+			end
+			keys[i] = string.format("%020d", ts) .. e.name:lower()
+		end
+		return keys
+	elseif method == "created" then
+		for i = 1, #entries do
+			local e = entries[i]
+			local ts = e.ctime
+			if not ts then
+				return nil
+			end
+			keys[i] = string.format("%020d", ts) .. e.name:lower()
 		end
 		return keys
 	end

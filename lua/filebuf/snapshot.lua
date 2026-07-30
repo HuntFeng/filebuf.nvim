@@ -84,6 +84,8 @@ function M.new(root)
 		indent = {},
 		kind = {}, -- kind bits | flag bits
 		parent = {}, -- row index of parent dir, 0 = child of root
+		mtime = nil, -- per-row modification time (integer ms), nil until build()
+		ctime = nil, -- per-row creation time (integer ms), nil until build()
 		names = nil, -- sparse row → name, for rows a save created or renamed
 		-- Child index in CSR form: the children of row p are
 		-- child_flat[child_start[p] .. child_start[p + 1] - 1].  Two flat
@@ -144,8 +146,9 @@ function M.build(snap, output, maxdepth, ignore_set, pruned)
 		end
 	end
 
-	local off, len, indent, kind, parent = newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows)
-	snap.off, snap.len, snap.indent, snap.kind, snap.parent = off, len, indent, kind, parent
+	local off, len, indent, kind, parent, mtime, ctime =
+		newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows)
+	snap.off, snap.len, snap.indent, snap.kind, snap.parent, snap.mtime, snap.ctime = off, len, indent, kind, parent, mtime, ctime
 
 	-- Basename index over the ignore set (see above).
 	local ignore_names = nil
@@ -165,7 +168,7 @@ function M.build(snap, output, maxdepth, ignore_set, pruned)
 	local total = #output
 
 	while pos <= total do
-		-- depth \t type \t name \n, located without capturing.
+		-- depth \t type \t mtime \t ctime \t name \n, located without captures.
 		local t1 = output:find("\t", pos, true)
 		if not t1 then
 			break
@@ -174,20 +177,34 @@ function M.build(snap, output, maxdepth, ignore_set, pruned)
 		if not t2 then
 			break
 		end
-		local eol = output:find("\n", t2 + 1, true) or (total + 1)
+		local t3 = output:find("\t", t2 + 1, true)
+		if not t3 then
+			break
+		end
+		local t4 = output:find("\t", t3 + 1, true)
+		if not t4 then
+			break
+		end
+		local eol = output:find("\n", t4 + 1, true) or (total + 1)
 
 		local depth = tonumber(output:sub(pos, t1 - 1))
 		if depth then
 			local ftype = output:byte(t1 + 1)
 			local is_dir = ftype == 100 -- "d"
-			local name_off = t2 + 1
+			local name_off = t4 + 1
 			local name_len = eol - name_off
+
+			-- Parse timestamps: float seconds -> integer milliseconds.
+			local mt = tonumber(output:sub(t2 + 1, t3 - 1))
+			local ct = tonumber(output:sub(t3 + 1, t4 - 1))
 
 			n = n + 1
 			off[n] = name_off
 			len[n] = name_len
 			indent[n] = depth - 1
 			parent[n] = stack[depth - 1] or 0
+			mtime[n] = mt and math.floor(mt * 1000) or 0
+			ctime[n] = ct and math.floor(ct * 1000) or 0
 
 			local bits = is_dir and KIND_DIR or (ftype == 108 and KIND_LINK or 0) -- "l"
 			if output:byte(name_off) == DOT then
@@ -365,13 +382,16 @@ local function sort_range(snap, s, e, method)
 	local raw, off, len, kind, flat, names = snap.raw, snap.off, snap.len, snap.kind, snap.child_flat, snap.names
 
 	local rows, key = {}, {}
+  local cmp = function(a, b)
+    return key[a] < key[b]
+  end
 	if method == "name" then
 		for i = 1, k do
 			local r = flat[s + i - 1]
 			rows[i] = r
 			key[r] = ((names and names[r]) or raw:sub(off[r], off[r] + len[r] - 1)):lower()
 		end
-	else
+	elseif method == "type" then
 		-- Type priority is a single leading digit, so a plain string compare
 		-- orders by type first and name second.
 		for i = 1, k do
@@ -380,11 +400,28 @@ local function sort_range(snap, s, e, method)
 			key[r] = (PRIO[kind[r] % (KIND_MASK + 1)] or 5)
 				.. ((names and names[r]) or raw:sub(off[r], off[r] + len[r] - 1)):lower()
 		end
+	elseif method == "modified" or method == "created" then
+		local ts = method == "modified" and snap.mtime or snap.ctime
+		if not ts then
+			return
+		end
+		-- Sort by timestamp (numeric), tie-breaking on name.
+		local name_of = names or {}
+		for i = 1, k do
+			local r = flat[s + i - 1]
+			rows[i] = r
+			-- Key is 0-padded timestamp + lowercased name for deterministic order.
+			key[r] = string.format("%020d", ts[r] or 0)
+				.. (name_of[r] or raw:sub(off[r], off[r] + len[r] - 1)):lower()
+		end
+    cmp = function(a, b)
+        return key[a] > key[b] -- newer first
+    end
+	else
+		return -- unknown method, keep emission order
 	end
 
-	table.sort(rows, function(a, b)
-		return key[a] < key[b]
-	end)
+	table.sort(rows, cmp)
 
 	for i = 1, k do
 		flat[s + i - 1] = rows[i]
@@ -425,6 +462,8 @@ function M.project(snap, method, show_hidden)
 	end
 	local sorted = snap.sorted
 	local orderable = (method == "name" or method == "type")
+		or (method == "modified" and snap.mtime ~= nil)
+		or (method == "created" and snap.ctime ~= nil)
 
 	-- row_of is indexed by row so it gets the exact size; view's final length
 	-- is not known until the walk finishes, so it grows.
@@ -842,6 +881,15 @@ function M.apply_ops(snap, ops, ignore_set)
 			indent[row] = (prow == 0) and 0 or indent[prow] + 1
 			kind[row] = c.type == "dir" and KIND_DIR or (c.type == "link" and KIND_LINK or 0)
 			reflag(row, c.name, c.path)
+			-- Stat the newly-created path for timestamps so time-based sorting
+			-- works without a rescan.  The filesystem op already succeeded.
+			if snap.mtime then
+				local st = vim.loop.fs_stat(c.path)
+				if st then
+					snap.mtime[row] = st.mtime.sec * 1000 + math.floor(st.mtime.nsec / 1e6)
+					snap.ctime[row] = st.mtime.sec * 1000 + math.floor(st.mtime.nsec / 1e6)
+				end
+			end
 			fresh[c.path] = row
 		end
 	end

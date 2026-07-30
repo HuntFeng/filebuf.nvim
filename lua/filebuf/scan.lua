@@ -64,7 +64,7 @@ local function run_find(root, maxdepth, prune_dirs)
 			"-mindepth",
 			"1",
 			"-printf",
-			"%d\t%y\t%f\n",
+			"%d\t%y\t%T@\t%C@\t%f\n",
 		})
 		local output = vim.fn.system(cmd)
 		if vim.v.shell_error ~= 0 and #output == 0 then
@@ -85,7 +85,7 @@ local function run_find(root, maxdepth, prune_dirs)
 		local esc_root = vim.fn.shellescape(root)
 		local root_len = #root
 		local perl_script = string.format(
-			[[chomp;$d=()=substr($_,%d)=~m|/|g;@s=lstat($_);next unless @s;$t=-d _?"d":(-l _?"l":"f");$i=rindex($_,"/");print "$d\t$t\t",substr($_,$i+1),"\n";]],
+			[[chomp;$d=()=substr($_,%d)=~m|/|g;@s=lstat($_);next unless @s;$t=-d _?"d":(-l _?"l":"f");$i=rindex($_,"/");print "$d\t$t\t$s[9]\t$s[10]\t",substr($_,$i+1),"\n";]],
 			root_len
 		)
 		local esc_perl = vim.fn.shellescape(perl_script)
@@ -116,18 +116,20 @@ end
 ---@param maxdepth    number  depth cap
 ---@param show_hidden boolean
 ---@param ignore_set  table|nil  gitignored paths -> true
----@param on_entry    fun(name, path, ftype, indent, is_dir)
+---@param on_entry    fun(name, path, ftype, indent, is_dir, mtime, ctime)
 ---@return table  truncated_dirs  dir paths at maxdepth -> true
 local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, on_entry)
 	local truncated_dirs = {}
 	local stack = {} -- { depth, path }
 	local skip_below = nil
 
-	for depth_str, ftype, name in output:gmatch("([^\t]*)\t([^\t]*)\t([^\n]*)\n") do
+	for depth_str, ftype, mtime_str, ctime_str, name in output:gmatch("([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\n]*)\n") do
 		local depth = tonumber(depth_str)
 		if not depth then
 			goto continue
 		end
+		local mtime = math.floor((tonumber(mtime_str) or 0) * 1000)
+		local ctime = math.floor((tonumber(ctime_str) or 0) * 1000)
 		local is_dir = ftype == "d"
 
 		-- Pop stack to the true parent.
@@ -171,7 +173,7 @@ local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, o
 		end
 
 		local indent = depth - 1 -- depth 1 = indent 0
-		on_entry(name, path, ftype, indent, is_dir)
+		on_entry(name, path, ftype, indent, is_dir, mtime, ctime)
 
 		::continue::
 	end
@@ -273,13 +275,15 @@ function M.scan_disk_entries(root, opts)
 
 	local entries = {}
 	local n = 0
-	stream_entries(output, root, maxdepth, show_hidden, ignore_set, function(name, path, ftype, indent)
+	stream_entries(output, root, maxdepth, show_hidden, ignore_set, function(name, path, ftype, indent, _, mtime, ctime)
 		n = n + 1
 		entries[n] = {
 			name = name,
 			path = path,
 			type = ftype == "d" and "dir" or (ftype == "l" and "link" or "file"),
 			indent = indent,
+			mtime = mtime,
+			ctime = ctime,
 		}
 	end)
 
@@ -294,7 +298,7 @@ end
 --- Scan the immediate children of a single directory.
 ---@param dir   string
 ---@param root? string  kept for API compatibility
----@return table[]  { name, path, type, lazy? }
+---@return table[]  { name, path, type, lazy?, mtime?, ctime? }
 function M.scan_dir_children(dir, root)
 	local handle = vim.loop.fs_scandir(dir)
 	if not handle then
@@ -309,13 +313,22 @@ function M.scan_dir_children(dir, root)
 			break
 		end
 		local is_dir = ftype == "directory"
-		n = n + 1
-		children[n] = {
+		local path = dir .. "/" .. name
+		local entry = {
 			name = name,
-			path = dir .. "/" .. name,
+			path = path,
 			type = is_dir and "dir" or (ftype == "link" and "link" or "file"),
 			lazy = is_dir or nil,
 		}
+		-- Stat for timestamps so time-based sort methods work on lazy-expanded
+		-- directories.  fs_scandir_next gives name + type but no timestamps.
+		local stat = vim.loop.fs_stat(path)
+		if stat then
+			entry.mtime = stat.mtime.sec * 1000 + math.floor(stat.mtime.nsec / 1e6)
+			entry.ctime = stat.mtime.sec * 1000 + math.floor(stat.mtime.nsec / 1e6)
+		end
+		n = n + 1
+		children[n] = entry
 	end
 
 	-- All children are siblings, so a plain sort is enough here.
