@@ -199,7 +199,7 @@ end
 ---@param opts? table   { maxdepth?: number, show_hidden?: boolean, prune?: boolean }
 ---@return string[]|nil lines
 function M.scan_into(snap, root, opts)
-	prof.start("scan.scan_into")
+	prof.start("render.tree.scan.scan_into")
 	opts = opts or {}
 	local maxdepth = opts.maxdepth or config.max_depth or 20
 	local show_hidden = opts.show_hidden
@@ -208,7 +208,7 @@ function M.scan_into(snap, root, opts)
 	end
 
 	-- Build gitignore set (1 system call, cached per root).
-	prof.start("scan.scan_into.ignore_set")
+	prof.start("render.tree.scan.scan_into.ignore_set")
 	ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
 	prof.stop()
 
@@ -221,7 +221,7 @@ function M.scan_into(snap, root, opts)
 	end
 	local prune_dirs = prune and ignored_dirs or nil
 
-	prof.start("scan.scan_into.find")
+	prof.start("render.tree.scan.scan_into.find")
 	root = root:gsub("(.)/+$", "%1")
 	local output = run_find(root, maxdepth, prune_dirs)
 	prof.stop()
@@ -230,16 +230,16 @@ function M.scan_into(snap, root, opts)
 		return nil
 	end
 
-	prof.start("scan.scan_into.build")
+	prof.start("render.tree.scan.scan_into.build")
 	snap.root = root
 	snapshot.build(snap, output, maxdepth, ignore_set, prune_dirs ~= nil and #prune_dirs > 0)
 	prof.stop()
 
-	prof.start("scan.scan_into.project")
+	prof.start("render.tree.scan.scan_into.project")
 	snapshot.project(snap, config.sort_method, show_hidden)
 	prof.stop()
 
-	prof.start("scan.scan_into.lines")
+	prof.start("render.tree.scan.scan_into.lines")
 	local lines = snapshot.lines(snap)
 	prof.stop()
 

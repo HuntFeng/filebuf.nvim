@@ -214,7 +214,9 @@ function M.run(buf, pattern)
 		return 0
 	end
 
+  prof.start("search.run.reveal_paths")
 	local entries = actions.reveal_paths(buf, paths)
+  prof.stop()
 	if #entries == 0 then
 		vim.notify(
 			string.format("filebuf: %d match(es) for '%s', none reachable in the current view", #paths, pattern),

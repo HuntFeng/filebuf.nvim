@@ -226,7 +226,6 @@ end
 ---@param open_dirs table|fun(path: string): boolean|nil
 ---@param entries   table[]|nil  rendered entries, each carrying lnum and path
 function M.restore_folds(buf, open_dirs, entries)
-	prof.start("restore_folds")
 	vim.cmd("silent! normal! zM")
 
 	local root = state.root(buf)
@@ -237,7 +236,6 @@ function M.restore_folds(buf, open_dirs, entries)
 	end
 
 	if not open_dirs then
-		prof.stop()
 		return
 	end
 	local is_open = type(open_dirs) == "function" and open_dirs or function(path)
@@ -257,7 +255,6 @@ function M.restore_folds(buf, open_dirs, entries)
 				open_dir(e.lnum, e.path)
 			end
 		end
-		prof.stop()
 		return
 	end
 
@@ -266,7 +263,6 @@ function M.restore_folds(buf, open_dirs, entries)
 	-- table, and without this the walk below runs over the whole tree to
 	-- discover it has no work to do.
 	if type(open_dirs) == "table" and next(open_dirs) == nil then
-		prof.stop()
 		return
 	end
 
@@ -294,7 +290,6 @@ function M.restore_folds(buf, open_dirs, entries)
 				recorded[path] = true
 			end
 		end
-		prof.stop()
 		return
 	end
 
@@ -305,7 +300,6 @@ function M.restore_folds(buf, open_dirs, entries)
 			end
 		end)
 	end
-	prof.stop()
 end
 
 --- Record every directory in the subtree at `entry` as open — the bookkeeping
@@ -445,10 +439,8 @@ end
 ---@param paths string[]
 ---@return table[]  the entries that resolved
 function M.reveal_paths(buf, paths)
-	prof.start("reveal_paths")
 	local st = state.get(buf)
 	if not st then
-		prof.stop()
 		return {}
 	end
 
@@ -464,7 +456,6 @@ function M.reveal_paths(buf, paths)
 		end
 	end
 
-	prof.stop()
 	return found
 end
 

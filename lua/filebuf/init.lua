@@ -313,7 +313,7 @@ local function save_buffer(buf)
 			require("filebuf.git").get_status_map_async(st.root, buf) -- refresh git status after cancel
 		end
 
-		prof.start("save.apply_ops")
+		prof.start("save_filebuf.apply_ops")
 		sync.apply_ops(ops)
 		prof.stop()
 

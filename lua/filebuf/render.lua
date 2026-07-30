@@ -250,9 +250,6 @@ function M.tree(buf, opts)
 		vim.fn.winrestview(view)
 	end
 
-	if prof.enabled then
-		prof.report()
-	end
 	prof.stop()
 end
 
