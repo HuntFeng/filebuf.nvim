@@ -297,9 +297,12 @@ function M.exit(buf)
 	if st then
 		local saved = session.saved_state
 		if saved and saved.entries and #saved.entries > 0 then
-			render.entries(buf, saved.entries, saved.open_folds)
-			-- Unsaved edits made before entering find mode are still unsaved.
-			vim.bo[buf].modified = saved.modified
+			-- During BufUnload / BufDelete the buffer may no longer be
+			-- modifiable — pcall so the cleanup path does not error.
+			local ok = pcall(render.entries, buf, saved.entries, saved.open_folds)
+			if ok then
+				vim.bo[buf].modified = saved.modified
+			end
 		end
 
 		st.mode = "normal"

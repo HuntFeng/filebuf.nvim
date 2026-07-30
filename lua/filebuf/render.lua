@@ -47,6 +47,11 @@ function M.cancel_deep_scan(buf)
 	if st then
 		st.deep_scan_job = nil
 	end
+	-- Restore modifiability so further writes (e.g. find-mode entry, BufUnload
+	-- cleanup) do not fail on a buffer the deep scan left read-only.
+	if vim.api.nvim_buf_is_valid(buf) then
+		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
+	end
 end
 
 ----------------------------------------------------------------------
@@ -368,8 +373,9 @@ local function _tree_shallow_then_deep(buf, st, opts)
 	prof.stop()
 
 	-- 3. Kick off async deep scan ------------------------------------
-	-- Make buffer read-only until the deep scan completes.
-	vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+	-- The buffer stays modifiable so the user can start editing
+	-- immediately; if they do, the deep-scan completing will notice
+	-- vim.bo[buf].modified and skip the update (keeping their edits).
 	set_winbar(buf, "Scanning...")
 	local capture_serial = st.render_serial
 
@@ -388,7 +394,9 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		end,
 		-- on_done: rebuild snapshot and re-render.
 		function(output)
-			vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+			if vim.api.nvim_buf_is_valid(buf) then
+				pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
+			end
 			_handle_deep_scan_complete(buf, capture_serial, output)
 		end
 	)

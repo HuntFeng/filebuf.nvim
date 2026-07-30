@@ -453,8 +453,10 @@ function M.open(dir)
 		group = group,
 		buffer = buf,
 		callback = function()
-			find.cleanup(buf)
+			-- Cancel the deep scan first so the buffer is writable for find
+			-- cleanup (restoring saved entries during BufUnload).
 			render.cancel_deep_scan(buf)
+			find.cleanup(buf)
 			state.clear(buf)
 		end,
 	})
