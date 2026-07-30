@@ -419,7 +419,6 @@ local function resolve_dir_entry(buf, entry)
 	return find_parent_dir(buf, entry)
 end
 
-
 ----------------------------------------------------------------------
 -- Reveal (load the ancestor chain of a path)
 ----------------------------------------------------------------------

@@ -24,7 +24,7 @@ describe("row cache", function()
 
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
-			config.sort_method = "type"
+		config.sort_method = "type"
 		config.show_hidden = false
 		helpers.populate_dir(tmpdir, {
 			["src"] = {},

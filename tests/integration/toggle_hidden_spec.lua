@@ -29,7 +29,6 @@ describe("toggle hidden mid-edit", function()
 	end
 
 	describe("create mid-edit with toggle", function()
-
 		it("saving while hidden is on mid-edit does not treat hidden files as new", function()
 			helpers.populate_dir(tmpdir, {
 				["a.txt"] = "",
@@ -95,7 +94,6 @@ describe("toggle hidden mid-edit", function()
 	end)
 
 	describe("delete mid-edit with toggle", function()
-
 		it("preserves a delete when saving with hidden toggled on", function()
 			helpers.populate_dir(tmpdir, {
 				["vanish.txt"] = "poof",
@@ -193,14 +191,12 @@ describe("toggle hidden mid-edit", function()
 		end)
 	end)
 
-	describe("mixed operations mid-edit with toggle", function()
-	end)
+	describe("mixed operations mid-edit with toggle", function() end)
 
 	describe("toggle when show_hidden starts ON", function()
 		before_each(function()
 			require("filebuf.config").show_hidden = true
 		end)
-
 
 		it("preserves a delete after toggling hidden off and back on", function()
 			helpers.populate_dir(tmpdir, {

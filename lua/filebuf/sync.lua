@@ -254,7 +254,6 @@ function M.report_errors(buf, errors)
 		string.format("filebuf: %d error(s) — nothing was saved; fix the marked lines and try again", #errors),
 		vim.log.levels.ERROR
 	)
-
 end
 
 --- Apply the computed operations to the filesystem, in order:

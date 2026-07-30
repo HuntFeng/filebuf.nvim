@@ -212,7 +212,7 @@ function M.tree(buf, opts)
 	prof.stop()
 
 	-- 2. Write buffer lines -----------------------------------------
-  prof.start("render.tree.nvim_buf_set_lines")
+	prof.start("render.tree.nvim_buf_set_lines")
 	st.rendering = true
 	buffer.without_undo(buf, function()
 		vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
@@ -220,7 +220,7 @@ function M.tree(buf, opts)
 	buffer.clear_undo(buf)
 	st.rendering = false
 	vim.bo[buf].modified = false
-  prof.stop()
+	prof.stop()
 
 	-- Invalidate the path→lnum cache — line numbers shifted.
 	st._by_path_dirty = true
@@ -245,7 +245,6 @@ function M.tree(buf, opts)
 	if config.git_status then
 		git.get_status_map_async(st.root, buf)
 	end
-
 
 	if view then
 		vim.fn.winrestview(view)

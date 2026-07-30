@@ -204,9 +204,9 @@ function M.scan_into(snap, root, opts)
 	end
 
 	-- Build gitignore set (1 system call, cached per root).
-		prof.start("scan.scan_into.ignore_set")
-		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
-		prof.stop()
+	prof.start("scan.scan_into.ignore_set")
+	ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
+	prof.stop()
 
 	-- Pruning keeps a cold open fast, at the cost of the snapshot not holding
 	-- the ignored subtrees -- recorded as snap.pruned so a later "show hidden"
@@ -243,7 +243,6 @@ function M.scan_into(snap, root, opts)
 	return lines, ignore_set
 end
 
-
 ----------------------------------------------------------------------
 -- Disk scan for save diffing (same filtering as the buffer)
 ----------------------------------------------------------------------
@@ -262,7 +261,7 @@ function M.scan_disk_entries(root, opts)
 	local show_hidden = config.show_hidden
 
 	local ignore_set, ignored_dirs
-		ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
+	ignore_set, ignored_dirs = require("filebuf.git").build_ignore_set(root)
 	local prune_dirs = (not show_hidden) and ignored_dirs or nil
 
 	root = root:gsub("(.)/+$", "%1")

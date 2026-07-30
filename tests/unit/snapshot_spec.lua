@@ -350,11 +350,13 @@ describe("snapshot.apply_ops", function()
 
 	it("creates a directory and a child of it in one call", function()
 		local snap = build(TREE)
-		assert.is_true(snapshot.apply_ops(
-			snap,
-			ops({ created = { entry(ROOT .. "/fresh/kid.txt"), entry(ROOT .. "/fresh", "dir") } }),
-			nil
-		))
+		assert.is_true(
+			snapshot.apply_ops(
+				snap,
+				ops({ created = { entry(ROOT .. "/fresh/kid.txt"), entry(ROOT .. "/fresh", "dir") } }),
+				nil
+			)
+		)
 		snapshot.project(snap, "type", false)
 		assert.is_not_nil(snapshot.lnum_of_path(snap, ROOT .. "/fresh"))
 		assert.is_not_nil(snapshot.lnum_of_path(snap, ROOT .. "/fresh/kid.txt"))
@@ -387,11 +389,13 @@ describe("snapshot.apply_ops", function()
 
 	it("renames a file in place", function()
 		local snap = build(TREE)
-		assert.is_true(snapshot.apply_ops(
-			snap,
-			ops({ renamed = { { old = entry(ROOT .. "/zeta.txt"), new = entry(ROOT .. "/omega.txt") } } }),
-			nil
-		))
+		assert.is_true(
+			snapshot.apply_ops(
+				snap,
+				ops({ renamed = { { old = entry(ROOT .. "/zeta.txt"), new = entry(ROOT .. "/omega.txt") } } }),
+				nil
+			)
+		)
 		snapshot.project(snap, "type", false)
 		assert.is_nil(snapshot.lnum_of_path(snap, ROOT .. "/zeta.txt"))
 		assert.is_not_nil(snapshot.lnum_of_path(snap, ROOT .. "/omega.txt"))

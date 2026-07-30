@@ -144,8 +144,7 @@ function M.build(snap, output, maxdepth, ignore_set, pruned)
 		end
 	end
 
-	local off, len, indent, kind, parent =
-		newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows)
+	local off, len, indent, kind, parent = newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows), newarr(nrows)
 	snap.off, snap.len, snap.indent, snap.kind, snap.parent = off, len, indent, kind, parent
 
 	-- Basename index over the ignore set (see above).
@@ -363,8 +362,7 @@ local function sort_range(snap, s, e, method)
 	if k < 2 then
 		return
 	end
-	local raw, off, len, kind, flat, names =
-		snap.raw, snap.off, snap.len, snap.kind, snap.child_flat, snap.names
+	local raw, off, len, kind, flat, names = snap.raw, snap.off, snap.len, snap.kind, snap.child_flat, snap.names
 
 	local rows, key = {}, {}
 	if method == "name" then

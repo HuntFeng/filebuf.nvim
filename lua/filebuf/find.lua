@@ -258,8 +258,8 @@ function M.enter(buf)
 		end
 		if vim.api.nvim_buf_is_valid(buf) then
 			draw(buf)
-      -- Place cursor on the first match if there is one, otherwise leave it at the top.
-      vim.cmd("silent! normal! n")
+			-- Place cursor on the first match if there is one, otherwise leave it at the top.
+			vim.cmd("silent! normal! n")
 		end
 	end)
 
