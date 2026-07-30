@@ -47,11 +47,6 @@ function M.cancel_deep_scan(buf)
 	if st then
 		st.deep_scan_job = nil
 	end
-	-- Restore modifiability so further writes (e.g. find-mode entry, BufUnload
-	-- cleanup) do not fail on a buffer the deep scan left read-only.
-	if vim.api.nvim_buf_is_valid(buf) then
-		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
-	end
 end
 
 ----------------------------------------------------------------------
@@ -267,7 +262,6 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 	st.deep_scan_job = nil
 
 	if not output then
-		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		vim.notify("filebuf: deep scan failed — showing partial tree", vim.log.levels.WARN)
 		return
@@ -275,14 +269,12 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Guard: a newer render has already replaced the shallow view.
 	if st.render_serial ~= capture_serial then
-		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		return
 	end
 
 	-- Guard: user edited the buffer during the deep scan.
 	if vim.bo[buf].modified then
-		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		vim.notify(
 			"filebuf: deep scan complete — buffer has unsaved edits, use :FilebufRefresh to load full tree",
@@ -293,7 +285,6 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Guard: snapshot no longer matches the buffer (another safety).
 	if not st.snap_clean then
-		pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		return
 	end
@@ -326,7 +317,6 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 		end
 	end
 
-	pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
 	set_winbar(buf, "Normal")
 end
 
@@ -394,9 +384,6 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		end,
 		-- on_done: rebuild snapshot and re-render.
 		function(output)
-			if vim.api.nvim_buf_is_valid(buf) then
-				pcall(vim.api.nvim_set_option_value, "modifiable", true, { buf = buf })
-			end
 			_handle_deep_scan_complete(buf, capture_serial, output)
 		end
 	)
@@ -406,7 +393,6 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		st.deep_scan_job = job_id
 	else
 		-- Non-GNU find: fall back to synchronous full-depth scan.
-		vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
 		set_winbar(buf, "Normal")
 		M.tree(buf, {
 			keep_view = true,
