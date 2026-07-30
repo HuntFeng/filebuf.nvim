@@ -60,6 +60,7 @@ function M.indent_level(line)
 	return result
 end
 
+local ESCAPE = { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" }
 
 --- Build a formatter for one bulk render.
 ---
