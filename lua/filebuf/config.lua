@@ -7,7 +7,6 @@
 ---@field show_hidden boolean  when false, entries whose name starts with "." are hidden
 ---@field sort_method string  sort order: "type" | "name" | "modified" | "created"
 ---@field save_confirmation boolean  when true, show a confirmation dialog before :w applies changes to the filesystem
----@field search_max_results number  cap on hits returned by tree search (find mode / :FilebufFind)
 ---@field keymaps table  maps action names to key strings; set a value to false to disable
 local config = {
 	permanent_delete = false,
@@ -15,9 +14,6 @@ local config = {
 	git_status = true,
 	show_hidden = false,
 	save_confirmation = true,
-
-	--- Cap on how many hits tree search (find mode / :FilebufFind) reveals.
-	search_max_results = 500,
 
 	--- Maximum directory depth to load on initial scan.  Directories at this
 	--- depth are listed but their children load on demand when expanded.

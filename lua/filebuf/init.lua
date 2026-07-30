@@ -481,8 +481,10 @@ function M.setup(opts)
 				for _, b in ipairs(state.buffers()) do
 					local st = state.get(b)
 					if st and vim.api.nvim_buf_is_valid(b) and not vim.bo[b].modified then
-						require("filebuf.git").clear_ignore_cache(st.root)
-						render.tree(b, { keep_view = true, refresh_ignore = true })
+						if st.mode == "normal" then
+							require("filebuf.git").clear_ignore_cache(st.root)
+							render.tree(b, { keep_view = true, refresh_ignore = true })
+						end
 					end
 				end
 			end, 200)

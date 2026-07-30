@@ -39,14 +39,12 @@ describe("search", function()
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
 		config.show_hidden = false
-		config.search_max_results = 500
 	end)
 
 	after_each(function()
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
 		config.show_hidden = false
-		config.search_max_results = 500
 	end)
 
 	------------------------------------------------------------------
@@ -73,18 +71,6 @@ describe("search", function()
 	it("query returns nothing for an empty pattern", function()
 		helpers.populate_dir(tmpdir, { ["file.txt"] = "" })
 		assert.same({}, search.query(tmpdir, ""))
-	end)
-
-	it("query reports truncation when the cap is hit", function()
-		local structure = { ["dir"] = {} }
-		for i = 1, 6 do
-			structure["dir/needle_" .. i .. ".txt"] = ""
-		end
-		helpers.populate_dir(tmpdir, structure)
-		config.search_max_results = 3
-		local paths, truncated = search.query(tmpdir, "needle")
-		assert.equals(3, #paths)
-		assert.is_true(truncated)
 	end)
 
 	it("query skips hits under a hidden directory when show_hidden is off", function()

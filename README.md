@@ -104,9 +104,6 @@ require("filebuf").setup({
     -- Default sort method, can change with FilebufSortMethod <method>
     sort_method = "type",
 
-    -- Max hits revealed by the `/` fallback search
-    search_max_results = 500,
-
     -- Max entries a single recursive expand (zO) may load
     max_expand_entries = 20000,
 

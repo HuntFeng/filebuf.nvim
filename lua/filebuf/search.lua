@@ -86,13 +86,12 @@ function M.build_fd_argv(root, pattern, show_hidden)
 		show_hidden = config.show_hidden
 	end
 
-	local limit = config.search_max_results
 	local translated, literal, ignore_case = translate_pattern(pattern)
 	if translated == "" then
 		return nil
 	end
 
-	local argv = { fd, "--color", "never", "--max-results", tostring(limit + 1) }
+	local argv = { fd, "--color", "never" }
 	if show_hidden then
 		argv[#argv + 1] = "-H"
 	end
@@ -114,14 +113,12 @@ end
 ---@param root    string
 ---@param pattern string  a Vim search pattern
 ---@param show_hidden? boolean  defaults to config.show_hidden
----@return string[] paths  absolute paths, at most config.search_max_results
----@return boolean  truncated  the cap was hit and results were dropped
+---@return string[] paths  absolute paths
 function M.query(root, pattern, show_hidden)
 	prof.start("search.query")
 	if show_hidden == nil then
 		show_hidden = config.show_hidden
 	end
-	local limit = config.search_max_results
 	local translated, literal, ignore_case = translate_pattern(pattern)
 	if translated == "" then
 		prof.stop()
@@ -144,7 +141,6 @@ function M.query(root, pattern, show_hidden)
 	end
 
 	local paths = {}
-	local truncated = false
 	for _, raw in ipairs(out) do
 		-- fd appends "/" to directories; entry paths never carry one.
 		local path = raw:sub(-1) == "/" and raw:sub(1, -2) or raw
@@ -163,17 +159,13 @@ function M.query(root, pattern, show_hidden)
 				end
 			end
 			if not skip then
-				if #paths >= limit then
-					truncated = true
-					break
-				end
 				paths[#paths + 1] = path
 			end
 		end
 	end
 
 	prof.stop()
-	return paths, truncated
+	return paths
 end
 
 --- The path of the entry under the cursor, or nil.
@@ -213,7 +205,7 @@ function M.run(buf, pattern)
 	M.clear(buf)
 
 	local st = state.get(buf)
-	local paths, truncated = M.query(root, pattern, st and st.show_hidden)
+	local paths = M.query(root, pattern, st and st.show_hidden)
 	if #paths == 0 then
 		if not matched_locally then
 			vim.notify("filebuf: pattern not found: " .. pattern, vim.log.levels.WARN)
@@ -260,9 +252,6 @@ function M.run(buf, pattern)
 	vim.cmd("normal! zz")
 
 	local msg = string.format("filebuf: %d match(es) for '%s'", #entries, pattern)
-	if truncated then
-		msg = msg .. string.format(" (capped at %d; refine the pattern)", config.search_max_results)
-	end
 	if #entries < #paths then
 		msg = msg .. string.format(" — %d hidden/unreachable hit(s) skipped", #paths - #entries)
 	end

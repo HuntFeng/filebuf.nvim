@@ -157,6 +157,8 @@ local function draw(buf)
 	-- Scoped baseline for save diffing: unmatched files must not look deleted.
 	session.query_entries = entries
 	render.entries(buf, entries, nil)
+	vim.cmd("silent! normal! zR")
+	vim.cmd("silent! normal! zx")
 end
 
 --- The entry list find mode is currently showing, or nil outside find mode.
@@ -190,6 +192,9 @@ function M.enter(buf)
 	if pattern == "" then
 		return
 	end
+
+	-- Record the pattern so n / N can navigate between matches.
+	vim.fn.setreg("/", pattern)
 
 	-- Snapshot normal-mode state for restore on <Esc>.  state.entries reflects
 	-- unsaved edits, so restoring it puts the user's text back as it was.
@@ -253,6 +258,8 @@ function M.enter(buf)
 		end
 		if vim.api.nvim_buf_is_valid(buf) then
 			draw(buf)
+      -- Place cursor on the first match if there is one, otherwise leave it at the top.
+      vim.cmd("silent! normal! n")
 		end
 	end)
 
