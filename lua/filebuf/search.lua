@@ -18,7 +18,7 @@
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
-local actions = require("filebuf.actions")
+local fold = require("filebuf.fold")
 local buffer = require("filebuf.buffer")
 local state = require("filebuf.state")
 local render = require("filebuf.render")
@@ -161,7 +161,7 @@ end
 ---@return number  how many matches were revealed
 local function _reveal(buf, paths, pattern, keep_cursor)
 	prof.start("search._reveal")
-	local entries = actions.reveal_paths(buf, paths)
+	local entries = fold.reveal_paths(buf, paths)
 	prof.stop()
 	if #entries == 0 then
 		vim.notify(
@@ -460,7 +460,7 @@ function M.enter(buf, opts)
 	local saved_state = {
 		entries = state.entries(buf),
 		modified = vim.bo[buf].modified,
-		open_folds = vim.deepcopy(actions.open_folds[root] or {}),
+		open_folds = vim.deepcopy(fold.open_folds[root] or {}),
 	}
 
 	sessions[buf] = {

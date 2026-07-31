@@ -162,7 +162,7 @@ end
 ---@param path string  absolute path under the filebuf root
 ---@return table|nil  the revealed display entry
 function M.reveal(buf, path)
-	return require("filebuf.actions").reveal_path(buf, path)
+	return require("filebuf.fold").reveal_path(buf, path)
 end
 
 --- Buffer lines as a set, for order-independent presence assertions.
@@ -247,7 +247,7 @@ function M.close_filebuf(buf)
 	end
 	-- Clear state that deliberately outlives the buffer, so specs do not
 	-- inherit each other's fold or show-hidden preferences.
-	require("filebuf.actions").open_folds = {}
+	require("filebuf.fold").open_folds = {}
 	require("filebuf.state").reset_preferences()
 end
 

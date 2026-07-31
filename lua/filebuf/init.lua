@@ -9,7 +9,7 @@ local buffer = require("filebuf.buffer")
 local sync = require("filebuf.sync")
 local snapshot = require("filebuf.snapshot")
 local decoration = require("filebuf.decoration")
-local actions = require("filebuf.actions")
+local fold = require("filebuf.fold")
 local search = require("filebuf.search")
 local scan = require("filebuf.scan")
 local state = require("filebuf.state")
@@ -443,7 +443,7 @@ function M.open(dir)
 	local existing_buf = vim.fn.bufnr("Filebuf")
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if state.is_filebuf(existing_buf) then
-			actions.capture_fold_state(existing_buf)
+			fold.capture_fold_state(existing_buf)
 			local st = state.init(existing_buf, dir)
 			state.attach(existing_buf)
 			vim.api.nvim_set_current_buf(existing_buf)
@@ -473,12 +473,12 @@ function M.open(dir)
 
 	vim.api.nvim_set_current_buf(buf)
 	set_window_options()
-	actions.set_winbar(buf, "Normal")
+	render.set_winbar(buf, "Normal")
 
 	render.tree(buf, { shallow_first = true })
 
 	if config.auto_focus_current_file and current_file ~= "" and vim.startswith(current_file, dir .. "/") then
-		local target = actions.reveal_path(buf, vim.fn.resolve(current_file)) or actions.reveal_path(buf, current_file)
+		local target = fold.reveal_path(buf, vim.fn.resolve(current_file)) or fold.reveal_path(buf, current_file)
 		if target then
 			pcall(vim.api.nvim_win_set_cursor, 0, { target.lnum, 0 })
 			vim.cmd("normal! zz")
@@ -500,7 +500,7 @@ function M.open(dir)
 		callback = function()
 			-- Persist fold state so reopen at the same root remembers
 			-- which folds the user had open.
-			actions.capture_fold_state(buf)
+			fold.capture_fold_state(buf)
 			-- Cancel the deep scan first so the buffer is writable for find
 			-- cleanup (restoring saved entries during BufUnload).
 			render.cancel_deep_scan(buf)
@@ -542,7 +542,7 @@ function M.setup(opts)
 		group = vim.api.nvim_create_augroup("filebuf_indent_options", { clear = true }),
 		pattern = { "shiftwidth", "tabstop", "expandtab" },
 		callback = function()
-			actions.invalidate_indent_cache()
+			fold.invalidate_indent_cache()
 		end,
 	})
 
@@ -556,7 +556,7 @@ function M.setup(opts)
 			for _, b in ipairs(state.buffers()) do
 				local st = state.get(b)
 				if st and st.mode == "normal" and vim.api.nvim_buf_is_valid(b) and not vim.bo[b].modified then
-					actions.set_winbar(b, "Refreshing...")
+					render.set_winbar(b, "Refreshing...")
 				end
 			end
 
@@ -571,7 +571,7 @@ function M.setup(opts)
 						if st.mode == "normal" then
 							require("filebuf.git").clear_ignore_cache(st.root)
 							render.tree(b, { keep_view = true, refresh_ignore = true })
-							actions.set_winbar(b, "Normal")
+							render.set_winbar(b, "Normal")
 						end
 					end
 				end

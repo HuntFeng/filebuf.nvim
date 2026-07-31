@@ -22,9 +22,18 @@ local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local git = require("filebuf.git")
 local snapshot = require("filebuf.snapshot")
-local actions = require("filebuf.actions")
+local fold = require("filebuf.fold")
 
 local M = {}
+
+--- Set winbar on every window that displays `buf`.
+---@param buf number
+---@param text string
+function M.set_winbar(buf, text)
+	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+		vim.api.nvim_set_option_value("winbar", text, { win = win })
+	end
+end
 
 -- Shallow-first render depth.  Internal — not user-configurable.
 local SNAP_DEPTH = 5
@@ -88,7 +97,7 @@ function M.entries(buf, entries, open_dirs)
 
 	-- Restore fold state (find mode preserves the open set from before).
 	-- restore_folds records the resulting state as it goes.
-	require("filebuf.actions").restore_folds(buf, open_dirs, entries)
+	fold.restore_folds(buf, open_dirs, entries)
 
 	-- Re-trigger async git status; the existing map stays visible meanwhile.
 	if config.git_status then
@@ -158,7 +167,7 @@ function M.reproject(buf, opts)
 
 	prof.start("render.reproject.nvim_buf_set_lines")
 	-- Capture native fold state before the buffer rewrite destroys it.
-	require("filebuf.actions").capture_fold_state(buf)
+	fold.capture_fold_state(buf)
 	st.rendering = true
 	st.render_serial = st.render_serial + 1
 	buffer.without_undo(buf, function()
@@ -174,7 +183,7 @@ function M.reproject(buf, opts)
 	st.dirty_lo, st.dirty_hi = nil, nil
 
 	prof.start("render.reproject.restore_folds")
-	require("filebuf.actions").restore_folds(buf, opts.open_dirs or require("filebuf.actions").open_folds[st.root])
+	fold.restore_folds(buf, opts.open_dirs or fold.open_folds[st.root])
 	prof.stop()
 
 	if view then
@@ -213,9 +222,8 @@ local function commit_render(buf, st, lines, open_dirs, view)
 	st.snap_clean = true
 	st.dirty_lo, st.dirty_hi = nil, nil
 
-	local actions = require("filebuf.actions")
 	prof.start("render.commit.restore_folds")
-	actions.restore_folds(buf, open_dirs)
+	fold.restore_folds(buf, open_dirs)
 	prof.stop()
 
 	if config.git_status then
@@ -262,20 +270,20 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 	st.deep_scan_job = nil
 
 	if not output then
-		actions.set_winbar(buf, "Normal")
+		M.set_winbar(buf, "Normal")
 		vim.notify("filebuf: deep scan failed — showing partial tree", vim.log.levels.WARN)
 		return
 	end
 
 	-- Guard: a newer render has already replaced the shallow view.
 	if st.render_serial ~= capture_serial then
-		actions.set_winbar(buf, "Normal")
+		M.set_winbar(buf, "Normal")
 		return
 	end
 
 	-- Guard: user edited the buffer during the deep scan.
 	if vim.bo[buf].modified then
-		actions.set_winbar(buf, "Normal")
+		M.set_winbar(buf, "Normal")
 		vim.notify(
 			"filebuf: deep scan complete — buffer has unsaved edits, use :FilebufRefresh to load full tree",
 			vim.log.levels.WARN
@@ -285,7 +293,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Guard: snapshot no longer matches the buffer (another safety).
 	if not st.snap_clean then
-		actions.set_winbar(buf, "Normal")
+		M.set_winbar(buf, "Normal")
 		return
 	end
 
@@ -304,7 +312,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Re-render: full buffer write, preserve folds + cursor position.
 	local view = vim.fn.winsaveview()
-	local open_dirs = require("filebuf.actions").open_folds[st.root]
+	local open_dirs = fold.open_folds[st.root]
 	commit_render(buf, st, lines, open_dirs, view)
 
 	-- Restore cursor to the same path (line numbers shifted).
@@ -315,7 +323,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 		end
 	end
 
-	actions.set_winbar(buf, "Normal")
+	M.set_winbar(buf, "Normal")
 end
 
 --- Shallow sync scan + kick off async deep scan.
@@ -325,11 +333,10 @@ end
 local function _tree_shallow_then_deep(buf, st, opts)
 	prof.start("render.tree.shallow")
 
-	local actions = require("filebuf.actions")
 	if not opts.open_dirs then
-		actions.capture_fold_state(buf)
+		fold.capture_fold_state(buf)
 	end
-	local open_dirs = opts.open_dirs or actions.open_folds[st.root]
+	local open_dirs = opts.open_dirs or fold.open_folds[st.root]
 
 	-- 1. Scan: shallow depth only ------------------------------------
 	prof.start("render.tree.shallow.scan")
@@ -366,7 +373,7 @@ local function _tree_shallow_then_deep(buf, st, opts)
 	-- The buffer stays modifiable so the user can start editing
 	-- immediately; if they do, the deep-scan completing will notice
 	-- vim.bo[buf].modified and skip the update (keeping their edits).
-	actions.set_winbar(buf, "Scanning...")
+	M.set_winbar(buf, "Scanning...")
 	local capture_serial = st.render_serial
 
 	local _, ignored_dirs = git.build_ignore_set(st.root)
@@ -379,7 +386,7 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		-- on_progress: update winbar with live entry count.
 		function(count)
 			if vim.api.nvim_buf_is_valid(buf) then
-				actions.set_winbar(buf, string.format("Scanning... %d entries", count))
+				M.set_winbar(buf, string.format("Scanning... %d entries", count))
 			end
 		end,
 		-- on_done: rebuild snapshot and re-render.
@@ -393,7 +400,7 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		st.deep_scan_job = job_id
 	else
 		-- Non-GNU find: fall back to synchronous full-depth scan.
-		actions.set_winbar(buf, "Normal")
+		M.set_winbar(buf, "Normal")
 		M.tree(buf, {
 			keep_view = true,
 			show_hidden = show_hidden,
@@ -430,11 +437,10 @@ function M.tree(buf, opts)
 
 	-- Which directories to leave open afterwards.  Capture native fold
 	-- state now — the buffer rewrite in commit_render will destroy it.
-	local actions = require("filebuf.actions")
 	if not opts.open_dirs then
-		actions.capture_fold_state(buf)
+		fold.capture_fold_state(buf)
 	end
-	local open_dirs = opts.open_dirs or actions.open_folds[st.root]
+	local open_dirs = opts.open_dirs or fold.open_folds[st.root]
 
 	-- Clear search-match highlighting (line numbers mean nothing after re-render).
 	st.matches = nil
