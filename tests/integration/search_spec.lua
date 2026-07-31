@@ -3,10 +3,8 @@
 --
 -- Native `/` can only match entries already on screen, so filebuf falls back
 -- to querying the whole tree and revealing just the ancestor chain of each
--- hit.  CI runs the suite both with and without fd installed, so these tests
--- stick to plain-substring patterns that both the fd and find(1) backends
--- handle identically, and assert on revealed paths rather than on engine
--- behaviour.
+-- hit.  These tests use plain-substring patterns that find(1) handles
+-- identically, and assert on revealed paths rather than on engine behaviour.
 ----------------------------------------------------------------------
 local helpers = require("tests.helpers")
 local search = require("filebuf.search")
@@ -191,7 +189,7 @@ describe("search", function()
 			assert.equals(1, #warnings)
 			assert.is_true(warnings[1]:find("pattern not found", 1, true) ~= nil)
 
-			-- "^a" matches the buffer line "a/" but no basename, so fd/find
+			-- "^a" matches the buffer line "a/" but no basename, so find
 			-- return nothing.  That is not a failure worth reporting.
 			warnings = {}
 			search.run(buf, "^a")

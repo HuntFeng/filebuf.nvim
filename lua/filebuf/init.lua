@@ -15,7 +15,6 @@ local snapshot = require("filebuf.snapshot")
 local decoration = require("filebuf.decoration")
 local actions = require("filebuf.actions")
 local search = require("filebuf.search")
-local find = require("filebuf.find")
 local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local render = require("filebuf.render")
@@ -194,7 +193,7 @@ local function setup_keymaps(buf)
 
 	if km.find_mode then
 		vim.keymap.set("n", km.find_mode, function()
-			find.enter(buf)
+			search.enter(buf)
 		end, { buffer = buf, desc = "filebuf: find mode" })
 	end
 end
@@ -303,7 +302,7 @@ local function save_buffer(buf)
 		-- Otherwise the snapshot (already in memory from the last render) is
 		-- the disk baseline.  A fresh find(1) is only the last-resort fallback
 		-- when there is no snapshot yet.
-		local disk_entries = find.query_entries(buf)
+		local disk_entries = search.query_entries(buf)
 			or (st.snap and snapshot.to_entries(st.snap, st.show_hidden))
 			or scan.scan_disk_entries(st.root)
 
@@ -346,7 +345,7 @@ local function save_buffer(buf)
 		prof.stop()
 
 		if st.mode == "find" then
-			find.exit(buf)
+			search.exit(buf)
 		end
 
 		search.clear(buf)
@@ -456,7 +455,7 @@ function M.open(dir)
 			-- Cancel the deep scan first so the buffer is writable for find
 			-- cleanup (restoring saved entries during BufUnload).
 			render.cancel_deep_scan(buf)
-			find.cleanup(buf)
+			search.cleanup(buf)
 			state.clear(buf)
 		end,
 	})

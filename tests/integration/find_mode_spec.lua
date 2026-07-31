@@ -3,7 +3,7 @@
 ----------------------------------------------------------------------
 local helpers = require("tests.helpers")
 local config = require("filebuf.config")
-local find = require("filebuf.find")
+local search = require("filebuf.search")
 
 describe("find mode", function()
 	local tmpdir
@@ -30,7 +30,7 @@ describe("find mode", function()
 		vim.fn.input = function()
 			return "txt"
 		end
-		find.enter(buf)
+		search.enter(buf)
 
 		assert.equals("find", helpers.state(buf).mode, "should be in find mode")
 	end)
@@ -46,10 +46,10 @@ describe("find mode", function()
 		vim.fn.input = function()
 			return "file"
 		end
-		find.enter(buf)
+		search.enter(buf)
 		assert.equals("find", helpers.state(buf).mode)
 
-		find.exit(buf)
+		search.exit(buf)
 		assert.equals("normal", helpers.state(buf).mode, "mode should return to normal")
 	end)
 
@@ -66,10 +66,10 @@ describe("find mode", function()
 		vim.fn.input = function()
 			return "file"
 		end
-		find.enter(buf)
+		search.enter(buf)
 		-- The async job is running; we don't wait for results before exiting.
 		-- The important thing is that exit restores the snapshot.
-		find.exit(buf)
+		search.exit(buf)
 
 		assert.same(original_lines, helpers.get_buffer_lines(buf), "should restore original view")
 	end)
@@ -87,18 +87,18 @@ describe("find mode", function()
 		buf = helpers.open_filebuf(tmpdir)
 
 		-- Manually set up a find-mode state (simulating what enter would do).
-		-- The session itself is module-local to filebuf.find, so the baseline is
+		-- The session itself is module-local to filebuf.search, so the baseline is
 		-- injected by stubbing the accessor the save path actually calls.
-		local find = require("filebuf.find")
-		local real_query_entries, real_exit = find.query_entries, find.exit
+		local search = require("filebuf.search")
+		local real_query_entries, real_exit = search.query_entries, search.exit
 		helpers.state(buf).mode = "find"
-		find.query_entries = function()
+		search.query_entries = function()
 			return {
 				{ name = "dir", type = "dir", path = tmpdir .. "/dir", indent = 0 },
 				{ name = "inquery.txt", type = "file", path = tmpdir .. "/dir/inquery.txt", indent = 1 },
 			}
 		end
-		find.exit = function() end
+		search.exit = function() end
 
 		-- Render those entries.
 		local lines = { "dir/", "  inquery.txt" }
@@ -112,7 +112,7 @@ describe("find mode", function()
 		assert.equals("should survive", helpers.read_file(tmpdir .. "/dir/notinquery.lua"))
 
 		-- Clean up the mode state.
-		find.query_entries, find.exit = real_query_entries, real_exit
+		search.query_entries, search.exit = real_query_entries, real_exit
 		if helpers.state(buf) then
 			helpers.state(buf).mode = "normal"
 		end
@@ -126,7 +126,7 @@ describe("find mode", function()
 		vim.fn.input = function()
 			return ""
 		end
-		find.enter(buf)
+		search.enter(buf)
 
 		assert.equals("normal", helpers.state(buf).mode, "should stay in normal mode with empty pattern")
 		assert.same(original_lines, helpers.get_buffer_lines(buf), "buffer should be unchanged")
@@ -139,13 +139,13 @@ describe("find mode", function()
 		vim.fn.input = function()
 			return "txt"
 		end
-		find.enter(buf)
+		search.enter(buf)
 		assert.equals("find", helpers.state(buf).mode)
 
 		-- Cleanup should be idempotent.
-		find.cleanup(buf)
+		search.cleanup(buf)
 		assert.equals("normal", helpers.state(buf).mode)
 
-		find.cleanup(buf) -- second call should not error
+		search.cleanup(buf) -- second call should not error
 	end)
 end)

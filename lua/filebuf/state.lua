@@ -69,7 +69,7 @@ function M.init(buf, root)
 		--- "Show hidden entries" for this buffer: the remembered preference for
 		--- this root, else the configured default.  Owned here rather than in
 		--- config, which toggle_hidden used to mutate globally -- that affected
-		--- every other filebuf and leaked into filebuf.search's fd arguments.
+		--- every other filebuf and leaked into filebuf.search's find arguments.
 		show_hidden = hidden_by_root[root] or (require("filebuf.config").show_hidden and true or false),
 
 		--- Whether the buffer still matches snap.view line for line.  While

@@ -23,10 +23,6 @@ https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 - neovim >= 0.10.0
 - git  (preinsatlled on most linux distros)
 - find (preinsatlled on most linux distros)
-- (Optional but recommended) [`fd`](https://github.com/sharkdp/fd)
-
-> [!TIP]
-> Install [`fd`](https://github.com/sharkdp/fd) for a faster and more capable `/` fallback search. The plugin detects it automatically and falls back to `find` if it's missing. Directory listing itself needs neither — it uses one `readdir` per expanded folder.
 
 `lazy.nvim` or other similar package manager
 ```lua
@@ -61,7 +57,7 @@ Three things follow from that:
 
 `/` is left alone: native incremental search, history and `n`/`N` all behave normally.
 
-On top of that, **every** `/` also searches the whole tree with `fd` (or `find`) — a match on screen tells you nothing about how many more are still unloaded on disk. For each hit filebuf expands only the folders leading to it, so a match at `a/b/c/file.txt` loads `a`, `b` and `c` while sibling subfolders of each are listed but left collapsed.
+On top of that, **every** `/` also searches the whole tree with `find(1)` — a match on screen tells you nothing about how many more are still unloaded on disk. For each hit filebuf expands only the folders leading to it, so a match at `a/b/c/file.txt` loads `a`, `b` and `c` while sibling subfolders of each are listed but left collapsed.
 
 Every match is highlighted with `FilebufSearchMatch`. The cursor stays put if it's already on a match (as it will be when the native search found one) and otherwise jumps to the topmost match; `n`/`N` then cycle through them as usual.
 

@@ -3,107 +3,76 @@
 --
 -- Every directory is lazy-loaded, so entries not yet on screen are invisible
 -- to native `/`.  Use `g/` (find mode) for interactive asynchronous search,
--- or `:FilebufFind <pattern>` to query the whole tree synchronously with fd
--- (find(1) fallback) and load the ancestor chain of each hit — sibling
--- subdirectories along the way are listed but not expanded.  Matches are
--- highlighted via the decoration provider.
+-- or `:FilebufFind <pattern>` to query the whole tree synchronously with
+-- find(1) and load the ancestor chain of each hit — sibling subdirectories
+-- along the way are listed but not expanded.  Matches are highlighted via
+-- the decoration provider.
 --
--- The pattern arrives as a Vim regex and has to be handed to a different
--- engine.  Vim-only atoms are stripped and, if any other escape survives, the
--- query degrades to a literal-substring search.  The find(1) fallback is
--- always a case-insensitive basename substring match — find has no regex.
+-- The pattern arrives as a Vim regex.  Vim-only atoms are stripped and any
+-- remaining special characters are reduced to a literal substring, then
+-- find(1) does a case-insensitive basename substring match.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
 local actions = require("filebuf.actions")
+local buffer = require("filebuf.buffer")
 local state = require("filebuf.state")
+local render = require("filebuf.render")
 
 local M = {}
 
---- Cached fd executable name ("fd" or "fdfind"); false when absent.
-local _fd_cmd
-local function fd_cmd()
-	if _fd_cmd == nil then
-		if vim.fn.executable("fd") == 1 then
-			_fd_cmd = "fd"
-		elseif vim.fn.executable("fdfind") == 1 then
-			_fd_cmd = "fdfind"
-		else
-			_fd_cmd = false
-		end
-	end
-	return _fd_cmd or nil
-end
+-- Session state for async find mode: bufnr -> { job, timer, tree, pattern, saved_state, query_entries }
+local sessions = {}
 
---- Vim-only regex atoms that have no equivalent in fd's engine.  Dropping them
---- keeps the surrounding pattern usable instead of erroring out.
+----------------------------------------------------------------------
+-- Pattern translation
+----------------------------------------------------------------------
+
+--- Vim-only regex atoms that have no equivalent in plain-text search.
 local VIM_ATOMS = { "\\v", "\\V", "\\m", "\\M", "\\<", "\\>", "\\zs", "\\ze" }
 
---- Translate a Vim search pattern into a pattern for fd.
+--- Regex metacharacters to strip for find(1) literal-substring matching.
+local REGEX_META = "[%*%?%[%]%(%)%|%+%^%$%.]"
+
+--- Translate a Vim search pattern into a plain substring for find(1).
 ---@param pattern string
----@return string  translated pattern
----@return boolean literal      pass it to fd as a fixed string
----@return boolean ignore_case  the pattern requested case-insensitivity (\c)
-local function translate_pattern(pattern)
-	local ignore_case = false
+---@return string|nil  needle for find -iname, or nil when empty
+local function pattern_to_substring(pattern)
 	local p = pattern
 
-	if p:find("\\c", 1, true) then
-		ignore_case = true
-	end
-	p = p:gsub("\\[cC]", "")
+	-- Strip Vim-only atoms.
 	for _, atom in ipairs(VIM_ATOMS) do
 		p = p:gsub(vim.pesc(atom), "")
 	end
 
-	-- Any remaining backslash escape is Vim-specific enough that reinterpreting
-	-- it as a Rust regex would silently change the meaning.  Strip the
-	-- backslashes and search for the literal text instead.
-	if p:find("\\", 1, true) then
-		return (p:gsub("\\", "")), true, ignore_case
-	end
-	return p, false, ignore_case
-end
+	-- Strip \c / \C — find -iname is always case-insensitive.
+	p = p:gsub("\\[cC]", "")
 
---- Cached fd executable name ("fd" or "fdfind"); false when absent.
---- Exported so find.lua can reuse it.
-function M.fd_cmd()
-	return fd_cmd()
-end
+	-- Any remaining backslash escape is Vim-specific; strip the backslashes
+	-- and treat the result as literal text.
+	p = p:gsub("\\", "")
 
---- Build an fd argv for searching under root for pattern.
---- Returns nil if the pattern translates to empty or if fd is unavailable.
----@param root    string
----@param pattern string  a Vim search pattern
----@param show_hidden? boolean  defaults to config.show_hidden
----@return string[]|nil  argv ready for vim.system or vim.fn.systemlist
-function M.build_fd_argv(root, pattern, show_hidden)
-	local fd = fd_cmd()
-	if not fd then
+	-- Strip regex metacharacters — find -iname only does glob-style matching
+	-- with *, ?, [], and we don't want to re-derive that from a Vim regex.
+	p = p:gsub(REGEX_META, "")
+
+	if p == "" then
 		return nil
 	end
-	if show_hidden == nil then
-		show_hidden = config.show_hidden
-	end
-
-	local translated, literal, ignore_case = translate_pattern(pattern)
-	if translated == "" then
-		return nil
-	end
-
-	local argv = { fd, "--color", "never" }
-	if show_hidden then
-		argv[#argv + 1] = "-H"
-	end
-	if literal then
-		argv[#argv + 1] = "--fixed-strings"
-	end
-	if ignore_case then
-		argv[#argv + 1] = "--ignore-case"
-	end
-	vim.list_extend(argv, { "--", translated, root })
-	return argv
+	return p
 end
+
+--- Build a find(1) argv for searching under root.
+---@param root string
+---@param needle string  plain substring (already translated)
+---@return string[]  argv ready for vim.system or vim.fn.systemlist
+local function build_find_argv(root, needle)
+	return { "find", root, "-mindepth", "1", "-iname", "*" .. needle .. "*" }
+end
+
+----------------------------------------------------------------------
+-- Synchronous query
+----------------------------------------------------------------------
 
 --- Query the tree under `root` for `pattern` synchronously.
 ---
@@ -119,36 +88,21 @@ function M.query(root, pattern, show_hidden)
 	if show_hidden == nil then
 		show_hidden = config.show_hidden
 	end
-	local translated, literal, ignore_case = translate_pattern(pattern)
-	if translated == "" then
+
+	local needle = pattern_to_substring(pattern)
+	if not needle then
 		prof.stop()
-		return {}, false
+		return {}
 	end
 
-	local out
-	local argv = M.build_fd_argv(root, pattern, show_hidden)
-	if argv then
-		out = vim.fn.systemlist(argv)
-	else
-		-- fd unavailable: use find fallback (no regex, case-insensitive basename match).
-		-- Hidden/ignored filtering happens below.
-		local needle = literal and translated or translated:gsub("[%*%?%[%]%(%)%|%+%^%$%.]", "")
-		if needle == "" then
-			prof.stop()
-			return {}, false
-		end
-		out = vim.fn.systemlist({ "find", root, "-mindepth", "1", "-iname", "*" .. needle .. "*" })
-	end
+	local out = vim.fn.systemlist(build_find_argv(root, needle))
 
 	local paths = {}
 	for _, raw in ipairs(out) do
-		-- fd appends "/" to directories; entry paths never carry one.
-		local path = raw:sub(-1) == "/" and raw:sub(1, -2) or raw
-		if path ~= "" and vim.startswith(path, root .. "/") then
-			local rel = path:sub(#root + 2)
+		if raw ~= "" and vim.startswith(raw, root .. "/") then
+			local rel = raw:sub(#root + 2)
 			-- Skip hits under a dot-prefixed component when hidden entries
-			-- aren't shown; reveal_path could not surface them anyway.  fd
-			-- already excludes these, but find does not.
+			-- aren't shown; reveal_path could not surface them anyway.
 			local skip = false
 			if not show_hidden then
 				for component in rel:gmatch("[^/]+") do
@@ -159,7 +113,7 @@ function M.query(root, pattern, show_hidden)
 				end
 			end
 			if not skip then
-				paths[#paths + 1] = path
+				paths[#paths + 1] = raw
 			end
 		end
 	end
@@ -269,6 +223,297 @@ function M.clear(buf)
 	local st = state.get(buf)
 	if st then
 		st.matches = nil
+	end
+end
+
+----------------------------------------------------------------------
+-- Tree building (find mode)
+----------------------------------------------------------------------
+
+--- Insert an absolute path into the tree, creating intermediate dir nodes.
+--- No is_dir parameter — find(1) doesn't mark directories.  When a previously
+--- inserted leaf node turns out to be a directory (because another result
+--- appears inside it), the node is upgraded from "file" to "dir".
+local function tree_insert(tree, root, abs_path)
+	local rel = abs_path:sub(#root + 2) -- strip "root/"
+	local parts = {}
+	for part in rel:gmatch("[^/]+") do
+		parts[#parts + 1] = part
+	end
+
+	local node = tree
+	for i, part in ipairs(parts) do
+		local is_final = i == #parts
+		if not node.children[part] then
+			local part_type = is_final and "file" or "dir"
+			node.children[part] = { type = part_type, children = {} }
+		elseif not is_final and node.children[part].type == "file" then
+			-- Matched directory now has a child matched inside it — upgrade.
+			node.children[part].type = "dir"
+		end
+		node = node.children[part]
+	end
+end
+
+--- Flatten the tree into an entry list, sorted dirs-first + alphabetically.
+local function tree_flatten(tree, root, current_path, indent)
+	local entries = {}
+	local names = {}
+	for name in pairs(tree.children) do
+		names[#names + 1] = name
+	end
+	table.sort(names, function(a, b)
+		local a_is_dir = tree.children[a].type == "dir"
+		local b_is_dir = tree.children[b].type == "dir"
+		if a_is_dir ~= b_is_dir then
+			return a_is_dir
+		end
+		return a < b
+	end)
+
+	for _, name in ipairs(names) do
+		local node = tree.children[name]
+		local path = current_path == "" and (root .. "/" .. name) or (current_path .. "/" .. name)
+		entries[#entries + 1] = {
+			name = name,
+			type = node.type,
+			path = path,
+			indent = indent,
+			-- Dot-prefixed names still dim in find mode; without this the results
+			-- lost every decoration the normal tree has.
+			is_hidden = (name:sub(1, 1) == ".") or nil,
+		}
+
+		if node.type == "dir" and next(node.children) then
+			local sub = tree_flatten(node, root, path, indent + 1)
+			for _, e in ipairs(sub) do
+				entries[#entries + 1] = e
+			end
+		end
+	end
+
+	return entries
+end
+
+----------------------------------------------------------------------
+-- Async query via vim.system (find)
+----------------------------------------------------------------------
+
+local function query_async(root, pattern, on_line, on_done)
+	local needle = pattern_to_substring(pattern)
+	if not needle then
+		on_done()
+		return
+	end
+
+	local argv = build_find_argv(root, needle)
+	local stdout_buffer = ""
+	local job = vim.system(argv, {
+		stdout = function(_, data)
+			if data then
+				stdout_buffer = stdout_buffer .. data
+				local lines = vim.split(stdout_buffer, "\n")
+				-- Keep the incomplete final line in the buffer.
+				stdout_buffer = lines[#lines]
+				for i = 1, #lines - 1 do
+					local line = lines[i]
+					if line ~= "" and vim.startswith(line, root .. "/") then
+						on_line(line)
+					end
+				end
+			end
+		end,
+	}, function()
+		-- Process any remaining partial line.
+		if stdout_buffer ~= "" and vim.startswith(stdout_buffer, root .. "/") then
+			on_line(stdout_buffer)
+		end
+		-- Schedule the callback in the main event loop (vim.system's on_exit
+		-- runs in a fast event context where nvim_buf_is_valid isn't allowed).
+		vim.schedule(on_done)
+	end)
+
+	return job
+end
+
+----------------------------------------------------------------------
+-- Find mode render
+----------------------------------------------------------------------
+
+local function draw(buf)
+	local session = sessions[buf]
+	if not session or not session.tree then
+		return
+	end
+
+	local entries = tree_flatten(session.tree, state.root(buf), "", 0)
+	-- Scoped baseline for save diffing: unmatched files must not look deleted.
+	session.query_entries = entries
+	render.entries(buf, entries, nil)
+	vim.cmd("silent! normal! zR")
+	vim.cmd("silent! normal! zx")
+end
+
+--- The entry list find mode is currently showing, or nil outside find mode.
+--- Used as the :w diff baseline so a save in find mode only touches the
+--- entries that are actually on screen.
+---@param buf number
+---@return table[]|nil
+function M.query_entries(buf)
+	local session = sessions[buf]
+	return session and session.query_entries or nil
+end
+
+----------------------------------------------------------------------
+-- Enter / exit find mode
+----------------------------------------------------------------------
+
+--- Enter async find mode.
+---@param buf number
+function M.enter(buf)
+	local st = state.get(buf)
+	if not st then
+		return
+	end
+	local root = st.root
+
+	-- Cancel any in-flight deep scan so find mode and the snap-load
+	-- completion don't race on the same buffer.
+	render.cancel_deep_scan(buf)
+
+	-- Tear down any existing session so re-pressing g/ restarts cleanly.
+	if sessions[buf] then
+		M.exit(buf)
+	end
+
+	-- Prompt for the search pattern.
+	local pattern = vim.fn.input("Filebuf find: ")
+	if pattern == "" then
+		return
+	end
+
+	-- Record the pattern so n / N can navigate between matches.
+	vim.fn.setreg("/", pattern)
+
+	-- Snapshot normal-mode state for restore on <Esc>.  state.entries reflects
+	-- unsaved edits, so restoring it puts the user's text back as it was.
+	local saved_state = {
+		entries = state.entries(buf),
+		modified = vim.bo[buf].modified,
+		open_folds = vim.deepcopy(actions.open_folds[root] or {}),
+	}
+
+	sessions[buf] = {
+		pattern = pattern,
+		saved_state = saved_state,
+		tree = { type = "dir", children = {} },
+		dirty = false,
+		timer = nil,
+		job = nil,
+		query_entries = {},
+	}
+
+	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+		vim.api.nvim_set_option_value("winbar", "Find: " .. pattern, { win = win })
+	end
+	st.mode = "find"
+
+	-- Clear the buffer and start async query.
+	st.rendering = true
+	buffer.without_undo(buf, function()
+		vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
+	end)
+	st.rendering = false
+	vim.bo[buf].modified = false
+
+	-- Batched render: timer fires every ~80ms to avoid O(n) re-renders per hit.
+	local session = sessions[buf]
+	session.timer = vim.uv.new_timer()
+	session.timer:start(
+		80,
+		80,
+		vim.schedule_wrap(function()
+			if not sessions[buf] or not session.dirty then
+				return
+			end
+			session.dirty = false
+			if vim.api.nvim_buf_is_valid(buf) then
+				draw(buf)
+			end
+		end)
+	)
+
+	-- Start async find query.
+	session.job = query_async(root, pattern, function(path)
+		if not sessions[buf] then
+			return
+		end
+		tree_insert(sessions[buf].tree, root, path)
+		sessions[buf].dirty = true
+	end, function()
+		-- Job done: stop timer and flush one final render.
+		if sessions[buf] and sessions[buf].timer then
+			sessions[buf].timer:stop()
+		end
+		if vim.api.nvim_buf_is_valid(buf) then
+			draw(buf)
+			-- Place cursor on the first match if there is one, otherwise leave it at the top.
+			vim.cmd("silent! normal! n")
+		end
+	end)
+
+	-- Bind <Esc> to exit find mode (buffer-local, scoped to this session).
+	vim.keymap.set("n", "<Esc>", function()
+		M.exit(buf)
+	end, { buffer = buf, desc = "filebuf: exit find mode" })
+end
+
+--- Exit find mode, restoring the snapshot saved on entry.
+---@param buf number
+function M.exit(buf)
+	local session = sessions[buf]
+	if not session then
+		return
+	end
+
+	-- Kill job and timer.
+	if session.job then
+		session.job:kill(9)
+	end
+	if session.timer then
+		session.timer:stop()
+	end
+
+	sessions[buf] = nil
+
+	local st = state.get(buf)
+	if st then
+		local saved = session.saved_state
+		if saved and saved.entries and #saved.entries > 0 then
+			-- During BufUnload / BufDelete the buffer may no longer be
+			-- modifiable — pcall so the cleanup path does not error.
+			local ok = pcall(render.entries, buf, saved.entries, saved.open_folds)
+			if ok then
+				vim.bo[buf].modified = saved.modified
+			end
+		end
+
+		st.mode = "normal"
+	end
+
+	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+		vim.api.nvim_set_option_value("winbar", "Normal", { win = win })
+	end
+
+	-- Delete the <Esc> mapping so it doesn't shadow normal-mode <Esc>.
+	pcall(vim.keymap.del, "n", "<Esc>", { buffer = buf })
+end
+
+--- Clean up find-mode session on buffer delete/unload.
+---@param buf number
+function M.cleanup(buf)
+	if sessions[buf] then
+		M.exit(buf)
 	end
 end
 
