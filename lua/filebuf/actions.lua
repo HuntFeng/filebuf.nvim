@@ -12,12 +12,14 @@
 -- touched.  What is left is open/closed state, which the plugin persists
 -- per root in M.open_folds.
 --
--- That state is authoritative, not derived: it is updated as folds are
--- opened and closed, never recovered by scanning the buffer and asking
--- foldclosed() about every directory.  Reading it back cost a full-buffer
--- walk plus a vim.fn call per directory on every render *and* every fold
--- keystroke, which on a large tree was the single most expensive thing the
--- plugin did.
+-- Fold state is captured lazily — only before re-renders (which destroy
+-- native fold state) and on buffer close.  Between re-renders, Neovim
+-- handles fold state natively, and users can use any keymaps they want
+-- for zo, zc, za, zO, zR, zM without plugin intervention.
+--
+-- The capture_fold_state / restore_folds pair bridges the gap: capture
+-- reads live fold state from the buffer, and restore replays it after
+-- the buffer text is rewritten.
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
@@ -61,10 +63,36 @@ function M.mark_open(root, path, open)
 	M.open_set(root)[path] = open or nil
 end
 
---- Required lazily: render needs actions for fold rebuilding, and
---- actions needs render for expand/reveal re-renders.
-local function render()
-	return require("filebuf.render")
+--- Capture the current native fold state into M.open_folds for `buf`'s root.
+---
+--- Walks the buffer once, checking foldclosed() on every directory.
+--- Called before re-renders (which destroy native fold state) and on buffer
+--- close so that reopen at the same root remembers the user's fold preferences.
+---
+--- No call is needed on every fold keystroke — Neovim handles native fold
+--- state between re-renders; this only bridges the gap across buffer rewrites.
+---@param buf number
+function M.capture_fold_state(buf)
+	local root = state.root(buf)
+	if not root then
+		return
+	end
+
+	-- Don't capture from a buffer that hasn't been rendered yet (no snapshot
+	-- or empty snapshot).  A fresh buffer has no folds to read — and capturing
+	-- an empty set here would wipe fold state saved from a previous session.
+	local st = state.get(buf)
+	if not st or not st.snap or st.snap.n == 0 then
+		return
+	end
+
+	local set = {}
+	state.walk(buf, root, function(lnum, path, type_)
+		if type_ == "dir" and vim.fn.foldclosed(lnum) == -1 then
+			set[path] = true
+		end
+	end)
+	M.open_folds[root] = set
 end
 
 ----------------------------------------------------------------------
@@ -229,17 +257,28 @@ function M.restore_folds(buf, open_dirs, entries)
 	vim.cmd("silent! normal! zM")
 
 	local root = state.root(buf)
-	-- Post-zM every fold is closed; anything opened below is added back.
-	local recorded = {}
-	if root then
-		M.open_folds[root] = recorded
-	end
 
 	if not open_dirs then
+		-- Nothing to restore — leave M.open_folds alone so state saved
+		-- from a previous session survives (e.g. on fresh buffer open).
 		return
 	end
 	local is_open = type(open_dirs) == "function" and open_dirs or function(path)
 		return open_dirs[path]
+	end
+
+	-- Nothing to open: zM already left every fold closed.  Worth checking,
+	-- because after the first render open_folds[root] is an empty-but-truthy
+	-- table, and without this the walk below runs over the whole tree to
+	-- discover it has no work to do.
+	if type(open_dirs) == "table" and next(open_dirs) == nil then
+		return
+	end
+
+	-- Post-zM every fold is closed; anything opened below is added back.
+	local recorded = {}
+	if root then
+		M.open_folds[root] = recorded
 	end
 
 	local function open_dir(lnum, path)
@@ -255,14 +294,6 @@ function M.restore_folds(buf, open_dirs, entries)
 				open_dir(e.lnum, e.path)
 			end
 		end
-		return
-	end
-
-	-- Nothing to open: zM already left every fold closed.  Worth checking,
-	-- because after the first render open_folds[root] is an empty-but-truthy
-	-- table, and without this the walk below runs over the whole tree to
-	-- discover it has no work to do.
-	if type(open_dirs) == "table" and next(open_dirs) == nil then
 		return
 	end
 
@@ -299,45 +330,6 @@ function M.restore_folds(buf, open_dirs, entries)
 				open_dir(lnum, path)
 			end
 		end)
-	end
-end
-
---- Record every directory in the subtree at `entry` as open — the bookkeeping
---- half of `zO`.  With `entry` nil the whole buffer is marked (`zR`).
----
---- Neovim opens the nested folds itself but says nothing about which, so
---- this is the one place a walk is unavoidable.  It is still cheap next to
---- what zO/zR do first: load the subtree off disk.
----@param buf    number
----@param entry? table
-local function mark_subtree_open(buf, entry)
-	local root = state.root(buf)
-	if not root then
-		return
-	end
-	local set = M.open_set(root)
-
-	if not entry then
-		state.walk(buf, root, function(_, path, type_)
-			if type_ == "dir" then
-				set[path] = true
-			end
-		end)
-		return
-	end
-
-	set[entry.path] = true
-	local resolve = state.range_resolver(buf)
-	for lnum = entry.lnum + 1, vim.api.nvim_buf_line_count(buf) do
-		local e = resolve(lnum)
-		if e then
-			if e.indent <= entry.indent then
-				break -- left the subtree
-			end
-			if e.type == "dir" then
-				set[e.path] = true
-			end
-		end
 	end
 end
 
@@ -472,109 +464,6 @@ function M.reveal_path(buf, target_path)
 end
 
 ----------------------------------------------------------------------
--- Fold actions
-----------------------------------------------------------------------
-
---- Record what a fold command issued at `entry` actually did.
----
---- `zo`/`zc` act on the fold at the cursor, which is not always the
---- directory's own: closing a directory that has no fold of its own (no
---- children on screen) closes its parent instead.  One foldclosed() call
---- says which fold moved, and resolving that line names it.
----@param buf   number
----@param entry table
-local function sync_fold_at(buf, entry)
-	local root = state.root(buf)
-	if not root then
-		return
-	end
-
-	local start = vim.fn.foldclosed(entry.lnum)
-	if start == -1 then
-		M.mark_open(root, entry.path, true)
-	elseif start == entry.lnum then
-		M.mark_open(root, entry.path, false)
-	else
-		-- An enclosing fold closed instead; name it and record that.
-		local closed = state.resolve_entry(buf, start)
-		M.mark_open(root, closed and closed.path, false)
-	end
-end
-
---- Open a fold at `entry`.
----@param buf   number
----@param entry table
-function M.fold_open(buf, entry)
-	entry = resolve_dir_entry(buf, entry)
-	if not entry then
-		return
-	end
-
-	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-	vim.cmd("normal! zo")
-	sync_fold_at(buf, entry)
-end
-
---- Close a fold at `entry` and persist fold state.
----@param buf   number
----@param entry table
-function M.fold_close(buf, entry)
-	entry = resolve_dir_entry(buf, entry)
-	if not entry then
-		return
-	end
-
-	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-	vim.cmd("normal! zc")
-	sync_fold_at(buf, entry)
-end
-
---- Toggle a fold at `entry`.
----@param buf   number
----@param entry table
-function M.fold_toggle(buf, entry)
-	entry = resolve_dir_entry(buf, entry)
-	if not entry then
-		return
-	end
-
-	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-	local is_closed = vim.fn.foldclosedend(entry.lnum) ~= -1
-	vim.cmd(is_closed and "normal! zo" or "normal! zc")
-	sync_fold_at(buf, entry)
-end
-
---- Recursively open folds at `entry` (zO).
----@param buf   number
----@param entry table
-function M.fold_open_recursive(buf, entry)
-	entry = resolve_dir_entry(buf, entry)
-	if not entry then
-		return
-	end
-	vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
-	vim.cmd("normal! zO")
-	mark_subtree_open(buf, entry)
-end
-
---- Open all folds (zR).
----@param buf number
-function M.fold_open_all(buf)
-	vim.cmd("normal! zR")
-	mark_subtree_open(buf, nil)
-end
-
---- Close all folds (zM) and persist state.
----@param buf number
-function M.fold_close_all(buf)
-	vim.cmd("normal! zM")
-	local root = state.root(buf)
-	if root then
-		M.open_folds[root] = {}
-	end
-end
-
-----------------------------------------------------------------------
 -- Entry opening (file / symlink)
 ----------------------------------------------------------------------
 
@@ -609,7 +498,8 @@ function M.open_or_toggle(buf, entry)
 	end
 
 	if entry.type == "dir" then
-		M.fold_toggle(buf, entry)
+		vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
+		vim.cmd("normal! za")
 	else
 		M.open_entry(buf, entry)
 	end

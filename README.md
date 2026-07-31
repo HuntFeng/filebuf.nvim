@@ -107,9 +107,6 @@ require("filebuf").setup({
     -- Show hidden (dot) files by default
     show_hidden = false,
 
-    -- Respect .gitignore / .ignore patterns
-    respect_ignore = true,
-
     -- Confirm operations before saving
 	save_confirmation = true,
 
@@ -119,28 +116,26 @@ require("filebuf").setup({
     -- Default sort method, can change with FilebufSortMethod <method>
     sort_method = "type",
 
-    -- Max entries a single recursive expand (zO) may load
-    max_expand_entries = 20000,
-
-    -- Confirm before a recursive expand (zO) this large; false to never ask
-    expand_confirm_threshold = 1000,
+	--- Dirs deeper this are listed but their children are lazy loaded
+	max_depth = 20,
 
     -- Customize or disable keymaps (set to false to disable)
     keymaps = {
-        fold_open = "zo",
-        fold_close = "zc",
-        fold_toggle = "za",
-        fold_open_recursive = "zO",
-        fold_open_all = "zR",
-        fold_close_all = "zM",
+		-- Directory are neovim's native folds
+        -- Here are some useful built-in keymaps for folds in neovim
+        -- Remap them to your liking if or leave them as they are
+		-- fold close = "zc",
+		-- fold toggle = "za",
+		-- fold open recursive = "zO",
+		-- fold open all = "zR",
+		-- fold close all = "zM",
+        -- last fold = "[z"
+        -- next fold = "]z"
         open_file = "gf",
         open_or_toggle = "<CR>",
         toggle_preview = "K",
         toggle_hidden = "gh",
         close_filebuf = "q",
-
-        -- Not bound by default; add sensible keys:
-        -- find_mode = "g/",   -- enter async find mode
     },
 })
 ```

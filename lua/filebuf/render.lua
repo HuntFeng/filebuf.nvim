@@ -158,6 +158,8 @@ function M.reproject(buf, opts)
 	st.show_hidden = show_hidden
 
 	prof.start("render.reproject.nvim_buf_set_lines")
+	-- Capture native fold state before the buffer rewrite destroys it.
+	require("filebuf.actions").capture_fold_state(buf)
 	st.rendering = true
 	st.render_serial = st.render_serial + 1
 	buffer.without_undo(buf, function()
@@ -328,6 +330,9 @@ local function _tree_shallow_then_deep(buf, st, opts)
 	prof.start("render.tree.shallow")
 
 	local actions = require("filebuf.actions")
+	if not opts.open_dirs then
+		actions.capture_fold_state(buf)
+	end
 	local open_dirs = opts.open_dirs or actions.open_folds[st.root]
 
 	-- 1. Scan: shallow depth only ------------------------------------
@@ -428,10 +433,12 @@ function M.tree(buf, opts)
 
 	local view = opts.keep_view and vim.fn.winsaveview() or nil
 
-	-- Which directories to leave open afterwards.  No need to read the folds
-	-- back off the buffer: actions.open_folds has tracked them all along, and
-	-- it is equally valid on a fresh open, where there are no folds to read.
+	-- Which directories to leave open afterwards.  Capture native fold
+	-- state now — the buffer rewrite in commit_render will destroy it.
 	local actions = require("filebuf.actions")
+	if not opts.open_dirs then
+		actions.capture_fold_state(buf)
+	end
 	local open_dirs = opts.open_dirs or actions.open_folds[st.root]
 
 	-- Clear search-match highlighting (line numbers mean nothing after re-render).

@@ -14,30 +14,11 @@ local config = {
 	git_status = true,
 	show_hidden = false,
 	save_confirmation = true,
-
-	--- Maximum directory depth to load on initial scan.  Directories at this
-	--- depth are listed but their children load on demand when expanded.
 	max_depth = 20,
-
-	--- When true (default), filebuf disables netrw and intercepts directory
-	--- opens so `nvim <dir>` and `:e <dir>` open filebuf instead of netrw.
-	--- Set to false if you need netrw for remote file editing (scp://, etc.).
 	hijack_netrw = true,
-	--- Default sort order for entries within each directory.
-	--- You could change by FilebufSortMethod <method> on the fly
 	sort_method = "type",
-
-	--- Customizable keymaps.  Set any value to a key string to override,
-	--- or to `false` to disable the binding entirely.
 	---@type table<string, string|boolean>
 	keymaps = {
-		-- Directory fold actions
-		fold_open = "zo",
-		fold_close = "zc",
-		fold_toggle = "za",
-		fold_open_recursive = "zO",
-		fold_open_all = "zR",
-		fold_close_all = "zM",
 		open_file = "gf",
 		open_or_toggle = "<CR>",
 		preview = "K",
@@ -62,8 +43,6 @@ local HIGHLIGHTS = {
 	-- colour so it follows the colourscheme's search highlight.
 	FilebufSearchMatch = { link = "Search" },
 	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
-	-- Mode banner (normal/find mode indicator).
-	WinBar = { link = "TabLineSel" },
 }
 
 --- Define every filebuf highlight group.  Called from setup().
@@ -71,10 +50,7 @@ function config.define_highlights()
 	for name, def in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
 	end
-	-- WinBar is a built-in Neovim highlight group.  Setting it with
-	-- default=true would be a no-op (the built-in definition already
-	-- exists), so we must set it without default=true for the link to
-	-- actually take effect.
+	-- Mode banner (normal/find mode indicator).
 	vim.api.nvim_set_hl(0, "WinBar", { link = "TabLineSel" })
 end
 

@@ -148,10 +148,6 @@ local function setup_keymaps(buf)
 	local km = config.keymaps
 
 	local ENTRY_KEYMAPS = {
-		fold_open = { actions.fold_open, "filebuf: open fold" },
-		fold_close = { actions.fold_close, "filebuf: close fold" },
-		fold_toggle = { actions.fold_toggle, "filebuf: toggle fold" },
-		fold_open_recursive = { actions.fold_open_recursive, "filebuf: recursively open folds" },
 		open_file = { actions.open_entry, "filebuf: open file" },
 		open_or_toggle = { actions.open_or_toggle, "filebuf: open file / toggle dir" },
 		preview = { actions.preview_entry, "filebuf: preview file" },
@@ -170,10 +166,9 @@ local function setup_keymaps(buf)
 		end
 	end
 
-	local BUF_KEYMAPS = {
-		fold_open_all = { actions.fold_open_all, "filebuf: open all folds" },
-		fold_close_all = { actions.fold_close_all, "filebuf: close all folds" },
-	}
+	local BUF_KEYMAPS = {}
+	-- None currently; fold state is captured automatically before
+	-- re-renders, so users can use native fold keymaps (zR, zM, etc.).
 	for name, def in pairs(BUF_KEYMAPS) do
 		local key = km[name]
 		if key then
@@ -403,6 +398,7 @@ function M.open(dir)
 	local existing_buf = vim.fn.bufnr("Filebuf")
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if state.is_filebuf(existing_buf) then
+      actions.capture_fold_state(existing_buf)
 			local st = state.init(existing_buf, dir)
 			state.attach(existing_buf)
 			vim.api.nvim_set_current_buf(existing_buf)
@@ -457,6 +453,9 @@ function M.open(dir)
 		group = group,
 		buffer = buf,
 		callback = function()
+			-- Persist fold state so reopen at the same root remembers
+			-- which folds the user had open.
+			actions.capture_fold_state(buf)
 			-- Cancel the deep scan first so the buffer is writable for find
 			-- cleanup (restoring saved entries during BufUnload).
 			render.cancel_deep_scan(buf)
