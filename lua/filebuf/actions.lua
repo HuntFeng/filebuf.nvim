@@ -387,5 +387,13 @@ function M.reveal_path(buf, target_path)
 	return M.reveal_paths(buf, { target_path })[1]
 end
 
+--- Set winbar on every window that displays `buf`.
+---@param buf number
+---@param text string
+function M.set_winbar(buf, text)
+	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+		vim.api.nvim_set_option_value("winbar", text, { win = win })
+	end
+end
 
 return M

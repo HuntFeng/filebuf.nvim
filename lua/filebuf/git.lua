@@ -2,8 +2,6 @@
 -- Git status indicators.  A single `git status --porcelain` per refresh
 -- builds a path→status map the decoration provider consults per line.
 ----------------------------------------------------------------------
-local prof = require("filebuf.profiler")
-
 local M = {}
 
 -- porcelain code → { display char, highlight group }.  Worktree status is

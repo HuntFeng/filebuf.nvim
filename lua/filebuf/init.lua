@@ -80,16 +80,6 @@ local function setup_keymaps(buf)
 	end
 end
 
-
---- Set winbar on every window that displays `buf`.
----@param buf number
----@param text string
-local function set_winbar(buf, text)
-	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-		vim.api.nvim_set_option_value("winbar", text, { win = win })
-	end
-end
-
 --- Apply the window-local fold and display options to the current window.
 --- Folds are computed by 'foldexpr' from the buffer's indentation, so any
 --- window showing a filebuf needs these set before it renders.
@@ -487,7 +477,7 @@ function M.open(dir)
 
 	vim.api.nvim_set_current_buf(buf)
 	set_window_options()
-	set_winbar(buf, "Normal")
+	actions.set_winbar(buf, "Normal")
 
 	render.tree(buf, { shallow_first = true })
 
@@ -570,7 +560,7 @@ function M.setup(opts)
 			for _, b in ipairs(state.buffers()) do
 				local st = state.get(b)
 				if st and st.mode == "normal" and vim.api.nvim_buf_is_valid(b) and not vim.bo[b].modified then
-					set_winbar(b, "Refreshing...")
+					actions.set_winbar(b, "Refreshing...")
 				end
 			end
 
@@ -585,7 +575,7 @@ function M.setup(opts)
 						if st.mode == "normal" then
 							require("filebuf.git").clear_ignore_cache(st.root)
 							render.tree(b, { keep_view = true, refresh_ignore = true })
-							set_winbar(b, "Normal")
+							actions.set_winbar(b, "Normal")
 						end
 					end
 				end

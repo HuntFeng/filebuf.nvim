@@ -16,7 +16,6 @@
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
-local line_mod = require("filebuf.line")
 local sort = require("filebuf.sort")
 local snapshot = require("filebuf.snapshot")
 

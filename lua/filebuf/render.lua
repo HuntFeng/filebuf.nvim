@@ -17,6 +17,7 @@ local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local git = require("filebuf.git")
 local snapshot = require("filebuf.snapshot")
+local actions = require("filebuf.actions")
 
 local M = {}
 
@@ -25,13 +26,6 @@ local SNAP_DEPTH = 5
 
 -- Track in-flight deep scans: buf → { job_id, serial }
 local deep_scans = {}
-
--- Mirrors init.lua's set_winbar (duplicated here to avoid a circular require).
-local function set_winbar(buf, text)
-	for _, win in ipairs(vim.fn.win_findbuf(buf)) do
-		vim.api.nvim_set_option_value("winbar", text, { win = win })
-	end
-end
 
 --- Cancel any active deep scan for `buf`.  Safe to call when none is running.
 ---@param buf number
@@ -264,20 +258,20 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 	st.deep_scan_job = nil
 
 	if not output then
-		set_winbar(buf, "Normal")
+		actions.set_winbar(buf, "Normal")
 		vim.notify("filebuf: deep scan failed — showing partial tree", vim.log.levels.WARN)
 		return
 	end
 
 	-- Guard: a newer render has already replaced the shallow view.
 	if st.render_serial ~= capture_serial then
-		set_winbar(buf, "Normal")
+		actions.set_winbar(buf, "Normal")
 		return
 	end
 
 	-- Guard: user edited the buffer during the deep scan.
 	if vim.bo[buf].modified then
-		set_winbar(buf, "Normal")
+		actions.set_winbar(buf, "Normal")
 		vim.notify(
 			"filebuf: deep scan complete — buffer has unsaved edits, use :FilebufRefresh to load full tree",
 			vim.log.levels.WARN
@@ -287,7 +281,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 
 	-- Guard: snapshot no longer matches the buffer (another safety).
 	if not st.snap_clean then
-		set_winbar(buf, "Normal")
+		actions.set_winbar(buf, "Normal")
 		return
 	end
 
@@ -319,7 +313,7 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 		end
 	end
 
-	set_winbar(buf, "Normal")
+	actions.set_winbar(buf, "Normal")
 end
 
 --- Shallow sync scan + kick off async deep scan.
@@ -371,7 +365,7 @@ local function _tree_shallow_then_deep(buf, st, opts)
 	-- The buffer stays modifiable so the user can start editing
 	-- immediately; if they do, the deep-scan completing will notice
 	-- vim.bo[buf].modified and skip the update (keeping their edits).
-	set_winbar(buf, "Scanning...")
+	actions.set_winbar(buf, "Scanning...")
 	local capture_serial = st.render_serial
 
 	local _, ignored_dirs = git.build_ignore_set(st.root)
@@ -384,7 +378,7 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		-- on_progress: update winbar with live entry count.
 		function(count)
 			if vim.api.nvim_buf_is_valid(buf) then
-				set_winbar(buf, string.format("Scanning... %d entries", count))
+				actions.set_winbar(buf, string.format("Scanning... %d entries", count))
 			end
 		end,
 		-- on_done: rebuild snapshot and re-render.
@@ -398,7 +392,7 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		st.deep_scan_job = job_id
 	else
 		-- Non-GNU find: fall back to synchronous full-depth scan.
-		set_winbar(buf, "Normal")
+		actions.set_winbar(buf, "Normal")
 		M.tree(buf, {
 			keep_view = true,
 			show_hidden = show_hidden,
