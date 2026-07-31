@@ -43,7 +43,6 @@ local config = {
 		preview = "K",
 		toggle_hidden = "gh",
 		close_filebuf = "q",
-		find_mode = "g/",
 	},
 }
 

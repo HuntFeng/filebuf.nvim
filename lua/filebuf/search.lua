@@ -11,6 +11,10 @@
 -- The pattern arrives as a Vim regex.  Vim-only atoms are stripped and any
 -- remaining special characters are reduced to a literal substring, then
 -- find(1) does a case-insensitive basename substring match.
+--
+-- Public API:
+--   require("filebuf").search()                      -- skip ignored & hidden (default)
+--   require("filebuf").search({ skip_ignored = false, skip_hidden = false })
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
@@ -63,11 +67,30 @@ local function pattern_to_substring(pattern)
 end
 
 --- Build a find(1) argv for searching under root.
----@param root string
----@param needle string  plain substring (already translated)
+---
+--- When prune_dirs is given, ignored directories are pruned inline so their
+--- subtrees are never stat-ed.  find's -o short-circuits: paths matching
+--- -path … -prune are consumed by the left operand; everything else falls
+--- through to -iname on the right.  Explicit -print keeps the implicit
+--- default from leaking pruned directory names into the output.
+---@param root       string
+---@param needle     string  plain substring (already translated)
+---@param prune_dirs? table   relative directory paths to prune
 ---@return string[]  argv ready for vim.system or vim.fn.systemlist
-local function build_find_argv(root, needle)
-	return { "find", root, "-mindepth", "1", "-iname", "*" .. needle .. "*" }
+local function build_find_argv(root, needle, prune_dirs)
+	local cmd = { "find", root }
+	if prune_dirs and #prune_dirs > 0 then
+		for _, dir in ipairs(prune_dirs) do
+			local escaped = dir:gsub("([%*%?%[%]])", "\\%1")
+			vim.list_extend(cmd, { "(", "-path", root .. "/" .. escaped, "-prune", ")", "-o" })
+		end
+	end
+	-- Parenthesised with explicit -print: the implicit default -print only
+	-- fires when the whole expression is true, which would leak pruned
+	-- directories.  Wrapping the right operand in ( … -print ) keeps output
+	-- restricted to actual -iname matches.
+	vim.list_extend(cmd, { "(", "-mindepth", "1", "-iname", "*" .. needle .. "*", "-print", ")" })
+	return cmd
 end
 
 ----------------------------------------------------------------------
@@ -79,11 +102,12 @@ end
 --- Mirrors config so results can actually be displayed: hidden entries are
 --- only searched when show_hidden is on — revealing a hit that filter_visible
 --- would drop is pointless.
----@param root    string
----@param pattern string  a Vim search pattern
+---@param root       string
+---@param pattern    string  a Vim search pattern
 ---@param show_hidden? boolean  defaults to config.show_hidden
+---@param prune_dirs?  table    relative directory paths to prune
 ---@return string[] paths  absolute paths
-function M.query(root, pattern, show_hidden)
+function M.query(root, pattern, show_hidden, prune_dirs)
 	prof.start("search.query")
 	if show_hidden == nil then
 		show_hidden = config.show_hidden
@@ -95,7 +119,7 @@ function M.query(root, pattern, show_hidden)
 		return {}
 	end
 
-	local out = vim.fn.systemlist(build_find_argv(root, needle))
+	local out = vim.fn.systemlist(build_find_argv(root, needle, prune_dirs))
 
 	local paths = {}
 	for _, raw in ipairs(out) do
@@ -128,47 +152,15 @@ local function cursor_path(buf)
 	return entry and entry.path or nil
 end
 
---- Search, reveal every hit's ancestor chain, highlight the matches and place
---- the cursor on one of them.
----
---- Always queries the tree, even when the pattern already matches on screen:
---- finding an entry in the buffer says nothing about how many more are still
---- unloaded on disk.
----
---- @/ is left alone — the caller (e.g. :FilebufFind) owns it, and the user's
---- pattern still matches the freshly-revealed basename lines, so n/N keep
---- working.
----@param buf     number
----@param pattern string  a Vim search pattern
+--- Reveal paths in the buffer, record matches, set the cursor and notify.
+--- Shared by run() and search().
+---@param buf         number
+---@param paths       string[]
+---@param pattern     string
+---@param keep_cursor string|nil  when set and equal to a revealed path, leave cursor there
 ---@return number  how many matches were revealed
-function M.run(buf, pattern)
-	prof.start("search.run")
-	local root = state.root(buf)
-	if not root then
-		prof.stop()
-		return 0
-	end
-
-	-- Whether the pattern matches something already on screen.  Only used to
-	-- decide whether silence is appropriate: a Vim regex that matches buffer
-	-- text but no basename (say "^ *b") legitimately yields no disk hits, and
-	-- complaining about it would be wrong.
-	local matched_locally = vim.fn.search(pattern, "nw") ~= 0
-	local was_on = cursor_path(buf)
-
-	M.clear(buf)
-
-	local st = state.get(buf)
-	local paths = M.query(root, pattern, st and st.show_hidden)
-	if #paths == 0 then
-		if not matched_locally then
-			vim.notify("filebuf: pattern not found: " .. pattern, vim.log.levels.WARN)
-		end
-		prof.stop()
-		return 0
-	end
-
-	prof.start("search.run.reveal_paths")
+local function _reveal(buf, paths, pattern, keep_cursor)
+	prof.start("search._reveal")
 	local entries = actions.reveal_paths(buf, paths)
 	prof.stop()
 	if #entries == 0 then
@@ -176,7 +168,6 @@ function M.run(buf, pattern)
 			string.format("filebuf: %d match(es) for '%s', none reachable in the current view", #paths, pattern),
 			vim.log.levels.WARN
 		)
-		prof.stop()
 		return 0
 	end
 
@@ -196,9 +187,9 @@ function M.run(buf, pattern)
 		return a.lnum < b.lnum
 	end)
 	local target = entries[1]
-	if was_on and matches[was_on] then
+	if keep_cursor and matches[keep_cursor] then
 		for _, e in ipairs(entries) do
-			if e.path == was_on then
+			if e.path == keep_cursor then
 				target = e
 				break
 			end
@@ -217,6 +208,68 @@ function M.run(buf, pattern)
 	return #entries
 end
 
+--- Search, reveal every hit's ancestor chain, highlight the matches and place
+--- the cursor on one of them.
+---
+--- Always queries the tree, even when the pattern already matches on screen:
+--- finding an entry in the buffer says nothing about how many more are still
+--- unloaded on disk.
+---
+--- @/ is left alone — the caller (e.g. :FilebufFind) owns it, and the user's
+--- pattern still matches the freshly-revealed basename lines, so n/N keep
+--- working.
+---@param buf     number
+---@param pattern string  a Vim search pattern
+---@param opts?   table   { respect_ignored?: boolean }
+---@return number  how many matches were revealed
+function M.run(buf, pattern, opts)
+	prof.start("search.run")
+	opts = opts or {}
+	local respect_ignored = opts.respect_ignored
+	if respect_ignored == nil then
+		respect_ignored = true
+	end
+
+	local root = state.root(buf)
+	if not root then
+		prof.stop()
+		return 0
+	end
+
+	-- Whether the pattern matches something already on screen.  Only used to
+	-- decide whether silence is appropriate: a Vim regex that matches buffer
+	-- text but no basename (say "^ *b") legitimately yields no disk hits, and
+	-- complaining about it would be wrong.
+	local matched_locally = vim.fn.search(pattern, "nw") ~= 0
+	local was_on = cursor_path(buf)
+
+	M.clear(buf)
+
+	local st = state.get(buf)
+	local show_hidden = st and st.show_hidden
+
+	-- Build prune list when the user wants to respect ignored entries.
+	-- Independent of show_hidden: respect_ignored=false means search everything.
+	local prune_dirs = nil
+	if respect_ignored then
+		local _, ignored_dirs = require("filebuf.git").build_ignore_set(root)
+		prune_dirs = ignored_dirs
+	end
+
+	local paths = M.query(root, pattern, show_hidden, prune_dirs)
+	if #paths == 0 then
+		if not matched_locally then
+			vim.notify("filebuf: pattern not found: " .. pattern, vim.log.levels.WARN)
+		end
+		prof.stop()
+		return 0
+	end
+
+	local n = _reveal(buf, paths, pattern, was_on)
+	prof.stop()
+	return n
+end
+
 --- Drop the highlighted match set for `buf`.
 ---@param buf number
 function M.clear(buf)
@@ -224,6 +277,37 @@ function M.clear(buf)
 	if st then
 		st.matches = nil
 	end
+end
+
+--- Public search API.  Opens filebuf at cwd if not already in one, then enters
+--- async find mode.  Ignored directories are pruned by default so their
+--- subtrees are never stat-ed — pass `respect_ignored = false` to search
+--- everything.
+---
+--- Bind this to a key in your config:
+---   vim.keymap.set("n", "g/", function()
+---     require("filebuf").search()
+---   end, { desc = "filebuf: search tree" })
+---
+---@param opts? table  { skip_hidden?: boolean }
+function M.search(opts)
+	opts = opts or {}
+	local skip_hidden = opts.skip_hidden
+	if skip_hidden == nil then
+		skip_hidden = true
+	end
+
+	local buf = vim.api.nvim_get_current_buf()
+	if not state.is_filebuf(buf) then
+		-- Not in a filebuf — open one at cwd first.
+		require("filebuf").open()
+		buf = vim.api.nvim_get_current_buf()
+		if not state.is_filebuf(buf) then
+			return
+		end
+	end
+
+	M.enter(buf, { skip_hidden = skip_hidden })
 end
 
 ----------------------------------------------------------------------
@@ -299,14 +383,14 @@ end
 -- Async query via vim.system (find)
 ----------------------------------------------------------------------
 
-local function query_async(root, pattern, on_line, on_done)
+local function query_async(root, pattern, on_line, on_done, prune_dirs)
 	local needle = pattern_to_substring(pattern)
 	if not needle then
 		on_done()
 		return
 	end
 
-	local argv = build_find_argv(root, needle)
+	local argv = build_find_argv(root, needle, prune_dirs)
 	local stdout_buffer = ""
 	local job = vim.system(argv, {
 		stdout = function(_, data)
@@ -369,13 +453,20 @@ end
 ----------------------------------------------------------------------
 
 --- Enter async find mode.
----@param buf number
-function M.enter(buf)
+---@param buf  number
+---@param opts? table  { skip_hidden?: boolean }
+function M.enter(buf, opts)
 	local st = state.get(buf)
 	if not st then
 		return
 	end
 	local root = st.root
+
+	opts = opts or {}
+	local skip_hidden = opts.skip_hidden
+	if skip_hidden == nil then
+		skip_hidden = true
+	end
 
 	-- Cancel any in-flight deep scan so find mode and the snap-load
 	-- completion don't race on the same buffer.
@@ -443,6 +534,13 @@ function M.enter(buf)
 		end)
 	)
 
+	-- Build prune list from ignore set when respecting ignored entries.
+	local prune_dirs = nil
+	if skip_hidden then
+		local _, ignored_dirs = require("filebuf.git").build_ignore_set(root)
+		prune_dirs = ignored_dirs
+	end
+
 	-- Start async find query.
 	session.job = query_async(root, pattern, function(path)
 		if not sessions[buf] then
@@ -460,7 +558,7 @@ function M.enter(buf)
 			-- Place cursor on the first match if there is one, otherwise leave it at the top.
 			vim.cmd("silent! normal! n")
 		end
-	end)
+	end, prune_dirs)
 
 	-- Bind <Esc> to exit find mode (buffer-local, scoped to this session).
 	vim.keymap.set("n", "<Esc>", function()

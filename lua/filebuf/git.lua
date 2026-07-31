@@ -189,7 +189,7 @@ function M.build_ignore_set(root)
 		return empty.set, empty.dirs
 	end
 	local set = {}
-	local dirs = {}
+	local dirs = { ".git" }
 	for line in output:gmatch("[^\r\n]+") do
 		local path = line
 		local is_dir = path:sub(-1) == "/"

@@ -60,6 +60,11 @@ M.actions = actions
 --- and for user scripts that need to resolve a line to an entry.
 M.state = state
 
+--- Tree-wide search: prompts for a pattern, reveals every match.
+---   require("filebuf").search()                  -- respect .gitignore (default)
+---   require("filebuf").search({ respect_ignored = false })
+M.search = search.search
+
 --- Enable/disable the profiler; report to :messages.
 function M.profile(enable)
 	prof.set_enabled(enable)

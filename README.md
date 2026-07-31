@@ -65,6 +65,25 @@ Because unloaded entries aren't in the buffer, Vim's own `E486: Pattern not foun
 
 Hidden and ignored entries are only searched when they'd actually be displayable, i.e. when `show_hidden` is on.
 
+**Async find mode** (`search.enter`) replaces the buffer with only the matching entries, streaming results as they arrive.  Exit with `<Esc>` to restore the previous view.
+
+```lua
+-- Bind g/ to enter find mode (not bound by default):
+vim.keymap.set("n", "g/", function()
+    filebuf.search()
+    -- filebuf.search({ skip_hidden = false }) -- search everything, including hidden files
+end, { desc = "Search mode" })
+```
+
+**`search()` Lua API** opens a filebuf (if not already in one) and enters find mode.  Ignored directories are pruned by default; pass `respect_ignored = false` to search everything.
+
+```lua
+vim.keymap.set("n", "g/", function()
+  require("filebuf").search()                     -- respect .gitignore
+  -- require("filebuf").search({ respect_ignored = false })  -- search everything
+end, { desc = "filebuf: search tree" })
+```
+
 | Command | Purpose |
 |---------|---------|
 | `:FilebufFind <pattern>` | Run the tree-wide search directly, without going through `/` |
@@ -119,6 +138,9 @@ require("filebuf").setup({
         toggle_preview = "K",
         toggle_hidden = "gh",
         close_filebuf = "q",
+
+        -- Not bound by default; add sensible keys:
+        -- find_mode = "g/",   -- enter async find mode
     },
 })
 ```
