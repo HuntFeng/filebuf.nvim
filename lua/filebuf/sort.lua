@@ -1,10 +1,15 @@
 ----------------------------------------------------------------------
--- Entry ordering.
+-- Sibling ordering for flat entry lists.
 --
 -- Entries are always a flat depth-first list carrying an `indent`, so
 -- sorting means reordering siblings while keeping every subtree glued to
--- its parent.  Both the initial render (scan) and :FilebufSortMethod go
--- through here so the two can never disagree.
+-- its parent.
+--
+-- The main tree render sorts siblings inside filebuf.snapshot (sort_range,
+-- over the row cache's child index).  This module is the entry-list
+-- equivalent: used by the lazy-expand single-directory scan and as the
+-- fallback path in filebuf.init's sort_by when the snapshot cache cannot
+-- answer.
 --
 -- The ordering is computed over *indices*, not entries: one pass derives
 -- each entry's parent from the indent stack, a second buckets children by

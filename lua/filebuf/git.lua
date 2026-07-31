@@ -1,6 +1,9 @@
 ----------------------------------------------------------------------
--- Git status indicators.  A single `git status --porcelain` per refresh
--- builds a path→status map the decoration provider consults per line.
+-- Git integration.  A single `git status --porcelain` per refresh builds a
+-- path→status map the decoration provider consults per line, aggregated up
+-- to directories for fold text.  Also the gitignore set (`git ls-files
+-- --ignored`, cached per root) that scan passes to find -prune so ignored
+-- subtrees are never stat-ed.
 ----------------------------------------------------------------------
 local M = {}
 

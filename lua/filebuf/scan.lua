@@ -1,18 +1,24 @@
 ----------------------------------------------------------------------
--- Tree scanner -- streams find(1) output directly into buffer lines.
+-- find(1) execution + parsing into the snapshot row cache.
 --
--- No in-memory tree, no grouping, no flattening.  The buffer IS the data
--- store.  find's %d (depth) maps directly to indent, %y maps to the
--- "/" / "@" suffix, and %f is the visible text.
+-- M.scan_into is the only producer of snapshot rows: it runs find(1) with
+-- GNU find's %d/%y/%T@/%C@ printf format (or a BSD/macOS perl fallback),
+-- parses the output into the row cache (filebuf.snapshot) and projects the
+-- visible subset into buffer lines.  The rows outlive the render, so a later
+-- toggle, re-sort or post-save refresh is a re-projection instead of another
+-- find(1).
 --
--- The one thing find(1) cannot give us is order: its output is directory
--- order, so siblings get reordered once (filebuf.sort) before the lines
--- are built.
+-- Also here: the async deep-scan job for render's shallow-first path
+-- (M.run_find_async, GNU find only), a same-filtering disk scan used as the
+-- :w diff baseline (M.scan_disk_entries), and a one-level Lua scan for lazy
+-- expansion (M.scan_dir_children).
 --
--- Hidden and gitignored subtrees are filtered inline via a skip-depth
--- marker.  Additionally, ignored *directories* (from git ls-files) are
--- passed to find -prune so their subtrees are never even stat-ed --
--- a major win for node_modules and similar.
+-- Ignored *directories* (from git ls-files) are passed to find -prune so
+-- their subtrees are never even stat-ed -- a major win for node_modules and
+-- similar.  Hidden entries are retained and filtered at projection time, so
+-- toggling show_hidden is a re-projection; ignored subtrees are only
+-- collected when the scan is allowed to, and snap.pruned records the gap so
+-- a later "show hidden" knows it must rescan.
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")

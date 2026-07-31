@@ -1,10 +1,13 @@
 ----------------------------------------------------------------------
 -- Per-buffer state.
 --
--- The buffer text is the source of truth for the tree: names, types and
--- structure all live in the lines themselves (see filebuf.line).  There
--- is no in-memory index — the absolute path of any line is derived on
--- demand by walking up the buffer to reconstruct the ancestor chain.
+-- Every live filebuf buffer has one state table here, holding the root,
+-- mode, edit tracking and the cached snapshot from the last render.  The
+-- buffer text itself is the source of truth for the tree — names, types
+-- and structure live in the lines (see filebuf.line) — so while the buffer
+-- is unedited (snap_clean) lookups are served from the snapshot's parallel
+-- arrays, and the moment an edit lands every lookup falls back to walking
+-- the buffer text, which is always correct.
 --
 -- Path resolution is O(depth) which is typically < 20 lines per lookup,
 -- and the path→lnum map is built once and cached until the next edit.

@@ -1,10 +1,5 @@
 ----------------------------------------------------------------------
--- Public API for filebuf operations.
---
--- Every function takes `buf` (the filebuf buffer number) plus an
--- `entry` table when applicable.  None of them read cursor position
--- internally — the caller resolves the cursor to an entry first so
--- the functions can be called from arbitrary keymaps or scripts.
+-- Fold state, path reveal and winbar.
 --
 -- Folds are not built here: 'foldexpr' (FilebufFoldExpr below) derives
 -- every fold range from a line's indentation and its trailing "/", so
@@ -20,6 +15,10 @@
 -- The capture_fold_state / restore_folds pair bridges the gap: capture
 -- reads live fold state from the buffer, and restore replays it after
 -- the buffer text is rewritten.
+--
+-- The module also loads the ancestor chain of a target path so it becomes
+-- a visible line (reveal_path / reveal_paths, which search and find mode
+-- use to surface hits), and drives the winbar.
 ----------------------------------------------------------------------
 local state = require("filebuf.state")
 local git = require("filebuf.git")

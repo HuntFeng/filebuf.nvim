@@ -1,10 +1,6 @@
 ----------------------------------------------------------------------
 -- filebuf - edit the filesystem as an editable buffer.
 --
--- The buffer text is the source of truth: it holds names, types and
--- structure.  There is no in-memory index - the absolute path of any
--- line is derived on demand by walking up the buffer.
---
 -- This file wires the modules together and exposes the public API.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")

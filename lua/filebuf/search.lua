@@ -12,7 +12,8 @@
 -- remaining special characters are reduced to a literal substring, then
 -- find(1) does a case-insensitive basename substring match.
 --
--- Public entry point (search / find-mode) is in filebuf.actions.
+-- Public entry points are in filebuf.init: M.find_mode and the
+-- :FilebufFind command.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")

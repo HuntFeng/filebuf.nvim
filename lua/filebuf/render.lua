@@ -1,13 +1,18 @@
 ----------------------------------------------------------------------
--- The one place buffer text is produced.
+-- Buffer writing.
 --
--- Everything funnels through M.tree().  There is no incremental path —
--- expanding a directory re-renders the whole buffer, which sounds wasteful
--- and isn't: in eager mode the tree is capped by max_depth (default 20),
--- and in lazy mode it's only as big as what the user opened.
+-- The one place filebuf writes the buffer text.  The main path is M.tree():
+-- find(1) → snapshot → lines, with a shallow-first variant that renders the
+-- top levels immediately and finishes the tree with an async deep scan.
+-- Re-renders that need no disk read (toggle hidden, re-sort, post-save
+-- refresh) go through M.reproject, which re-projects the cached snapshot;
+-- find mode renders its own scoped entry list via M.entries, and the deep
+-- scan completion lands via M.finish.
 --
--- The index (parallel arrays) is gone.  Lines go straight into the buffer;
--- path resolution walks up from the line to its ancestors on demand.
+-- While the buffer is unedited, path resolution and fold levels are served
+-- from the snapshot (filebuf.snapshot); an edit marks the snapshot dirty and
+-- every lookup falls back to walking the buffer text, which is always
+-- correct.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
