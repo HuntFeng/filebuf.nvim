@@ -55,7 +55,7 @@ Some frequent commands I find useful:
 | `Filebuf` | Open / Refresh filebuf |
 | `FilebufSortMethod <method>` | Sort entries with method (name, type, created, modified) |
 | `FilebufToggleHidden` | Toggle hidden / ignored entries |
-| `FilebufFind` | Enter find mode |
+| `FilebufFind <pattern>` | Enter find mode and search for `<pattern>`|
 
 
 ## Configuration
