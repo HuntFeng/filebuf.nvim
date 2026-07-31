@@ -136,6 +136,8 @@ require("filebuf").setup({
         toggle_preview = "K",
         toggle_hidden = "gh",
         close_filebuf = "q",
+        find_mode = "g/", -- skips hidden / ignored entries
+		find_mode_full = "",
     },
 })
 ```

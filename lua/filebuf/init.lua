@@ -20,6 +20,66 @@ local state = require("filebuf.state")
 local render = require("filebuf.render")
 
 local M = {}
+M.config = config
+
+----------------------------------------------------------------------
+-- Keymaps
+----------------------------------------------------------------------
+
+--- Set up buffer-local keymaps from config.
+---@param buf number
+local function setup_keymaps(buf)
+	local km = config.keymaps
+
+	-- Entry-level actions (need cursor → entry resolution).
+	local ENTRY_KEYMAPS = {
+		open_file = { M.open_entry, "filebuf: open file" },
+		open_or_toggle = { M.open_or_toggle, "filebuf: open file / toggle dir" },
+		preview = { M.preview_entry, "filebuf: preview file" },
+	}
+	for name, def in pairs(ENTRY_KEYMAPS) do
+		local key = km[name]
+		if key and key ~= "" then
+			local fn = def[1]
+			local desc = def[2]
+			vim.keymap.set("n", key, function()
+				local entry = state.entry_at_cursor(buf)
+				if entry then
+					fn(buf, entry)
+				end
+			end, { buffer = buf, desc = desc })
+		end
+	end
+
+	-- Buffer-level actions (no entry needed).  Each def is { fn, desc } or
+	-- { fn, desc, opts } for parameterised calls.
+	local BUF_KEYMAPS = {
+		find_mode = { M.find_mode, "filebuf: find mode" },
+		find_mode_full = { M.find_mode, "filebuf: find mode", { skip_hidden = false } },
+		toggle_hidden = { M.toggle_hidden, "filebuf: toggle hidden files" },
+		close_filebuf = { M.close, "filebuf: close" },
+		sort_by_name = { M.sort_by, "filebuf: sort by name", { method = "name" } },
+		sort_by_type = { M.sort_by, "filebuf: sort by type", { method = "type" } },
+		sort_by_ctime = { M.sort_by, "filebuf: sort by ctime", { method = "created" } },
+		sort_by_mtime = { M.sort_by, "filebuf: sort by mtime", { method = "modified" } },
+	}
+	for name, def in pairs(BUF_KEYMAPS) do
+		local key = km[name]
+		if key and key ~= "" then
+			local fn = def[1]
+			local desc = def[2]
+			local opts = def[3]
+			vim.keymap.set("n", key, function()
+				if opts then
+					fn(buf, opts)
+				else
+					fn(buf)
+				end
+			end, { buffer = buf, desc = desc })
+		end
+	end
+end
+
 
 --- Set winbar on every window that displays `buf`.
 ---@param buf number
@@ -47,86 +107,6 @@ local function set_window_options()
 		foldclose = "\226\150\182",
 		fold = " ",
 	})
-end
-
---- Public, user-mutable configuration (see filebuf.config).
-M.config = config
-
---- Public fold / lazy-expand / entry-open API.
-M.actions = actions
-
---- Per-buffer state accessor (root, expanded set).  Exposed for tests
---- and for user scripts that need to resolve a line to an entry.
-M.state = state
-
---- Tree-wide search: prompts for a pattern, reveals every match.
----   require("filebuf").search()                  -- respect ignored (default)
----   require("filebuf").search({ skip_hidden = false })
-M.search = actions.search
-
---- Enable/disable the profiler; report to :messages.
-function M.profile(enable)
-	prof.set_enabled(enable)
-end
-function M.profile_report()
-	return prof.report()
-end
-
-----------------------------------------------------------------------
--- Keymaps
-----------------------------------------------------------------------
-
---- Set up buffer-local keymaps from config.
----@param buf number
-local function setup_keymaps(buf)
-	local km = config.keymaps
-
-	-- Entry-level actions (need cursor → entry resolution).
-	local ENTRY_KEYMAPS = {
-		open_file = { actions.open_entry, "filebuf: open file" },
-		open_or_toggle = { actions.open_or_toggle, "filebuf: open file / toggle dir" },
-		preview = { actions.preview_entry, "filebuf: preview file" },
-	}
-	for name, def in pairs(ENTRY_KEYMAPS) do
-		local key = km[name]
-		if key and key ~= "" then
-			local fn = def[1]
-			local desc = def[2]
-			vim.keymap.set("n", key, function()
-				local entry = actions.get_entry_at_cursor(buf)
-				if entry then
-					fn(buf, entry)
-				end
-			end, { buffer = buf, desc = desc })
-		end
-	end
-
-	-- Buffer-level actions (no entry needed).  Each def is { fn, desc } or
-	-- { fn, desc, opts } for parameterised calls.
-	local BUF_KEYMAPS = {
-		find_mode = { actions.find_mode, "filebuf: find mode" },
-		toggle_hidden = { actions.toggle_hidden, "filebuf: toggle hidden files" },
-		close_filebuf = { actions.close, "filebuf: close" },
-		sort_by_name = { actions.sort_by, "filebuf: sort by name", { method = "name" } },
-		sort_by_type = { actions.sort_by, "filebuf: sort by type", { method = "type" } },
-		sort_by_ctime = { actions.sort_by, "filebuf: sort by ctime", { method = "created" } },
-		sort_by_mtime = { actions.sort_by, "filebuf: sort by mtime", { method = "modified" } },
-	}
-	for name, def in pairs(BUF_KEYMAPS) do
-		local key = km[name]
-		if key and key ~= "" then
-			local fn = def[1]
-			local desc = def[2]
-			local opts = def[3]
-			vim.keymap.set("n", key, function()
-				if opts then
-					fn(buf, opts)
-				else
-					fn(buf)
-				end
-			end, { buffer = buf, desc = desc })
-		end
-	end
 end
 
 --- Build a confirmation message from diff ops and ask the user to confirm.
@@ -319,6 +299,154 @@ end
 ----------------------------------------------------------------------
 -- Public API
 ----------------------------------------------------------------------
+--- Open a file or follow a symlink.  For symlinks that point to
+--- directories, open a new filebuf at the target.
+---@param buf   number
+---@param entry table
+function M.open_entry(buf, entry)
+	if not entry or entry.type == "dir" then
+		return -- use fold actions for directories
+	end
+
+	local target = vim.loop.fs_realpath(entry.path) or entry.path
+	if entry.type == "link" and vim.fn.isdirectory(target) == 1 then
+		-- Symlink → directory: open a new filebuf.
+		require("filebuf").open(target)
+	elseif vim.fn.filereadable(target) == 1 then
+		vim.cmd("edit " .. vim.fn.fnameescape(target))
+	else
+		vim.notify("Cannot read: " .. entry.path, vim.log.levels.WARN)
+	end
+end
+
+--- Handle <CR> / open_or_toggle: toggle fold on directories, open files.
+--- Returns true if the entry was handled.
+---@param buf   number
+---@param entry table
+---@return boolean
+function M.open_or_toggle(buf, entry)
+	if not entry then
+		return false
+	end
+
+	if entry.type == "dir" then
+		vim.api.nvim_win_set_cursor(0, { entry.lnum, 0 })
+		vim.cmd("normal! za")
+	else
+		M.open_entry(buf, entry)
+	end
+	return true
+end
+
+--- Preview a file entry in a floating window (like LSP hover).
+--- Bound to K by default.
+---@param buf   number
+---@param entry table
+function M.preview_entry(buf, entry)
+	require("filebuf.preview").show(buf, entry)
+end
+
+--- Enter interactive find mode on a filebuf buffer.
+---@param buf number
+function M.find_mode(buf)
+	require("filebuf.search").enter(buf)
+end
+
+--- Sort a filebuf buffer by method.
+---@param buf   number
+---@param opts  table  { method: string }
+function M.sort_by(buf, opts)
+	local method = opts and opts.method
+	if not method then
+		return
+	end
+	local sort = require("filebuf.sort")
+	if not vim.tbl_contains(sort.METHODS, method) then
+		vim.notify(
+			"filebuf: unknown sort method '" .. method .. "'. Valid: " .. table.concat(sort.METHODS, ", "),
+			vim.log.levels.ERROR
+		)
+		return
+	end
+
+	config.sort_method = method
+	local st = state.get(buf)
+	if not st then
+		return
+	end
+
+	local render = require("filebuf.render")
+	if not render.reproject(buf, { sort_method = method }) then
+		local entries = buffer.parse_buffer(buf, st.root)
+		local open_dirs = M.open_folds[st.root]
+		local sorted = sort.apply(entries, method)
+		if sorted ~= entries and #sorted > 0 then
+			render.entries(buf, sorted, open_dirs)
+		end
+	end
+	vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
+end
+
+--- Toggle hidden entries for this buffer.
+---@param buf number
+function M.toggle_hidden(buf)
+	prof.start("toggle_hidden")
+
+	prof.start("toggle_hidden.guard")
+	local st = state.get(buf)
+	if not st then
+		prof.stop()
+		prof.stop()
+		return
+	end
+
+	if vim.bo[buf].modified then
+		vim.notify("filebuf: buffer modified - save or discard edits before toggling hidden files", vim.log.levels.WARN)
+		prof.stop()
+		prof.stop()
+		return
+	end
+
+	local cursor_entry = state.entry_at_cursor(buf)
+	local cursor_path = cursor_entry and cursor_entry.path
+	local want = not st.show_hidden
+	state.set_show_hidden(st.root, want)
+	prof.stop() -- toggle_hidden.guard
+
+	local render = require("filebuf.render")
+	prof.start("toggle_hidden.reproject")
+	local reprojected = render.reproject(buf, { show_hidden = want })
+	prof.stop() -- toggle_hidden.reproject
+
+	if not reprojected then
+		prof.start("toggle_hidden.tree")
+		render.tree(buf, { show_hidden = want, keep_view = true })
+		prof.stop() -- toggle_hidden.tree
+	end
+
+	prof.start("toggle_hidden.cursor")
+	if cursor_path then
+		local lnum = state.lnum_of(buf, cursor_path)
+		if lnum then
+			pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
+		end
+	end
+	prof.stop() -- toggle_hidden.cursor
+
+	vim.notify("filebuf: hidden files " .. (st.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
+
+	if prof.enabled then
+		prof.report()
+	end
+	prof.stop() -- toggle_hidden
+end
+
+--- Close a filebuf buffer.  Fold state is captured by the BufDelete
+--- autocmd, so the caller doesn't need to snapshot anything.
+---@param buf number
+function M.close(buf)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
 
 --- Open the filebuf browser rooted at `dir` (default: cwd).
 ---@param dir string|nil
@@ -481,7 +609,7 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("FilebufToggleHidden", function()
 		local buf = current_filebuf()
 		if buf then
-			actions.toggle_hidden(buf)
+			M.toggle_hidden(buf)
 		end
 	end, { desc = "Toggle visibility of hidden (dot) files in filebuf" })
 
@@ -492,7 +620,7 @@ function M.setup(opts)
 		end
 		local method = args.args and args.args:match("^%s*(%S+)%s*$")
 		if method then
-			actions.sort_by(buf, { method = method })
+			M.sort_by(buf, { method = method })
 		end
 	end, { nargs = "?", desc = "Set sort method (type | name | modified | created)" })
 

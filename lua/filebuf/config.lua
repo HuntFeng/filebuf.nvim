@@ -25,6 +25,7 @@ local config = {
 		toggle_hidden = "gh",
 		close_filebuf = "q",
 		find_mode = "g/",
+		find_mode_full = "",
 		sort_by_name = "",
 		sort_by_type = "",
 		sort_by_ctime = "",
