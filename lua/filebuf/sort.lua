@@ -7,9 +7,8 @@
 --
 -- The main tree render sorts siblings inside filebuf.snapshot (sort_range,
 -- over the row cache's child index).  This module is the entry-list
--- equivalent: used by the lazy-expand single-directory scan and as the
--- fallback path in filebuf.init's sort_by when the snapshot cache cannot
--- answer.
+-- equivalent: the fallback path in filebuf.init's sort_by when the snapshot
+-- cache cannot answer.
 --
 -- The ordering is computed over *indices*, not entries: one pass derives
 -- each entry's parent from the indent stack, a second buckets children by
@@ -29,55 +28,10 @@ M.METHODS = { "type", "name", "modified", "created" }
 
 local TYPE_PRIO = { dir = 1, link = 2, file = 3 }
 
---- Build the sibling comparator for a sort method.
---- Returns nil when the method has no ordering available here, in which
---- case the on-disk order is kept.
----@param method string  "type" | "name" | "modified" | "created"
----@return (fun(a: table, b: table): boolean)|nil
-function M.comparator(method)
-	if method == "name" then
-		return function(a, b)
-			return a.name:lower() < b.name:lower()
-		end
-	elseif method == "type" then
-		return function(a, b)
-			local pa = TYPE_PRIO[a.type] or 5
-			local pb = TYPE_PRIO[b.type] or 5
-			if pa ~= pb then
-				return pa < pb
-			end
-			return a.name:lower() < b.name:lower()
-		end
-	elseif method == "modified" then
-		return function(a, b)
-			local ta, tb = a.mtime, b.mtime
-			if not ta or not tb then
-				return false
-			end
-			if ta ~= tb then
-				return ta > tb -- newer first
-			end
-			return a.name:lower() < b.name:lower()
-		end
-	elseif method == "created" then
-		return function(a, b)
-			local ta, tb = a.ctime, b.ctime
-			if not ta or not tb then
-				return false
-			end
-			if ta ~= tb then
-				return ta > tb -- newer first
-			end
-			return a.name:lower() < b.name:lower()
-		end
-	end
-	return nil
-end
-
 --- Precompute one comparable string key per entry.
 ---
---- The comparators above call name:lower() inside table.sort, so it runs
---- O(n log n) times and allocates a string on every comparison.  A key
+--- Sorting via a comparator calls name:lower() inside table.sort, so it
+--- runs O(n log n) times and allocates a string on every comparison.  A key
 --- array makes it exactly one lower() per entry, and reduces the sort
 --- itself to a plain string compare.
 ---

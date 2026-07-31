@@ -1,12 +1,13 @@
 ----------------------------------------------------------------------
--- Tree search for lazily-loaded entries.
+-- Tree search over the scanned tree.
 --
--- Every directory is lazy-loaded, so entries not yet on screen are invisible
--- to native `/`.  Use `g/` (find mode) for interactive asynchronous search,
--- or `:FilebufFind <pattern>` to query the whole tree synchronously with
--- find(1) and load the ancestor chain of each hit — sibling subdirectories
--- along the way are listed but not expanded.  Matches are highlighted via
--- the decoration provider.
+-- The buffer only holds the rows find(1) emitted (down to max_depth), so
+-- native `/` cannot see anything deeper than the scanned tree.  Use `g/`
+-- (find mode) for interactive asynchronous search, or `:FilebufFind
+-- <pattern>` to query the whole tree synchronously with find(1) and open
+-- the ancestor folds of each hit — sibling subdirectories along the way are
+-- listed but left collapsed.  Matches are highlighted via the decoration
+-- provider.
 --
 -- The pattern arrives as a Vim regex.  Vim-only atoms are stripped and any
 -- remaining special characters are reduced to a literal substring, then

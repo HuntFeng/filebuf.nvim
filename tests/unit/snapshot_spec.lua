@@ -31,12 +31,12 @@ end
 
 --- A built snapshot over `rows`, projected with `opts`.
 ---@param rows table[]
----@param opts? table  { show_hidden?, method?, ignore_set?, maxdepth?, pruned? }
+---@param opts? table  { show_hidden?, method?, ignore_set?, pruned? }
 ---@return table snap
 local function build(rows, opts)
 	opts = opts or {}
 	local snap = snapshot.new(ROOT)
-	snapshot.build(snap, find_output(rows), opts.maxdepth or 20, opts.ignore_set, opts.pruned or false)
+	snapshot.build(snap, find_output(rows), opts.ignore_set, opts.pruned or false)
 	snapshot.project(snap, opts.method or "type", opts.show_hidden or false)
 	return snap
 end
@@ -138,18 +138,10 @@ describe("snapshot.build", function()
 		assert.is_false(snapshot.has_flag(snap, 4, snapshot.F_IGNORED))
 	end)
 
-	it("flags directories at maxdepth as truncated", function()
-		local snap = build(TREE, { maxdepth = 2 })
-		-- nested sits at depth 2 == maxdepth, so its children were never listed.
-		assert.is_true(snapshot.has_flag(snap, 2, snapshot.F_TRUNCATED))
-		assert.is_false(snapshot.has_flag(snap, 1, snapshot.F_TRUNCATED))
-		assert.is_true(snapshot.truncated_paths(snap)[ROOT .. "/dir/nested"])
-	end)
-
 	it("resets name overrides when rebuilt", function()
 		local snap = build(TREE)
 		snap.names = { [1] = "stale" }
-		snapshot.build(snap, find_output(TREE), 20, nil, false)
+		snapshot.build(snap, find_output(TREE), nil, false)
 		assert.is_nil(snap.names)
 	end)
 

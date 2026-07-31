@@ -151,9 +151,10 @@ function M.compute_diff(buf_entries, disk_entries)
 	-- left to delete+create: Phase 2 already paired each child individually
 	-- (their paths reference the new parent name), so the children move out
 	-- before the old dir is removed and nothing is lost.  But a dir whose
-	-- children were never loaded — the normal case now that every directory is
-	-- lazy — has no such child renames, so delete+create would destroy the
-	-- entire unloaded subtree.  Those must become a real fs_rename.
+	-- children were never loaded — the normal case for directories at the
+	-- scan depth limit (max_depth) — has no such child renames, so
+	-- delete+create would destroy the entire unloaded subtree.  Those must
+	-- become a real fs_rename.
 	if #buf_unmatched2 > 0 then
 		local disk_by_parent = {}
 		for _, de in ipairs(disk_entries) do

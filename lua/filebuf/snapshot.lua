@@ -42,11 +42,10 @@ local KIND_MASK = 3
 
 M.F_HIDDEN = 4 -- basename starts with "."
 M.F_IGNORED = 8 -- gitignored
-M.F_TRUNCATED = 16 -- directory at maxdepth, children not loaded
 M.F_DEAD = 32 -- removed by an applied save; skipped by every projection
 
 local KIND_DIR, KIND_LINK = M.KIND_DIR, M.KIND_LINK
-local F_HIDDEN, F_IGNORED, F_TRUNCATED, F_DEAD = M.F_HIDDEN, M.F_IGNORED, M.F_TRUNCATED, M.F_DEAD
+local F_HIDDEN, F_IGNORED, F_DEAD = M.F_HIDDEN, M.F_IGNORED, M.F_DEAD
 
 local TYPE_NAME = { [M.KIND_FILE] = "file", [M.KIND_DIR] = "dir", [M.KIND_LINK] = "link" }
 
@@ -122,10 +121,9 @@ end
 ---
 ---@param snap       table    from M.new
 ---@param output     string   raw find stdout, "depth\ttype\tname\n" per row
----@param maxdepth   number
 ---@param ignore_set table|nil  absolute ignored paths → true
 ---@param pruned     boolean  whether find already pruned ignored dirs
-function M.build(snap, output, maxdepth, ignore_set, pruned)
+function M.build(snap, output, ignore_set, pruned)
 	snap.raw = output
 	snap.pruned = pruned and true or false
 	snap.view, snap.row_of, snap.sorted, snap.names = nil, nil, nil, nil
@@ -224,9 +222,6 @@ function M.build(snap, output, maxdepth, ignore_set, pruned)
 				end
 			end
 			if is_dir then
-				if depth >= maxdepth then
-					bits = bits + F_TRUNCATED
-				end
 				-- No need to clear deeper stack slots: find(1) is depth-first,
 				-- so a row at depth d is always preceded by its own ancestor at
 				-- depth d-1, and stack[d-1] is overwritten before it is read.
@@ -282,7 +277,7 @@ function M.is_dir(snap, row)
 	return snap.kind[row] % (KIND_MASK + 1) == KIND_DIR
 end
 
---- Test a flag bit (M.F_HIDDEN / F_IGNORED / F_TRUNCATED).
+--- Test a flag bit (M.F_HIDDEN / F_IGNORED / F_DEAD).
 ---@param snap table
 ---@param row  number
 ---@param flag number
@@ -603,7 +598,6 @@ function M.entry(snap, lnum)
 		type = M.type(snap, row),
 		indent = snap.indent[row],
 		is_hidden = M.has_flag(snap, row, F_HIDDEN) or nil,
-		lazy = (M.is_dir(snap, row) and M.has_flag(snap, row, F_TRUNCATED)) or nil,
 	}
 end
 
@@ -695,25 +689,6 @@ function M.lnum_of_path(snap, path)
 		return nil
 	end
 	return snap.row_of[row]
-end
-
---- Paths of the directories flagged truncated (at maxdepth), as a set.
---- Small by construction -- only the deepest directory layer qualifies.
----@param snap table
----@return table  path → true
-function M.truncated_paths(snap)
-	local out = {}
-	for row = 1, snap.n do
-		local bits = snap.kind[row]
-		if
-			bits % (KIND_MASK + 1) == KIND_DIR
-			and math.floor(bits / F_TRUNCATED) % 2 == 1
-			and math.floor(bits / F_DEAD) % 2 == 0
-		then
-			out[M.path_of(snap, row)] = true
-		end
-	end
-	return out
 end
 
 ----------------------------------------------------------------------
@@ -866,12 +841,9 @@ function M.apply_ops(snap, ops, ignore_set)
 		return M.row_of_path(snap, path)
 	end
 
-	--- Recompute visibility flags, preserving kind and the truncated marker.
+	--- Recompute visibility flags, preserving kind.
 	local function reflag(row, name, path)
 		local bits = kind[row] % (KIND_MASK + 1)
-		if math.floor(kind[row] / F_TRUNCATED) % 2 == 1 then
-			bits = bits + F_TRUNCATED
-		end
 		if name:byte(1) == DOT then
 			bits = bits + F_HIDDEN
 		end

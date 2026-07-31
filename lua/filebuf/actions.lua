@@ -347,9 +347,8 @@ local function open_ancestor_folds(buf, st, path)
 	end
 end
 
---- Load and open every ancestor directory of the given paths so each target
---- becomes a visible buffer line.  Expands truncated ancestors on the way
---- (one level at a time) and opens their folds.
+--- Open every ancestor directory of the given paths so each target becomes
+--- a visible buffer line.
 ---@param buf   number
 ---@param paths string[]
 ---@return table[]  the entries that resolved

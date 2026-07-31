@@ -54,11 +54,6 @@ function M.init(buf, root)
 	states[buf] = {
 		root = root,
 
-		--- Directories at maxdepth whose children haven't been loaded yet.
-		--- When a user expands one, its children are inserted into the buffer
-		--- and the path is removed from this set.
-		truncated_dirs = {},
-
 		mode = "normal", -- "normal" | "find"
 		git = nil, -- path → status map
 		matches = nil, -- path → true (search highlighting)
@@ -380,7 +375,6 @@ function M.range_resolver(buf)
 			type = type_,
 			indent = indent,
 			is_hidden = (name:sub(1, 1) == ".") or nil,
-			lazy = (type_ == "dir" and st.truncated_dirs[path]) or nil,
 		}
 	end
 end
@@ -416,8 +410,6 @@ function M.resolve_entry(buf, lnum)
 		return nil
 	end
 
-	local is_truncated = type_ == "dir" and st.truncated_dirs[path] or nil
-
 	return {
 		lnum = lnum,
 		path = path,
@@ -425,7 +417,6 @@ function M.resolve_entry(buf, lnum)
 		type = type_,
 		indent = indent,
 		is_hidden = (name:sub(1, 1) == ".") or nil,
-		lazy = is_truncated,
 	}
 end
 

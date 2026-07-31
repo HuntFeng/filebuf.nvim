@@ -172,7 +172,6 @@ function M.reproject(buf, opts)
 	st._by_path_dirty = true
 	st.snap_clean = true
 	st.dirty_lo, st.dirty_hi = nil, nil
-	st.truncated_dirs = snapshot.truncated_paths(snap)
 
 	prof.start("render.reproject.restore_folds")
 	require("filebuf.actions").restore_folds(buf, opts.open_dirs or require("filebuf.actions").open_folds[st.root])
@@ -295,15 +294,13 @@ local function _handle_deep_scan_complete(buf, capture_serial, output)
 	local cursor_path = cursor_entry and cursor_entry.path
 
 	-- Rebuild the snapshot from the full output.
-	local maxdepth = config.max_depth or 20
 	local _, ignored_dirs = git.build_ignore_set(st.root)
 	local prune_dirs = (not st.show_hidden) and ignored_dirs or nil
 	local pruned = prune_dirs ~= nil and #prune_dirs > 0
 
-	snapshot.build(st.snap, output, maxdepth, st.ignore_set, pruned)
+	snapshot.build(st.snap, output, st.ignore_set, pruned)
 	snapshot.project(st.snap, config.sort_method, st.show_hidden)
 	local lines = snapshot.lines(st.snap)
-	st.truncated_dirs = snapshot.truncated_paths(st.snap)
 
 	-- Re-render: full buffer write, preserve folds + cursor position.
 	local view = vim.fn.winsaveview()
@@ -357,7 +354,6 @@ local function _tree_shallow_then_deep(buf, st, opts)
 		prof.stop()
 		return
 	end
-	st.truncated_dirs = snapshot.truncated_paths(st.snap)
 	st.ignore_set = ignore_set
 	prof.stop()
 
@@ -472,7 +468,6 @@ function M.tree(buf, opts)
 		prof.stop()
 		return
 	end
-	st.truncated_dirs = snapshot.truncated_paths(st.snap)
 	st.ignore_set = ignore_set
 	prof.stop()
 

@@ -46,8 +46,7 @@ describe("display", function()
 		})
 		buf = helpers.open_filebuf(tmpdir)
 		-- The tree is scanned eagerly to config.max_depth, so a child is already
-		-- on screen without expanding anything.  Only directories at the depth
-		-- cap load on demand (see lazy_load_spec).
+		-- on screen without expanding anything.
 		assert.equals("parent/", helpers.get_buffer_lines(buf)[1])
 		assert.equals("  child.txt", helpers.get_buffer_lines(buf)[2])
 		local lines = helpers.get_buffer_lines(buf)

@@ -7,7 +7,6 @@
 -- as flagged rows rather than dropped, which is what makes show_hidden a
 -- re-projection instead of a rescan.
 --
--- scan.scan_dir_children is the one-level scan used by lazy expansion, and
 -- scan.scan_disk_entries is the baseline the :w diff compares against.
 ----------------------------------------------------------------------
 local helpers = require("tests.helpers")
@@ -15,15 +14,6 @@ local scan = require("filebuf.scan")
 local snapshot = require("filebuf.snapshot")
 local git = require("filebuf.git")
 local config = require("filebuf.config")
-
---- Index a child list by name.
-local function by_name(entries)
-	local map = {}
-	for _, e in ipairs(entries) do
-		map[e.name] = e
-	end
-	return map
-end
 
 --- Lines produced by scanning `dir`.  Deliberately one return value: a second
 --- one would land in assert.same's message slot and quietly change the
@@ -221,16 +211,15 @@ describe("scan", function()
 	-- Depth cap
 	------------------------------------------------------------------
 
-	it("stops at maxdepth and flags the deepest dirs as truncated", function()
+	it("stops at maxdepth", function()
 		helpers.populate_dir(tmpdir, {
 			["a"] = {},
 			["a/b"] = {},
 			["a/b/c"] = {},
 			["a/b/c/deep.txt"] = "",
 		})
-		local lines, snap = scan_dir_snap(tmpdir, { maxdepth = 2 })
+		local lines = scan_dir_snap(tmpdir, { maxdepth = 2 })
 		assert.same({ "a/", "  b/" }, lines)
-		assert.is_true(snapshot.truncated_paths(snap)[tmpdir .. "/a/b"])
 	end)
 
 	------------------------------------------------------------------
@@ -260,45 +249,6 @@ describe("scan", function()
 		})
 		config.sort_method = "name"
 		assert.same({ "aaa/", "  c.txt", "zzz/", "  a.txt", "  b.txt" }, scan_dir(tmpdir))
-	end)
-
-	------------------------------------------------------------------
-	-- scan_dir_children: exactly one level, for lazy expansion
-	------------------------------------------------------------------
-
-	it("scan_dir_children loads exactly one level", function()
-		helpers.populate_dir(tmpdir, {
-			["a"] = {},
-			["a/b"] = {},
-			["a/b/deep.txt"] = "",
-			["a/file.txt"] = "",
-		})
-		local children = scan.scan_dir_children(tmpdir .. "/a", tmpdir)
-		local map = by_name(children)
-		assert.equals(2, #children)
-		assert.is_not_nil(map["b"])
-		assert.is_not_nil(map["file.txt"])
-		assert.is_nil(map["deep.txt"])
-	end)
-
-	it("scan_dir_children marks dirs lazy and leaves files unmarked", function()
-		helpers.populate_dir(tmpdir, { ["a"] = {}, ["a/sub"] = {}, ["a/f.txt"] = "" })
-		local map = by_name(scan.scan_dir_children(tmpdir .. "/a", tmpdir))
-		assert.is_true(map["sub"].lazy)
-		assert.is_nil(map["f.txt"].lazy)
-	end)
-
-	it("scan_dir_children gives absolute paths and no indent", function()
-		helpers.populate_dir(tmpdir, { ["a"] = {}, ["a/f.txt"] = "" })
-		local map = by_name(scan.scan_dir_children(tmpdir .. "/a", tmpdir))
-		assert.equals(tmpdir .. "/a/f.txt", map["f.txt"].path)
-		assert.is_nil(map["f.txt"].indent)
-	end)
-
-	it("scan_dir_children returns an empty list for an empty or missing dir", function()
-		helpers.populate_dir(tmpdir, { ["empty"] = {} })
-		assert.same({}, scan.scan_dir_children(tmpdir .. "/empty", tmpdir))
-		assert.same({}, scan.scan_dir_children(tmpdir .. "/nope", tmpdir))
 	end)
 
 	------------------------------------------------------------------

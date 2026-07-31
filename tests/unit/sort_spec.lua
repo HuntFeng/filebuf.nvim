@@ -37,33 +37,6 @@ local function shape(list)
 	return out
 end
 
-describe("sort.comparator", function()
-	it("orders by lowercased name for method name", function()
-		local cmp = sort.comparator("name")
-		assert.is_true(cmp({ name = "alpha", type = "file" }, { name = "Beta", type = "file" }))
-		assert.is_false(cmp({ name = "Beta", type = "file" }, { name = "alpha", type = "file" }))
-	end)
-
-	it("puts dirs before links before files for method type", function()
-		local cmp = sort.comparator("type")
-		assert.is_true(cmp({ name = "z", type = "dir" }, { name = "a", type = "link" }))
-		assert.is_true(cmp({ name = "z", type = "link" }, { name = "a", type = "file" }))
-		assert.is_false(cmp({ name = "a", type = "file" }, { name = "z", type = "dir" }))
-	end)
-
-	it("falls back to name within the same type", function()
-		local cmp = sort.comparator("type")
-		assert.is_true(cmp({ name = "a", type = "file" }, { name = "b", type = "file" }))
-	end)
-
-	it("returns nil for methods with no ordering available", function()
-		assert.is_nil(sort.comparator("nonsense"))
-		-- The comparator now supports modified and created.
-		assert.is_function(sort.comparator("modified"))
-		assert.is_function(sort.comparator("created"))
-	end)
-end)
-
 describe("sort.keys", function()
 	it("lowercases names for method name", function()
 		assert.same({ "beta", "alpha" }, sort.keys(entries({ { 0, "Beta" }, { 0, "ALPHA" } }), "name"))

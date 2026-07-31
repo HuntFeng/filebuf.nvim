@@ -9,7 +9,7 @@ https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 ## Features
 
 - **Editable tree** - create, rename, delete and move files/dirs in a buffer, save with `:w`.
-- **Lazy loading** - only one directory level is read at a time, so opening a 100k-file repo is instant.
+- **Background scanning** - the visible tree renders instantly, then an async `find(1)` fills in the rest up to `max_depth`. The whole scan is cached in memory, so toggling and re-sorting never re-scan.
 - **Indent-based folding** - directories fold like code.
 - **Git status** - per-file and per-directory git indicators (added, modified, untracked,...).
 - **Diagnostics** - when wrong operations occur, buffer won't save and shows diagnostics.
@@ -43,25 +43,21 @@ Open the filebuf browser at the current directory:
 
 Edit any entry name inline, then `:w` to apply the changes to disk. The plugin validates your edits before writing — type mismatches (e.g., removing the indent that makes a file a child of a directory) are caught and reported.
 
-### Lazy loading
+### Scanning & folding
 
-Every directory is loaded on demand. Opening a filebuf reads only the root's immediate children; a folder's contents appear when you expand it (`<CR>`, `zo`, `za`) or when a search reveals a path through it. Nothing is read ahead of time, so the cost of opening a tree is independent of its size.
+Opening a filebuf renders a shallow slice of the tree immediately, then an asynchronous `find(1)` fills in the rest up to `max_depth` (default 20) in the background. Every scanned row is kept in an in-memory cache, so toggling hidden entries, re-sorting, or re-rendering after a save never re-runs the scan.
 
-Three things follow from that:
-
-- Unexpanded folders have no fold yet, so no `▶` appears in the foldcolumn — the trailing `/` is the cue.
-- `zR` reveals one more level per press rather than the whole tree.
-- `zO` expands a whole subtree. It counts the subtree first and asks for confirmation past `expand_confirm_threshold` entries, and stops outright at `max_expand_entries`.
+Folders are Neovim's native folds: `<CR>` (or `zo` / `za`) toggles a directory, `zR` opens the whole tree, `zM` collapses it. A directory listed at `max_depth` is shown with its trailing `/`, but its children are never scanned — expanding it reveals nothing until you raise `max_depth` and refresh.
 
 ### Searching
 
 `/` is left alone: native incremental search, history and `n`/`N` all behave normally.
 
-On top of that, **every** `/` also searches the whole tree with `find(1)` — a match on screen tells you nothing about how many more are still unloaded on disk. For each hit filebuf expands only the folders leading to it, so a match at `a/b/c/file.txt` loads `a`, `b` and `c` while sibling subfolders of each are listed but left collapsed.
+On top of that, **every** `/` also searches the whole tree with `find(1)` — a match on screen tells you nothing about how many more remain below `max_depth`. For each hit filebuf opens the ancestor folds leading to it, so a match at `a/b/c/file.txt` reveals `a`, `b` and `c` while sibling subfolders of each stay collapsed.
 
 Every match is highlighted with `FilebufSearchMatch`. The cursor stays put if it's already on a match (as it will be when the native search found one) and otherwise jumps to the topmost match; `n`/`N` then cycle through them as usual.
 
-Because unloaded entries aren't in the buffer, Vim's own `E486: Pattern not found` would fire before filebuf gets a chance to look on disk, so it is suppressed — you only get `pattern not found` when the pattern matches neither the buffer nor anything on disk.
+Because entries beyond the scan depth aren't in the buffer, Vim's own `E486: Pattern not found` would fire before filebuf gets a chance to look on disk, so it is suppressed — you only get `pattern not found` when the pattern matches neither the buffer nor anything on disk.
 
 Hidden and ignored entries are only searched when they'd actually be displayable, i.e. when `show_hidden` is on.
 
@@ -116,7 +112,8 @@ require("filebuf").setup({
     -- Default sort method, can change with FilebufSortMethod <method>
     sort_method = "type",
 
-	--- Dirs deeper this are listed but their children are lazy loaded
+	--- The tree is scanned to this depth.  Dirs listed at this depth have
+	--- no children loaded; raise it and refresh to see deeper.
 	max_depth = 20,
 
     -- Customize or disable keymaps (set to false to disable)

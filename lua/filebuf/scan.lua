@@ -9,9 +9,8 @@
 -- find(1).
 --
 -- Also here: the async deep-scan job for render's shallow-first path
--- (M.run_find_async, GNU find only), a same-filtering disk scan used as the
--- :w diff baseline (M.scan_disk_entries), and a one-level Lua scan for lazy
--- expansion (M.scan_dir_children).
+-- (M.run_find_async, GNU find only), and a same-filtering disk scan used as
+-- the :w diff baseline (M.scan_disk_entries).
 --
 -- Ignored *directories* (from git ls-files) are passed to find -prune so
 -- their subtrees are never even stat-ed -- a major win for node_modules and
@@ -22,7 +21,6 @@
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
-local sort = require("filebuf.sort")
 local snapshot = require("filebuf.snapshot")
 
 local M = {}
@@ -196,13 +194,10 @@ end
 --- `on_entry` for each visible entry.
 ---@param output      string  raw find stdout
 ---@param root        string  absolute root
----@param maxdepth    number  depth cap
 ---@param show_hidden boolean
 ---@param ignore_set  table|nil  gitignored paths -> true
 ---@param on_entry    fun(name, path, ftype, indent, is_dir, mtime, ctime)
----@return table  truncated_dirs  dir paths at maxdepth -> true
-local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, on_entry)
-	local truncated_dirs = {}
+local function stream_entries(output, root, show_hidden, ignore_set, on_entry)
 	local stack = {} -- { depth, path }
 	local skip_below = nil
 
@@ -252,18 +247,11 @@ local function stream_entries(output, root, maxdepth, show_hidden, ignore_set, o
 			goto continue
 		end
 
-		-- Mark directories at maxdepth as truncated (expandable).
-		if is_dir and depth >= maxdepth then
-			truncated_dirs[path] = true
-		end
-
 		local indent = depth - 1 -- depth 1 = indent 0
 		on_entry(name, path, ftype, indent, is_dir, mtime, ctime)
 
 		::continue::
 	end
-
-	return truncated_dirs
 end
 
 ----------------------------------------------------------------------
@@ -315,7 +303,7 @@ function M.scan_into(snap, root, opts)
 
 	prof.start("render.tree.scan.scan_into.build")
 	snap.root = root
-	snapshot.build(snap, output, maxdepth, ignore_set, prune_dirs ~= nil and #prune_dirs > 0)
+	snapshot.build(snap, output, ignore_set, prune_dirs ~= nil and #prune_dirs > 0)
 	prof.stop()
 
 	prof.start("render.tree.scan.scan_into.project")
@@ -340,7 +328,6 @@ end
 ---@param root string   absolute root directory
 ---@param opts? table   { maxdepth?: number }
 ---@return table[]|nil entries  { name, path, type, indent }
----@return boolean     truncated
 function M.scan_disk_entries(root, opts)
 	prof.start("scan.scan_disk_entries")
 	opts = opts or {}
@@ -360,13 +347,13 @@ function M.scan_disk_entries(root, opts)
 	prof.stop()
 	if not output then
 		prof.stop()
-		return nil, false
+		return nil
 	end
 
 	prof.start("scan.scan_disk_entries.stream")
 	local entries = {}
 	local n = 0
-	stream_entries(output, root, maxdepth, show_hidden, ignore_set, function(name, path, ftype, indent, _, mtime, ctime)
+	stream_entries(output, root, show_hidden, ignore_set, function(name, path, ftype, indent, _, mtime, ctime)
 		n = n + 1
 		entries[n] = {
 			name = name,
@@ -380,55 +367,7 @@ function M.scan_disk_entries(root, opts)
 	prof.stop()
 
 	prof.stop()
-	return entries, false
-end
-
-----------------------------------------------------------------------
--- Single-directory scan (for lazy expand)
-----------------------------------------------------------------------
-
---- Scan the immediate children of a single directory.
----@param dir   string
----@param root? string  kept for API compatibility
----@return table[]  { name, path, type, lazy?, mtime?, ctime? }
-function M.scan_dir_children(dir, root)
-	local handle = vim.loop.fs_scandir(dir)
-	if not handle then
-		return {}
-	end
-
-	local children = {}
-	local n = 0
-	while true do
-		local name, ftype = vim.loop.fs_scandir_next(handle)
-		if not name then
-			break
-		end
-		local is_dir = ftype == "directory"
-		local path = dir .. "/" .. name
-		local entry = {
-			name = name,
-			path = path,
-			type = is_dir and "dir" or (ftype == "link" and "link" or "file"),
-			lazy = is_dir or nil,
-		}
-		-- Stat for timestamps so time-based sort methods work on lazy-expanded
-		-- directories.  fs_scandir_next gives name + type but no timestamps.
-		local stat = vim.loop.fs_stat(path)
-		if stat then
-			entry.mtime = stat.mtime.sec * 1000 + math.floor(stat.mtime.nsec / 1e6)
-			entry.ctime = stat.mtime.sec * 1000 + math.floor(stat.mtime.nsec / 1e6)
-		end
-		n = n + 1
-		children[n] = entry
-	end
-
-	-- All children are siblings, so a plain sort is enough here.
-	local cmp = sort.comparator(config.sort_method)
-	if cmp then
-		table.sort(children, cmp)
-	end
-	return children
+	return entries
 end
 
 return M
