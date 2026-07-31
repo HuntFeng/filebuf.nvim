@@ -24,6 +24,11 @@ local config = {
 		preview = "K",
 		toggle_hidden = "gh",
 		close_filebuf = "q",
+		find_mode = "g/",
+		sort_by_name = "",
+		sort_by_type = "",
+		sort_by_ctime = "",
+		sort_by_mtime = "",
 	},
 }
 
@@ -43,6 +48,8 @@ local HIGHLIGHTS = {
 	-- colour so it follows the colourscheme's search highlight.
 	FilebufSearchMatch = { link = "Search" },
 	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
+	-- Mode banner (normal/find mode indicator).
+	WinBar = { link = "TabLineSel" },
 }
 
 --- Define every filebuf highlight group.  Called from setup().
@@ -50,7 +57,10 @@ function config.define_highlights()
 	for name, def in pairs(HIGHLIGHTS) do
 		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
 	end
-	-- Mode banner (normal/find mode indicator).
+	-- WinBar is a built-in Neovim highlight group.  Setting it with
+	-- default=true would be a no-op (the built-in definition already
+	-- exists), so we must set it without default=true for the link to
+	-- actually take effect.
 	vim.api.nvim_set_hl(0, "WinBar", { link = "TabLineSel" })
 end
 

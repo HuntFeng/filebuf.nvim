@@ -1,5 +1,5 @@
 ----------------------------------------------------------------------
--- Public API for fold / lazy-expand / entry-open operations.
+-- Public API for filebuf operations.
 --
 -- Every function takes `buf` (the filebuf buffer number) plus an
 -- `entry` table when applicable.  None of them read cursor position
@@ -23,9 +23,7 @@
 ----------------------------------------------------------------------
 local prof = require("filebuf.profiler")
 local config = require("filebuf.config")
-local scan = require("filebuf.scan")
 local state = require("filebuf.state")
-local line_mod = require("filebuf.line")
 local buffer = require("filebuf.buffer")
 local git = require("filebuf.git")
 
@@ -93,26 +91,6 @@ function M.capture_fold_state(buf)
 		end
 	end)
 	M.open_folds[root] = set
-end
-
-----------------------------------------------------------------------
--- Line parsing helpers
-----------------------------------------------------------------------
-
---- Parse one buffer line and return its fields.
----@param line string
----@return string|nil name
----@return string|nil type_  "dir"|"link"|"file"
----@return number|nil indent
-local function read_line(line)
-	if not line then
-		return nil
-	end
-	local name, is_dir, is_link = line_mod.parse_line(line)
-	if name == "" then
-		return nil
-	end
-	return name, (is_dir and "dir" or (is_link and "link" or "file")), line_mod.indent_level(line)
 end
 
 ----------------------------------------------------------------------
@@ -364,46 +342,6 @@ function _G.FilebufFoldText()
 	return { { text, hl } }
 end
 
-----------------------------------------------------------------------
--- Internal helpers
-----------------------------------------------------------------------
-
---- Nearest ancestor directory of `entry` by walking the buffer upward.
----@param buf   number
----@param entry table
----@return table|nil
-local function find_parent_dir(buf, entry)
-	if not entry or not entry.lnum or not entry.indent then
-		return nil
-	end
-	local want = entry.indent - 1
-	if want < 0 then
-		return nil
-	end
-	for i = entry.lnum - 1, 1, -1 do
-		local line = (vim.api.nvim_buf_get_lines(buf, i - 1, i, false))[1]
-		local _, type_, indent = read_line(line)
-		if indent == want and type_ == "dir" then
-			return state.resolve_entry(buf, i)
-		end
-	end
-	return nil
-end
-
---- Resolve a foldable directory from an arbitrary entry: if `entry` is already
---- a directory, return it; otherwise walk up to the nearest parent dir.
----@param buf   number
----@param entry table
----@return table|nil
-local function resolve_dir_entry(buf, entry)
-	if not entry then
-		return nil
-	end
-	if entry.type == "dir" then
-		return entry
-	end
-	return find_parent_dir(buf, entry)
-end
 
 ----------------------------------------------------------------------
 -- Reveal (load the ancestor chain of a path)
@@ -461,6 +399,138 @@ function M.reveal_path(buf, target_path)
 		return nil
 	end
 	return M.reveal_paths(buf, { target_path })[1]
+end
+
+----------------------------------------------------------------------
+-- Public API: search, sort, toggle-hidden, close
+----------------------------------------------------------------------
+
+--- Enter interactive find mode on a filebuf buffer.
+--- For calling from outside a filebuf, use M.search() instead.
+---@param buf number
+function M.find_mode(buf)
+	require("filebuf.search").enter(buf)
+end
+
+--- Public search entry point.  Opens a filebuf at cwd if not already in
+--- one, then enters async find mode.
+---
+---   require("filebuf").actions.search()                  -- respect ignored (default)
+---   require("filebuf").actions.search({ skip_hidden = false })
+---@param opts? table  { skip_hidden?: boolean }
+function M.search(opts)
+	opts = opts or {}
+	local skip_hidden = opts.skip_hidden
+	if skip_hidden == nil then
+		skip_hidden = true
+	end
+
+	local buf = vim.api.nvim_get_current_buf()
+	if not state.is_filebuf(buf) then
+		require("filebuf").open()
+		buf = vim.api.nvim_get_current_buf()
+		if not state.is_filebuf(buf) then
+			return
+		end
+	end
+
+	require("filebuf.search").enter(buf, { skip_hidden = skip_hidden })
+end
+
+--- Sort a filebuf buffer by method.
+---@param buf   number
+---@param opts  table  { method: string }
+function M.sort_by(buf, opts)
+	local method = opts and opts.method
+	if not method then
+		return
+	end
+	local sort = require("filebuf.sort")
+	if not vim.tbl_contains(sort.METHODS, method) then
+		vim.notify(
+			"filebuf: unknown sort method '" .. method .. "'. Valid: " .. table.concat(sort.METHODS, ", "),
+			vim.log.levels.ERROR
+		)
+		return
+	end
+
+	config.sort_method = method
+	local st = state.get(buf)
+	if not st then
+		return
+	end
+
+	local render = require("filebuf.render")
+	if not render.reproject(buf, { sort_method = method }) then
+		local entries = buffer.parse_buffer(buf, st.root)
+		local open_dirs = M.open_folds[st.root]
+		local sorted = sort.apply(entries, method)
+		if sorted ~= entries and #sorted > 0 then
+			render.entries(buf, sorted, open_dirs)
+		end
+	end
+	vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
+end
+
+--- Toggle hidden entries for this buffer.
+---@param buf number
+function M.toggle_hidden(buf)
+	prof.start("toggle_hidden")
+
+	prof.start("toggle_hidden.guard")
+	local st = state.get(buf)
+	if not st then
+		prof.stop()
+		prof.stop()
+		return
+	end
+
+	if vim.bo[buf].modified then
+		vim.notify("filebuf: buffer modified - save or discard edits before toggling hidden files", vim.log.levels.WARN)
+		prof.stop()
+		prof.stop()
+		return
+	end
+
+	local cursor_entry = state.entry_at_cursor(buf)
+	local cursor_path = cursor_entry and cursor_entry.path
+	local want = not st.show_hidden
+	state.set_show_hidden(st.root, want)
+	prof.stop() -- toggle_hidden.guard
+
+	local render = require("filebuf.render")
+	prof.start("toggle_hidden.reproject")
+	local reprojected = render.reproject(buf, { show_hidden = want })
+	prof.stop() -- toggle_hidden.reproject
+
+	if not reprojected then
+		prof.start("toggle_hidden.tree")
+		render.tree(buf, { show_hidden = want, keep_view = true })
+		prof.stop() -- toggle_hidden.tree
+	end
+
+	prof.start("toggle_hidden.cursor")
+	if cursor_path then
+		local lnum = state.lnum_of(buf, cursor_path)
+		if lnum then
+			pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
+		end
+	end
+	prof.stop() -- toggle_hidden.cursor
+
+	vim.notify("filebuf: hidden files " .. (st.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
+
+	if prof.enabled then
+		prof.report()
+	end
+	prof.stop() -- toggle_hidden
+end
+
+--- Close a filebuf buffer.  Fold state is captured by the BufDelete
+--- autocmd, so the caller doesn't need to snapshot anything.
+---@param buf number
+function M.close(buf)
+	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
 ----------------------------------------------------------------------

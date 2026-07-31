@@ -12,9 +12,7 @@
 -- remaining special characters are reduced to a literal substring, then
 -- find(1) does a case-insensitive basename substring match.
 --
--- Public API:
---   require("filebuf").search()                      -- skip ignored & hidden (default)
---   require("filebuf").search({ skip_ignored = false, skip_hidden = false })
+-- Public entry point (search / find-mode) is in filebuf.actions.
 ----------------------------------------------------------------------
 local config = require("filebuf.config")
 local prof = require("filebuf.profiler")
@@ -277,37 +275,6 @@ function M.clear(buf)
 	if st then
 		st.matches = nil
 	end
-end
-
---- Public search API.  Opens filebuf at cwd if not already in one, then enters
---- async find mode.  Ignored directories are pruned by default so their
---- subtrees are never stat-ed — pass `respect_ignored = false` to search
---- everything.
----
---- Bind this to a key in your config:
----   vim.keymap.set("n", "g/", function()
----     require("filebuf").search()
----   end, { desc = "filebuf: search tree" })
----
----@param opts? table  { skip_hidden?: boolean }
-function M.search(opts)
-	opts = opts or {}
-	local skip_hidden = opts.skip_hidden
-	if skip_hidden == nil then
-		skip_hidden = true
-	end
-
-	local buf = vim.api.nvim_get_current_buf()
-	if not state.is_filebuf(buf) then
-		-- Not in a filebuf — open one at cwd first.
-		require("filebuf").open()
-		buf = vim.api.nvim_get_current_buf()
-		if not state.is_filebuf(buf) then
-			return
-		end
-	end
-
-	M.enter(buf, { skip_hidden = skip_hidden })
 end
 
 ----------------------------------------------------------------------

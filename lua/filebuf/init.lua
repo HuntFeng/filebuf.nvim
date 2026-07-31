@@ -18,7 +18,6 @@ local search = require("filebuf.search")
 local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local render = require("filebuf.render")
-local sort = require("filebuf.sort")
 
 local M = {}
 
@@ -61,9 +60,9 @@ M.actions = actions
 M.state = state
 
 --- Tree-wide search: prompts for a pattern, reveals every match.
----   require("filebuf").search()                  -- respect .gitignore (default)
----   require("filebuf").search({ respect_ignored = false })
-M.search = search.search
+---   require("filebuf").search()                  -- respect ignored (default)
+---   require("filebuf").search({ skip_hidden = false })
+M.search = actions.search
 
 --- Enable/disable the profiler; report to :messages.
 function M.profile(enable)
@@ -74,79 +73,15 @@ function M.profile_report()
 end
 
 ----------------------------------------------------------------------
--- Commands
+-- Keymaps
 ----------------------------------------------------------------------
-
-local SORT_METHODS = sort.METHODS
-
---- Toggle hidden entries for this buffer.
----
---- Normally a re-projection of the rows already cached: no find(1), no
---- git ls-files, no re-parse.  The exception is the first time hidden
---- entries are asked for after a pruned scan -- find never walked the
---- ignored subtrees, so they have to be collected once, after which both
---- directions are cheap.
----
---- Unsaved edits still block the toggle: the buffer is rewritten wholesale
---- either way.
----@param buf number
-local function toggle_hidden(buf)
-	prof.start("toggle_hidden")
-
-	prof.start("toggle_hidden.guard")
-	local st = state.get(buf)
-	if not st then
-		prof.stop()
-		prof.stop()
-		return
-	end
-
-	if vim.bo[buf].modified then
-		vim.notify("filebuf: buffer modified - save or discard edits before toggling hidden files", vim.log.levels.WARN)
-		prof.stop()
-		prof.stop()
-		return
-	end
-
-	local cursor_entry = state.entry_at_cursor(buf)
-	local cursor_path = cursor_entry and cursor_entry.path
-	local want = not st.show_hidden
-	state.set_show_hidden(st.root, want)
-	prof.stop() -- toggle_hidden.guard
-
-	-- Folds carry over on their own: both paths default to the tracked open set.
-	prof.start("toggle_hidden.reproject")
-	local reprojected = render.reproject(buf, { show_hidden = want })
-	prof.stop() -- toggle_hidden.reproject
-
-	if not reprojected then
-		prof.start("toggle_hidden.tree")
-		render.tree(buf, { show_hidden = want, keep_view = true })
-		prof.stop() -- toggle_hidden.tree
-	end
-
-	prof.start("toggle_hidden.cursor")
-	if cursor_path then
-		local lnum = state.lnum_of(buf, cursor_path)
-		if lnum then
-			pcall(vim.api.nvim_win_set_cursor, 0, { lnum, 0 })
-		end
-	end
-	prof.stop() -- toggle_hidden.cursor
-
-	vim.notify("filebuf: hidden files " .. (st.show_hidden and "shown" or "hidden"), vim.log.levels.INFO)
-
-	if prof.enabled then
-		prof.report()
-	end
-	prof.stop() -- toggle_hidden
-end
 
 --- Set up buffer-local keymaps from config.
 ---@param buf number
 local function setup_keymaps(buf)
 	local km = config.keymaps
 
+	-- Entry-level actions (need cursor → entry resolution).
 	local ENTRY_KEYMAPS = {
 		open_file = { actions.open_entry, "filebuf: open file" },
 		open_or_toggle = { actions.open_or_toggle, "filebuf: open file / toggle dir" },
@@ -154,7 +89,7 @@ local function setup_keymaps(buf)
 	}
 	for name, def in pairs(ENTRY_KEYMAPS) do
 		local key = km[name]
-		if key then
+		if key and key ~= "" then
 			local fn = def[1]
 			local desc = def[2]
 			vim.keymap.set("n", key, function()
@@ -166,35 +101,31 @@ local function setup_keymaps(buf)
 		end
 	end
 
-	local BUF_KEYMAPS = {}
-	-- None currently; fold state is captured automatically before
-	-- re-renders, so users can use native fold keymaps (zR, zM, etc.).
+	-- Buffer-level actions (no entry needed).  Each def is { fn, desc } or
+	-- { fn, desc, opts } for parameterised calls.
+	local BUF_KEYMAPS = {
+		find_mode = { actions.find_mode, "filebuf: find mode" },
+		toggle_hidden = { actions.toggle_hidden, "filebuf: toggle hidden files" },
+		close_filebuf = { actions.close, "filebuf: close" },
+		sort_by_name = { actions.sort_by, "filebuf: sort by name", { method = "name" } },
+		sort_by_type = { actions.sort_by, "filebuf: sort by type", { method = "type" } },
+		sort_by_ctime = { actions.sort_by, "filebuf: sort by ctime", { method = "created" } },
+		sort_by_mtime = { actions.sort_by, "filebuf: sort by mtime", { method = "modified" } },
+	}
 	for name, def in pairs(BUF_KEYMAPS) do
 		local key = km[name]
-		if key then
+		if key and key ~= "" then
+			local fn = def[1]
+			local desc = def[2]
+			local opts = def[3]
 			vim.keymap.set("n", key, function()
-				def[1](buf)
-			end, { buffer = buf, desc = def[2] })
+				if opts then
+					fn(buf, opts)
+				else
+					fn(buf)
+				end
+			end, { buffer = buf, desc = desc })
 		end
-	end
-
-	if km.toggle_hidden then
-		vim.keymap.set("n", km.toggle_hidden, function()
-			toggle_hidden(buf)
-		end, { buffer = buf, desc = "filebuf: toggle hidden files" })
-	end
-
-	if km.close_filebuf then
-		vim.keymap.set("n", km.close_filebuf, function()
-			-- actions.open_folds is already current; nothing to snapshot.
-			vim.api.nvim_buf_delete(buf, { force = true })
-		end, { buffer = buf, desc = "filebuf: close" })
-	end
-
-	if km.find_mode then
-		vim.keymap.set("n", km.find_mode, function()
-			search.enter(buf)
-		end, { buffer = buf, desc = "filebuf: find mode" })
 	end
 end
 
@@ -398,7 +329,7 @@ function M.open(dir)
 	local existing_buf = vim.fn.bufnr("Filebuf")
 	if existing_buf ~= -1 and vim.api.nvim_buf_is_valid(existing_buf) then
 		if state.is_filebuf(existing_buf) then
-      actions.capture_fold_state(existing_buf)
+			actions.capture_fold_state(existing_buf)
 			local st = state.init(existing_buf, dir)
 			state.attach(existing_buf)
 			vim.api.nvim_set_current_buf(existing_buf)
@@ -550,7 +481,7 @@ function M.setup(opts)
 	vim.api.nvim_create_user_command("FilebufToggleHidden", function()
 		local buf = current_filebuf()
 		if buf then
-			toggle_hidden(buf)
+			actions.toggle_hidden(buf)
 		end
 	end, { desc = "Toggle visibility of hidden (dot) files in filebuf" })
 
@@ -560,29 +491,10 @@ function M.setup(opts)
 			return
 		end
 		local method = args.args and args.args:match("^%s*(%S+)%s*$")
-		if method and vim.tbl_contains(SORT_METHODS, method) then
-			config.sort_method = method
-			local st = state.get(buf)
-			if st then
-				-- Re-order the cached rows in place; falls back to parsing the
-				-- buffer when the cache cannot serve it (mid-edit, find mode).
-				if not render.reproject(buf, { sort_method = method }) then
-					local entries = buffer.parse_buffer(buf, st.root)
-					local open_dirs = actions.open_folds[st.root]
-					local sorted = sort.apply(entries, method)
-					if sorted ~= entries and #sorted > 0 then
-						render.entries(buf, sorted, open_dirs)
-					end
-				end
-			end
-			vim.notify("filebuf: sort by " .. method, vim.log.levels.INFO)
-		else
-			vim.notify(
-				"filebuf: unknown sort method '" .. tostring(method) .. "'. Valid: " .. table.concat(SORT_METHODS, ", "),
-				vim.log.levels.ERROR
-			)
+		if method then
+			actions.sort_by(buf, { method = method })
 		end
-	end, { nargs = "?", desc = "Set or cycle sort method (type | name | modified | created)" })
+	end, { nargs = "?", desc = "Set sort method (type | name | modified | created)" })
 
 	vim.api.nvim_create_user_command("FilebufFind", function(args)
 		local buf = current_filebuf()
@@ -595,25 +507,6 @@ function M.setup(opts)
 		end
 		search.run(buf, args.args)
 	end, { nargs = "?", desc = "Search the whole tree and reveal matching entries" })
-
-	vim.api.nvim_create_user_command("FilebufSearchClear", function()
-		search.clear(vim.api.nvim_get_current_buf())
-	end, { desc = "Clear filebuf search match highlighting" })
-
-	vim.api.nvim_create_user_command("FilebufRefresh", function()
-		local buf = current_filebuf()
-		if not buf then
-			return
-		end
-		local st = state.get(buf)
-		if st then
-			require("filebuf.git").clear_ignore_cache(st.root)
-		end
-		if st and st.deep_scan_job then
-			render.cancel_deep_scan(buf)
-		end
-		render.tree(buf, { keep_view = true, refresh_ignore = true })
-	end, { desc = "Re-read the tree from disk, discarding the cached rows" })
 end
 
 return M
