@@ -3,6 +3,7 @@
 -- Verifies that filebuf correctly renders directory trees into the buffer.
 ----------------------------------------------------------------------
 local helpers = require("tests.helpers")
+local config = require("filebuf.config")
 
 describe("display", function()
 	local tmpdir
@@ -38,19 +39,23 @@ describe("display", function()
 		assert.equals("mydir/", lines[1])
 	end)
 
-	it("renders nested files with correct indent", function()
+	it("renders nested files at the right indent", function()
 		helpers.populate_dir(tmpdir, {
 			["parent"] = {},
 			["parent/child.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
+		-- The tree is scanned eagerly to config.max_depth, so a child is already
+		-- on screen without expanding anything.
+		assert.equals("parent/", helpers.get_buffer_lines(buf)[1])
+		assert.equals("  child.txt", helpers.get_buffer_lines(buf)[2])
 		local lines = helpers.get_buffer_lines(buf)
 		-- shiftwidth=2: parent at indent 0, child at indent 1 (2 spaces).
 		assert.equals("parent/", lines[1])
 		assert.equals("  child.txt", lines[2])
 	end)
 
-	it("renders deeply nested structures with increasing indent", function()
+	it("renders deeply nested structures with increasing indent when revealed", function()
 		helpers.populate_dir(tmpdir, {
 			["a"] = {},
 			["a/b"] = {},
@@ -58,6 +63,7 @@ describe("display", function()
 			["a/b/c/deep.txt"] = "",
 		})
 		buf = helpers.open_filebuf(tmpdir)
+		assert.is_not_nil(helpers.reveal(buf, tmpdir .. "/a/b/c/deep.txt"))
 		local lines = helpers.get_buffer_lines(buf)
 		assert.equals("a/", lines[1])
 		assert.equals("  b/", lines[2])
@@ -101,10 +107,8 @@ describe("hidden files", function()
 
 	before_each(function()
 		tmpdir = helpers.create_temp_dir()
-		-- Disable ignore-file support so fd/find sees all entries.
-		-- Hidden files (dotfiles) are still tagged is_hidden and filtered
+		-- Hidden files (dotfiles) are tagged is_hidden and filtered
 		-- by filter_visible when show_hidden=false.
-		require("filebuf.config").respect_ignore = false
 	end)
 
 	after_each(function()
@@ -216,8 +220,14 @@ end)
 describe("git status", function()
 	local tmpdir
 	local buf
+	local saved_git_status
 
 	before_each(function()
+		-- The suite runs with git_status off (see tests/minimal_init.lua), which
+		-- means render never starts the async fetch.  These specs are the ones
+		-- that need it.
+		saved_git_status = config.git_status
+		config.git_status = true
 		tmpdir = helpers.create_temp_dir()
 		local ok = helpers.git_init(tmpdir)
 		if not ok then
@@ -226,19 +236,9 @@ describe("git status", function()
 	end)
 
 	after_each(function()
+		config.git_status = saved_git_status
 		helpers.close_filebuf(buf)
 		helpers.cleanup_dir(tmpdir)
-	end)
-
-	it("returns nil git status outside a git repo", function()
-		-- Use a non-git temp dir.
-		local non_git = helpers.create_temp_dir()
-		helpers.populate_dir(non_git, { ["f.txt"] = "" })
-		local git = require("filebuf.git")
-		local map = git.get_status_map(non_git)
-		-- get_status_map returns nil when not in a git repo.
-		assert.is_nil(map)
-		helpers.cleanup_dir(non_git)
 	end)
 
 	it("detects untracked files", function()

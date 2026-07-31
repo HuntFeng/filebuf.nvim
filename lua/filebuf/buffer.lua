@@ -10,13 +10,35 @@ local M = {}
 
 --- Parse the entire buffer in one pass, computing the full filesystem path
 --- for every entry via an indent stack.
----@param buf number
+---@param buf   number
+---@param root? string  filebuf root (defaults to the buffer's state root)
 ---@return table[]  { name, type, path, indent, lnum }
-function M.parse_buffer(buf)
+function M.parse_buffer(buf, root)
 	prof.start("parse_buffer")
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-	local root = vim.b[buf].filebuf_root
+	root = root or require("filebuf.state").root(buf)
 	local entries = {}
+
+	-- Indent settings are read once here rather than per line.  line.indent_level
+	-- reads vim.go.expandtab and vim.go.shiftwidth on every call, which is an
+	-- option lookup rather than a table read -- three of them per line, 450k on
+	-- a 150k-line buffer, for values that cannot change mid-parse.  Same reason
+	-- line.formatter exists on the rendering side.
+	local use_tabs = not vim.go.expandtab
+	local sw = vim.go.shiftwidth
+	local width = (sw > 0 and sw) or vim.go.tabstop
+	local indent_of
+	if use_tabs then
+		indent_of = function(line)
+			local _, count = line:find("^\t*")
+			return count
+		end
+	else
+		indent_of = function(line)
+			local _, count = line:find("^ *")
+			return math.floor(count / width)
+		end
+	end
 
 	-- Ancestry chain: a directory pushes { indent, path }; when indent
 	-- decreases we pop until the top is a true ancestor (indent < current).
@@ -45,7 +67,7 @@ function M.parse_buffer(buf)
 		local line = lines[lnum]
 		local name, is_dir, is_link = line_mod.parse_line(line)
 		if line ~= "" and name ~= "" then
-			local indent = line_mod.indent_level(line)
+			local indent = indent_of(line)
 			if not name:find("/", 1, true) then
 				-- Fast path: most entries have no "/" in their name.
 				add(name, is_dir, is_link, indent, lnum)

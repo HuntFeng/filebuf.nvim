@@ -18,14 +18,6 @@ describe("preview", function()
 			["subdir/nested.py"] = "def foo():\n    pass\n",
 		})
 		buf = helpers.open_filebuf(tmpdir)
-		-- Expand subdir so we can see nested files.
-		local actions = require("filebuf.actions")
-		local entries = vim.b[buf].filebuf_display_entries
-		for _, e in ipairs(entries) do
-			if e.type == "dir" then
-				actions.expand_dir(buf, e)
-			end
-		end
 	end)
 
 	after_each(function()
@@ -49,7 +41,7 @@ describe("preview", function()
 
 	--- Move cursor to the entry named `name` and return its lnum.
 	local function move_to(name)
-		local entries = vim.b[buf].filebuf_display_entries
+		local entries = helpers.display_entries(buf)
 		for _, e in ipairs(entries) do
 			if e.name == name then
 				vim.api.nvim_win_set_cursor(0, { e.lnum, 0 })
@@ -62,8 +54,8 @@ describe("preview", function()
 	it("creates a floating preview window when K is pressed on a file", function()
 		move_to("hello.lua")
 		local preview = require("filebuf.preview")
-		local actions = require("filebuf.actions")
-		local entry = actions.get_entry_at_cursor(buf)
+		local state = require("filebuf.state")
+		local entry = state.entry_at_cursor(buf)
 		preview.show(buf, entry)
 
 		local pw = find_preview_win()
@@ -80,8 +72,8 @@ describe("preview", function()
 	it("does nothing when K is pressed on a directory", function()
 		move_to("subdir")
 		local preview = require("filebuf.preview")
-		local actions = require("filebuf.actions")
-		local entry = actions.get_entry_at_cursor(buf)
+		local state = require("filebuf.state")
+		local entry = state.entry_at_cursor(buf)
 		assert.equals("dir", entry.type)
 
 		preview.show(buf, entry)
@@ -92,8 +84,8 @@ describe("preview", function()
 	it("sets the correct filetype for syntax highlighting", function()
 		move_to("hello.lua")
 		local preview = require("filebuf.preview")
-		local actions = require("filebuf.actions")
-		local entry = actions.get_entry_at_cursor(buf)
+		local state = require("filebuf.state")
+		local entry = state.entry_at_cursor(buf)
 		preview.show(buf, entry)
 
 		local pw = find_preview_win()
@@ -108,8 +100,8 @@ describe("preview", function()
 	it("auto-closes preview on CursorMoved", function()
 		move_to("hello.lua")
 		local preview = require("filebuf.preview")
-		local actions = require("filebuf.actions")
-		local entry = actions.get_entry_at_cursor(buf)
+		local state = require("filebuf.state")
+		local entry = state.entry_at_cursor(buf)
 		preview.show(buf, entry)
 
 		local pw = find_preview_win()
@@ -128,9 +120,9 @@ describe("preview", function()
 	it("replaces content when K is pressed on a different file while preview is open", function()
 		move_to("hello.lua")
 		local preview = require("filebuf.preview")
-		local actions = require("filebuf.actions")
+		local state = require("filebuf.state")
 
-		local entry1 = actions.get_entry_at_cursor(buf)
+		local entry1 = state.entry_at_cursor(buf)
 		preview.show(buf, entry1)
 		local pw1 = find_preview_win()
 		assert.is_not_nil(pw1)
@@ -139,7 +131,7 @@ describe("preview", function()
 
 		-- Preview a different file; the old window is closed and a new one opens.
 		move_to("nested.py")
-		local entry2 = actions.get_entry_at_cursor(buf)
+		local entry2 = state.entry_at_cursor(buf)
 		preview.show(buf, entry2)
 
 		local pw2 = find_preview_win()
@@ -153,8 +145,8 @@ describe("preview", function()
 	it("handles empty files gracefully", function()
 		move_to("empty.txt")
 		local preview = require("filebuf.preview")
-		local actions = require("filebuf.actions")
-		local entry = actions.get_entry_at_cursor(buf)
+		local state = require("filebuf.state")
+		local entry = state.entry_at_cursor(buf)
 		preview.show(buf, entry)
 
 		local pw = find_preview_win()

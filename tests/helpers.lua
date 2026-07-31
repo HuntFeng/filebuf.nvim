@@ -64,14 +64,15 @@ end
 ---@param dir string
 ---@return number  buffer number
 function M.open_filebuf(dir)
-	-- Ensure no stale Filebuf buffer exists.
+	-- Ensure no stale Filebuf buffer exists.  State is module-local (see
+	-- filebuf.state), so there is nothing buffer-local left to sweep up --
+	-- deleting the buffer fires the autocmd that clears it.
 	local existing = vim.fn.bufnr("Filebuf")
 	if existing ~= -1 and vim.api.nvim_buf_is_valid(existing) then
 		pcall(vim.api.nvim_buf_delete, existing, { force = true })
 	end
-	-- Wipe any remaining buffers that might have filebuf_root set.
-	for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.b[bufnr] and vim.b[bufnr].filebuf_root then
+	for _, bufnr in ipairs(require("filebuf.state").buffers()) do
+		if vim.api.nvim_buf_is_valid(bufnr) then
 			pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
 		end
 	end
@@ -80,19 +81,117 @@ function M.open_filebuf(dir)
 	return vim.api.nvim_get_current_buf()
 end
 
+--- Per-buffer filebuf state, or nil.
+---@param buf number
+---@return table|nil
+function M.state(buf)
+	return require("filebuf.state").get(buf)
+end
+
+--- The row cache backing `buf` (filebuf.snapshot), or nil.
+---@param buf number
+---@return table|nil
+function M.snapshot(buf)
+	local st = M.state(buf)
+	return st and st.snap
+end
+
+--- Every displayed entry, resolved from the buffer.
+--- Replaces the old vim.b[buf].filebuf_display_entries: there is no
+--- buffer-local entry list any more, entries are derived on demand.
+---@param buf number
+---@return table[]  { lnum, path, name, type, indent, ... }
+function M.display_entries(buf)
+	local state = require("filebuf.state")
+	local out = {}
+	for lnum = 1, vim.api.nvim_buf_line_count(buf) do
+		local e = state.resolve_entry(buf, lnum)
+		if e then
+			out[#out + 1] = e
+		end
+	end
+	return out
+end
+
+--- The displayed entry for `path`, or nil when it is not on screen.
+---@param buf  number
+---@param path string
+---@return table|nil
+function M.entry_for(buf, path)
+	local state = require("filebuf.state")
+	local lnum = state.lnum_of(buf, path)
+	return lnum and state.resolve_entry(buf, lnum) or nil
+end
+
+--- Count how many find(1) scans an operation performs.  The whole point of
+--- the row cache is that re-projections perform none, so specs assert on it.
+---@param fn fun()
+---@return number scans
+function M.count_scans(fn)
+	local scan = require("filebuf.scan")
+	local n = 0
+	local real = scan.scan_into
+	scan.scan_into = function(...)
+		n = n + 1
+		return real(...)
+	end
+	local ok, err = pcall(fn)
+	scan.scan_into = real
+	if not ok then
+		error(err)
+	end
+	return n
+end
+
+--- Verify that a directory entry exists in the buffer.  With eager
+--- loading all entries are already buffer lines, so no expansion is needed.
+---@param buf  number
+---@param path string  absolute path of the directory
+---@return boolean  true when the directory was found
+function M.expand(buf, path)
+	local entry = M.entry_for(buf, path)
+	if entry and entry.type == "dir" then
+		return true
+	end
+	return false
+end
+
+--- Load every ancestor of `path` so it becomes a visible buffer line.
+--- Thin wrapper over actions.reveal_path for readability in specs.
+---@param buf  number
+---@param path string  absolute path under the filebuf root
+---@return table|nil  the revealed display entry
+function M.reveal(buf, path)
+	return require("filebuf.fold").reveal_path(buf, path)
+end
+
+--- Buffer lines as a set, for order-independent presence assertions.
+---@param buf number
+---@return table<string, boolean>
+function M.line_set(buf)
+	local names = {}
+	for _, l in ipairs(M.get_buffer_lines(buf)) do
+		names[l] = true
+	end
+	return names
+end
+
 --- Wait for async git status to populate on a filebuf buffer.
 --- After open/save, git status is fetched asynchronously via jobstart;
---- this polls vim.b[bufnr].filebuf_git_status until it's non-nil or
---- the timeout expires.
+--- this polls the buffer's state.git until it's non-nil or the timeout
+--- expires.
 ---@param bufnr  number   the filebuf buffer
 ---@param timeout_ms number  max wait time in ms (default 2000)
 ---@return table|nil  the git status map, or nil on timeout
 function M.wait_for_git_status(bufnr, timeout_ms)
 	timeout_ms = timeout_ms or 2000
+	local state = require("filebuf.state")
 	vim.wait(timeout_ms, function()
-		return vim.b[bufnr].filebuf_git_status ~= nil
+		local st = state.get(bufnr)
+		return st ~= nil and st.git ~= nil
 	end)
-	return vim.b[bufnr].filebuf_git_status
+	local st = state.get(bufnr)
+	return st and st.git
 end
 
 --- Trigger save on the filebuf buffer (simulates :w).
@@ -146,9 +245,10 @@ function M.close_filebuf(buf)
 	if buf and vim.api.nvim_buf_is_valid(buf) then
 		pcall(vim.api.nvim_buf_delete, buf, { force = true })
 	end
-	-- Clear persisted fold state.
-	local actions = require("filebuf.actions")
-	actions.closed = {}
+	-- Clear state that deliberately outlives the buffer, so specs do not
+	-- inherit each other's fold or show-hidden preferences.
+	require("filebuf.fold").open_folds = {}
+	require("filebuf.state").reset_preferences()
 end
 
 --- Read the content of a file on disk.

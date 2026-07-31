@@ -143,17 +143,53 @@ describe("sync.lua", function()
 			assert.equals("/root/new/file.txt", ops.renamed[1].new.path)
 		end)
 
-		it("detects a rename of a directory", function()
+		it("renames a childless directory in place rather than delete+create", function()
+			-- Every directory is loaded, so an unexpanded dir has no
+			-- children in the buffer.  Delete+create would destroy the whole
+			-- unloaded subtree, so this must become a real rename.
 			local disk = { entry("olddir", "dir", "/root/olddir", 0, 1) }
 			local buf = { entry("newdir", "dir", "/root/newdir", 0, 1) }
-			-- Actually, with different names this would be delete+create.
-			-- Rename detection is name-based, so same-name is renamed.
 			local ops = sync.compute_diff(buf, disk)
-			-- Not same name → olddir is deleted, newdir is created.
+			assert.equals(1, #ops.renamed)
+			assert.equals("/root/olddir", ops.renamed[1].old.path)
+			assert.equals("/root/newdir", ops.renamed[1].new.path)
+			assert.equals(0, #ops.deleted)
+			assert.equals(0, #ops.created)
+		end)
+
+		it("delete+creates a directory whose children are loaded", function()
+			-- With children in the buffer, each child was already paired
+			-- individually against the new parent name, so the children move
+			-- out before the old dir is removed.
+			local disk = {
+				entry("olddir", "dir", "/root/olddir", 0, 1),
+				entry("child.txt", "file", "/root/olddir/child.txt", 1, 2),
+			}
+			local buf = {
+				entry("newdir", "dir", "/root/newdir", 0, 1),
+				entry("child.txt", "file", "/root/newdir/child.txt", 1, 2),
+			}
+			local ops = sync.compute_diff(buf, disk)
+			-- The child is paired by name across parents...
+			assert.equals(1, #ops.renamed)
+			assert.equals("/root/olddir/child.txt", ops.renamed[1].old.path)
+			assert.equals("/root/newdir/child.txt", ops.renamed[1].new.path)
+			-- ...and the now-empty old dir is removed and the new one created.
 			assert.equals(1, #ops.deleted)
 			assert.equals("olddir", ops.deleted[1].name)
 			assert.equals(1, #ops.created)
 			assert.equals("newdir", ops.created[1].name)
+		end)
+
+		it("never pairs a file with a directory in same-parent matching", function()
+			local disk = { entry("adir", "dir", "/root/adir", 0, 1) }
+			local buf = { entry("afile.txt", "file", "/root/afile.txt", 0, 1) }
+			local ops = sync.compute_diff(buf, disk)
+			assert.equals(0, #ops.renamed)
+			assert.equals(1, #ops.deleted)
+			assert.equals("adir", ops.deleted[1].name)
+			assert.equals(1, #ops.created)
+			assert.equals("afile.txt", ops.created[1].name)
 		end)
 
 		it("detects a name-based rename (same name, same parent)", function()
@@ -172,13 +208,16 @@ describe("sync.lua", function()
 			assert.equals("/root/b/file.txt", ops.renamed[1].new.path)
 		end)
 
-		it("prefers same-parent match when multiple same-name candidates exist", function()
+		it("prefers a same-parent match over a same-name one elsewhere", function()
+			-- The name has to agree with the path's basename; buffer.parse_buffer
+			-- derives one from the other, and a mismatched fixture would exercise
+			-- the name-based phase instead of the same-parent phase under test.
 			local disk = {
 				entry("file.txt", "file", "/root/a/file.txt", 1, 1),
 				entry("file.txt", "file", "/root/sub/file.txt", 1, 2),
 			}
 			local buf = {
-				entry("file.txt", "file", "/root/sub/file_renamed.txt", 1, 1),
+				entry("file_renamed.txt", "file", "/root/sub/file_renamed.txt", 1, 1),
 			}
 			local ops = sync.compute_diff(buf, disk)
 			-- The buffer entry at /root/sub/file_renamed.txt matches:

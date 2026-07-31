@@ -8,11 +8,12 @@ https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 
 ## Features
 
-- **Editable tree** - create, rename, delete and search files/dirs in a buffer, save with `:w`.
+- **Editable tree** - create, rename, delete and move files/dirs in a buffer, save with `:w`.
 - **Indent-based folding** - directories fold like code.
 - **Git status** - per-file and per-directory git indicators (added, modified, untracked,...).
 - **Diagnostics** - when wrong operations occur, buffer won't save and shows diagnostics.
-- **Respect .gitignore** - hidden & ignored entries are hidden by default and will be loaded upon expansion.
+- **Respect .gitignore** - hidden & ignored entries are listed but filtered out by default; `gh` toggles them instantly.
+- **Search that loads on demand** - `/` works as usual, then also searches the whole tree and expands just the folders leading to each hit.
 - **Netrw hijack** - can open filebuf instead of netrw when `nvim .`, `:e <dir>` and `Ex .` etc.
 
 ## Installation
@@ -21,10 +22,6 @@ https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 - neovim >= 0.10.0
 - git  (preinsatlled on most linux distros)
 - find (preinsatlled on most linux distros)
-- (Optional but recommended) [`fd`](https://github.com/sharkdp/fd)
-
-> [!TIP]
-> Install [`fd`](https://github.com/sharkdp/fd) for dramatically faster scanning on large repositories. The plugin detects it automatically and falls back to `find` if it's missing.
 
 `lazy.nvim` or other similar package manager
 ```lua
@@ -37,13 +34,29 @@ https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 
 ## Usage
 
-Open the filebuf browser at the current directory:
+- Open the filebuf with `:Filebuf` or `:Filebuf <dir>` to open a specific directory.
+- If `hijack_netrw = true`, then `:e <dir>` or `:Ex` (or other related commands) will also open filebuf.
+- Use neovim's native fold commands to navigate the tree, read more about folds in `:help fold-commands` or [fold-commands](https://neovim.io/doc/user/fold/#_2.-fold-commands).
+Some frequent commands I find useful:
+    - `za` to toggle fold under cursor
+    - `zO` to open all folds recursively under cursor
+    - `zR` to open all folds in the tree
+    - `zM` to close all folds in the tree
+    - `[z` to jump to the last fold
+    - `]z` to jump to the next fold
+    - `gf` to open the file under the cursor in a new buffer
+    - `<CR>` to open the file or toggle the directory under the cursor
+    - `K` to toggle the preview window, `K` again to focus
+- Finished edits, use `:w` to apply the changes to disk.
 
-```
-:Filebuf
-```
+## Commands
+| Command | Action |
+|-------|---------|
+| `Filebuf` | Open / Refresh filebuf |
+| `FilebufSortMethod <method>` | Sort entries with method (name, type, created, modified) |
+| `FilebufToggleHidden` | Toggle hidden / ignored entries |
+| `FilebufFind` | Enter find mode |
 
-Edit any entry name inline, then `:w` to apply the changes to disk. The plugin validates your edits before writing — type mismatches (e.g., removing the indent that makes a file a child of a directory) are caught and reported.
 
 ## Configuration
 
@@ -51,7 +64,7 @@ Pass options to `setup()`:
 
 ```lua
 require("filebuf").setup({
-    -- Move deleted files to a /tmp/filebuf_trash directory instead of removing them
+    -- Default to move deleted files to a /tmp/filebuf_trash directory instead of removing them
     permanent_delete = false,
 
     -- Auto-focus the file you were editing before opening filebuf
@@ -63,9 +76,6 @@ require("filebuf").setup({
     -- Show hidden (dot) files by default
     show_hidden = false,
 
-    -- Respect .gitignore / .ignore patterns
-    respect_ignore = true,
-
     -- Confirm operations before saving
 	save_confirmation = true,
 
@@ -73,21 +83,31 @@ require("filebuf").setup({
     hijack_netrw = true,
 
     -- Default sort method, can change with FilebufSortMethod <method>
+    -- Options: "name", "type", "created", "modified"
     sort_method = "type",
+
+	--- The tree is scanned to this depth
+	max_depth = 20,
 
     -- Customize or disable keymaps (set to false to disable)
     keymaps = {
-        fold_open = "zo",
-        fold_close = "zc",
-        fold_toggle = "za",
-        fold_open_recursive = "zO",
-        fold_open_all = "zR",
-        fold_close_all = "zM",
+		-- Directory are neovim's native folds
+        -- Here are some useful built-in keymaps for folds in neovim
+        -- Remap them to your liking if or leave them as they are
+		-- fold close = "zc",
+		-- fold toggle = "za",
+		-- fold open recursive = "zO",
+		-- fold open all = "zR",
+		-- fold close all = "zM",
+        -- last fold = "[z"
+        -- next fold = "]z"
         open_file = "gf",
         open_or_toggle = "<CR>",
         toggle_preview = "K",
         toggle_hidden = "gh",
         close_filebuf = "q",
+        find_mode = "g/", -- skips hidden / ignored entries
+		find_mode_full = "",
     },
 })
 ```
@@ -107,4 +127,5 @@ Override these to match your colorscheme:
 | `FilebufHiddenFile` | Hidden (dot) files |
 | `FilebufHiddenDir` | Hidden directories |
 | `FilebufLink` | Symlinks |
+| `FilebufSearchMatch` | Entries revealed by the `/` fallback search (links to `Search`) |
 | `FilebufFoldLine` | Fold line background |

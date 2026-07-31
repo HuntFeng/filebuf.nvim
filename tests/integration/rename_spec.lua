@@ -66,6 +66,8 @@ describe("rename", function()
 	end)
 
 	it("moves a file to a different parent by changing its indent", function()
+		-- Verify sourcedir is in the buffer so move_me.txt is visible.
+		assert.is_true(helpers.expand(buf, tmpdir .. "/sourcedir"))
 		local lines = helpers.get_buffer_lines(buf)
 
 		-- Find sourcedir/ (let's say it's lines[3]) and move_me.txt (lines[4]).

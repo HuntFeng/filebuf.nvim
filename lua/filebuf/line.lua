@@ -1,7 +1,6 @@
 ----------------------------------------------------------------------
 -- Line formatting — convert entries to/from their buffer text form.
 ----------------------------------------------------------------------
-local prof = require("filebuf.profiler")
 
 local M = {}
 
@@ -21,9 +20,7 @@ local indent_cache_sw = nil
 ---@param level number
 ---@return string
 function M.indent_str(level)
-	prof.start("indent_str")
 	if level <= 0 then
-		prof.stop()
 		return ""
 	end
 	local use_tabs = not vim.go.expandtab
@@ -36,7 +33,6 @@ function M.indent_str(level)
 	end
 	local cached = indent_cache[level]
 	if cached then
-		prof.stop()
 		return cached
 	end
 	local result
@@ -46,7 +42,6 @@ function M.indent_str(level)
 		result = string.rep(" ", level * sw)
 	end
 	indent_cache[level] = result
-	prof.stop()
 	return result
 end
 
@@ -54,7 +49,6 @@ end
 ---@param line string
 ---@return number
 function M.indent_level(line)
-	prof.start("indent_level")
 	local ws = line:match("^(%s*)") or ""
 	local result
 	if not vim.go.expandtab then
@@ -63,24 +57,48 @@ function M.indent_level(line)
 	else
 		result = math.floor(#ws / M.indent_width())
 	end
-	prof.stop()
 	return result
 end
 
 local ESCAPE = { ["\n"] = "$'\\n'", ["\r"] = "$'\\r'", ["\t"] = "$'\\t'" }
 
---- Build the display line for an entry.  Directories get a trailing "/",
---- symlinks a trailing "@".  Control characters are escaped in shell $'...'
---- notation so nvim_buf_set_lines accepts the line and parse_line can undo it.
----@param entry table  { name, type, indent? }
----@return string
-function M.format_line(entry)
-	prof.start("format_line")
-	local prefix = M.indent_str(entry.indent or 0)
-	local suffix = entry.type == "dir" and "/" or (entry.type == "link" and "@" or "")
-	local name = entry.name:gsub("[\n\r\t]", ESCAPE)
-	prof.stop()
-	return prefix .. name .. suffix
+--- Build a formatter for one bulk render.
+---
+--- format_line re-reads vim.go.expandtab / shiftwidth on every call, which are
+--- option lookups rather than table reads and dominate the cost when called
+--- 100k times.  This captures them once and precomputes the indent prefixes,
+--- making the per-entry path pure string concatenation (~4x faster).
+---@return fun(entry: table): string
+function M.formatter()
+	local use_tabs = not vim.go.expandtab
+	local sw = use_tabs and 1 or M.indent_width()
+	local unit = use_tabs and "\t" or string.rep(" ", sw)
+	local prefixes = { [0] = "" }
+
+	local function prefix_for(level)
+		local cached = prefixes[level]
+		if cached then
+			return cached
+		end
+		local built = string.rep(unit, level)
+		prefixes[level] = built
+		return built
+	end
+
+	return function(entry)
+		local name = entry.name
+		if name:find("[\n\r\t]") then
+			name = name:gsub("[\n\r\t]", ESCAPE)
+		end
+		local type_ = entry.type
+		local prefix = prefix_for(entry.indent or 0)
+		if type_ == "dir" then
+			return prefix .. name .. "/"
+		elseif type_ == "link" then
+			return prefix .. name .. "@"
+		end
+		return prefix .. name
+	end
 end
 
 --- Parse a display line: strip leading whitespace, detect the trailing-slash
@@ -90,7 +108,6 @@ end
 ---@return boolean is_dir
 ---@return boolean is_link
 function M.parse_line(line)
-	prof.start("parse_line")
 	local name = line:match("^%s*(.+)") or ""
 	local is_dir = name:sub(-1) == "/"
 	local is_link = name:sub(-1) == "@" and not is_dir
@@ -101,7 +118,6 @@ function M.parse_line(line)
 	if name:find("$'", 1, true) then
 		name = name:gsub("%$'\\n'", "\n"):gsub("%$'\\r'", "\r"):gsub("%$'\\t'", "\t")
 	end
-	prof.stop()
 	return name, is_dir, is_link
 end
 

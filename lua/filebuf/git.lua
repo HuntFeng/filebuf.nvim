@@ -1,9 +1,10 @@
 ----------------------------------------------------------------------
--- Git status indicators.  A single `git status --porcelain` per refresh
--- builds a path→status map the decoration provider consults per line.
+-- Git integration.  A single `git status --porcelain` per refresh builds a
+-- path→status map the decoration provider consults per line, aggregated up
+-- to directories for fold text.  Also the gitignore set (`git ls-files
+-- --ignored`, cached per root) that scan passes to find -prune so ignored
+-- subtrees are never stat-ed.
 ----------------------------------------------------------------------
-local prof = require("filebuf.profiler")
-
 local M = {}
 
 -- porcelain code → { display char, highlight group }.  Worktree status is
@@ -81,48 +82,32 @@ function M.parse_status_output(root, output)
 	return status_map
 end
 
---- Run `git status --porcelain` synchronously and return a path→status map.
---- Prefer get_status_map_async for interactive use so git doesn't block the UI.
----@param root string
----@return table|nil
-function M.get_status_map(root)
-	prof.start("get_git_status_map")
-	local cmd =
-		string.format("git -C %s status --porcelain --ignored=matching --untracked-files=all", vim.fn.shellescape(root))
-	local output = vim.fn.system(cmd)
-	if vim.v.shell_error ~= 0 then
-		prof.stop()
-		return nil
-	end
-	local status_map = M.parse_status_output(root, output)
-	prof.stop()
-	return status_map
-end
-
 --- Run `git status --porcelain` asynchronously via jobstart.  When complete,
---- the result is written into vim.b[bufnr].filebuf_git_status so the decoration
+--- the result is stored on the buffer's filebuf state so the decoration
 --- provider picks it up on the next redraw.  This keeps git's ~25 ms latency
 --- off the critical path during open and save.
 ---@param root  string  root directory
----@param bufnr number  buffer to update with filebuf_git_status
+---@param bufnr number  buffer to update
 function M.get_status_map_async(root, bufnr)
+	local state = require("filebuf.state")
 	local argv = { "git", "-C", root, "status", "--porcelain", "--ignored=matching", "--untracked-files=all" }
 	vim.fn.jobstart(argv, {
 		stdout_buffered = true,
 		on_stdout = function(_, data)
-			if not vim.api.nvim_buf_is_valid(bufnr) then
+			local st = state.get(bufnr)
+			if not st or not vim.api.nvim_buf_is_valid(bufnr) then
 				return
 			end
 			local output = table.concat(data or {}, "\n")
-			vim.b[bufnr].filebuf_git_status = M.parse_status_output(root, output)
-			-- Force an immediate redraw so the decoration provider picks up
-			-- the new git status extmarks.  redraw! (with bang) clears and
-			-- repaints the entire screen, which guarantees on_win fires.
+			st.git = M.parse_status_output(root, output)
 			pcall(vim.cmd, "redraw!")
 		end,
 		on_exit = function(_, exit_code)
-			if exit_code ~= 0 and vim.api.nvim_buf_is_valid(bufnr) then
-				vim.b[bufnr].filebuf_git_status = nil
+			if exit_code ~= 0 then
+				local st = state.get(bufnr)
+				if st then
+					st.git = nil
+				end
 			end
 		end,
 	})
@@ -159,6 +144,68 @@ function M.dir_status(entry, status_map)
 		return nil
 	end
 	return s.aggregated
+end
+
+----------------------------------------------------------------------
+-- Ignore-set cache — git ls-files instead of Lua pattern matching.
+----------------------------------------------------------------------
+
+--- Run `git ls-files --others --ignored --exclude-standard --directory`
+--- and return a hash set of absolute paths that are gitignored, plus a list
+--- of relative directory paths suitable for find -prune.
+--- Cached per root for the lifetime of the scan; cleared on re-render.
+---@param root string
+---@return table  set    absolute ignored paths → true
+---@return table  dirs   relative directory paths for find -prune
+local _ignore_cache = {}
+
+--- Drop the cached ignore set for `root`, or all roots when root is nil.
+function M.clear_ignore_cache(root)
+	if root then
+		_ignore_cache[root] = nil
+	else
+		_ignore_cache = {}
+	end
+end
+
+function M.build_ignore_set(root)
+	if _ignore_cache[root] then
+		local cached = _ignore_cache[root]
+		return cached.set, cached.dirs
+	end
+	local cmd = {
+		"git",
+		"-C",
+		root,
+		"ls-files",
+		"--others",
+		"--ignored",
+		"--exclude-standard",
+		"--directory",
+	}
+	local output = vim.fn.system(cmd)
+	if vim.v.shell_error ~= 0 then
+		local empty = { set = {}, dirs = {} }
+		_ignore_cache[root] = empty
+		return empty.set, empty.dirs
+	end
+	local set = {}
+	local dirs = { ".git" }
+	for line in output:gmatch("[^\r\n]+") do
+		local path = line
+		local is_dir = path:sub(-1) == "/"
+		if is_dir then
+			path = path:sub(1, -2)
+		end
+		if path ~= "" then
+			set[root .. "/" .. path] = true
+			if is_dir then
+				dirs[#dirs + 1] = path
+			end
+		end
+	end
+	_ignore_cache[root] = { set = set, dirs = dirs }
+	return set, dirs
 end
 
 return M
