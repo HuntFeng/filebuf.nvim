@@ -26,6 +26,88 @@ local function depth(path)
 	return select(2, path:gsub("/", "/"))
 end
 
+--- Copy `src` to `dst`, recursively for directories, preserving symlinks as
+--- symlinks.  libuv rather than shelling out to cp(1): the rest of this
+--- module works the same way, and it keeps the headless tests free of any
+--- assumption about which cp flags the host supports.
+---@param src string
+---@param dst string
+---@return boolean ok
+---@return string|nil err
+local function copy_path(src, dst)
+	local stat = vim.loop.fs_lstat(src)
+	if not stat then
+		return false, src .. " no longer exists"
+	end
+
+	if stat.type == "link" then
+		local target = vim.loop.fs_readlink(src)
+		if not target then
+			return false, "cannot read link " .. src
+		end
+		local ok, err = vim.loop.fs_symlink(target, dst)
+		return ok and true or false, err
+	end
+
+	if stat.type ~= "directory" then
+		local ok, err = vim.loop.fs_copyfile(src, dst, nil)
+		return ok and true or false, err
+	end
+
+	-- Mask off the file-type bits; fs_mkdir wants permissions only.
+	local ok, err = vim.loop.fs_mkdir(dst, stat.mode % 4096)
+	if not ok and not vim.loop.fs_stat(dst) then
+		return false, err
+	end
+	local handle = vim.loop.fs_scandir(src)
+	if not handle then
+		return false, "cannot read directory " .. src
+	end
+	while true do
+		local name = vim.loop.fs_scandir_next(handle)
+		if not name then
+			break
+		end
+		local child_ok, child_err = copy_path(src .. "/" .. name, dst .. "/" .. name)
+		if not child_ok then
+			return false, child_err
+		end
+	end
+	return true
+end
+
+--- Flag entries that would end up sharing a path — two siblings with the
+--- same name.  The filesystem cannot hold both, and without this check the
+--- diff silently matched them to the same disk entry and dropped one.
+---
+--- Synthetic entries are skipped: buffer.parse_buffer invents intermediate
+--- directories for a "dir/subfile" line, and that directory may already have
+--- a line of its own, which is valid shorthand rather than a clash.
+---@param buf_entries table[]  parsed buffer entries
+---@return table[]  { lnum, message }
+function M.check_duplicates(buf_entries)
+	local seen, errors = {}, {}
+	for _, be in ipairs(buf_entries) do
+		if not be.synthetic then
+			if seen[be.path] then
+				errors[#errors + 1] = {
+					lnum = be.lnum,
+					message = string.format(
+						"Line %d: '%s' already exists in this folder (line %d). "
+							.. "Names must be unique — nothing was saved.",
+						be.lnum,
+						be.name,
+						seen[be.path]
+					),
+				}
+			else
+				seen[be.path] = be.lnum
+			end
+		end
+	end
+	return errors
+end
+
 --- Compare the buffer's desired state with the filesystem.  Rename detection
 --- is name-based: an unmatched buffer entry pairs with an unmatched disk entry
 --- of the same name, preferring the same parent directory.
@@ -225,7 +307,14 @@ function M.compute_diff(buf_entries, disk_entries)
 	end
 
 	prof.stop()
-	return { unchanged = unchanged, renamed = renamed, created = created, deleted = deleted, errors = errors }
+	return {
+		unchanged = unchanged,
+		renamed = renamed,
+		created = created,
+		deleted = deleted,
+		copied = {}, -- filled in by the caller from filebuf.copy
+		errors = errors,
+	}
 end
 
 --- Report validation errors as inline diagnostic signs at the offending lines
@@ -261,6 +350,8 @@ end
 ---   1. Renames (before deletes, so sources move out before parents vanish).
 ---   2. Deletes (deepest first, so children go before parents).
 ---   3. Creates (shallowest first, with mkdir -p semantics).
+---   4. Copies (last, so a destination inside a directory this save created
+---      has somewhere to land).
 ---@param ops table  result of compute_diff()
 function M.apply_ops(ops)
 	prof.start("sync.apply_ops")
@@ -339,6 +430,22 @@ function M.apply_ops(ops)
 		end
 	end
 	prof.stop()
+
+	-- 4. Copies (gy / gp).  Shallowest first for the same reason as creates.
+	if ops.copied and #ops.copied > 0 then
+		prof.start("sync.apply_ops.copies")
+		table.sort(ops.copied, function(a, b)
+			return depth(a.dst.path) < depth(b.dst.path)
+		end)
+		for _, c in ipairs(ops.copied) do
+			vim.fn.mkdir(vim.fn.fnamemodify(c.dst.path, ":h"), "p")
+			local ok, err = copy_path(c.src, c.dst.path)
+			if not ok then
+				vim.notify(string.format("filebuf: cannot copy %s – %s", c.src, tostring(err)), vim.log.levels.ERROR)
+			end
+		end
+		prof.stop()
+	end
 
 	prof.stop()
 end

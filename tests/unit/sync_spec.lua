@@ -307,4 +307,56 @@ describe("sync.lua", function()
 			assert.equals(1, #ops.errors)
 		end)
 	end)
+
+	describe("check_duplicates", function()
+		it("accepts a buffer with unique sibling names", function()
+			local errors = sync.check_duplicates({
+				entry("a.txt", "file", "/root/a.txt", 0, 1),
+				entry("sub", "dir", "/root/sub", 0, 2),
+				entry("b.txt", "file", "/root/sub/b.txt", 1, 3),
+			})
+			assert.equals(0, #errors)
+		end)
+
+		it("flags two siblings with the same name at the later line", function()
+			local errors = sync.check_duplicates({
+				entry("a.txt", "file", "/root/a.txt", 0, 1),
+				entry("a.txt", "file", "/root/a.txt", 0, 2),
+			})
+			assert.equals(1, #errors)
+			assert.equals(2, errors[1].lnum)
+			assert.is_truthy(errors[1].message:find("a.txt", 1, true))
+		end)
+
+		it("allows the same name in different directories", function()
+			local errors = sync.check_duplicates({
+				entry("sub", "dir", "/root/sub", 0, 1),
+				entry("a.txt", "file", "/root/sub/a.txt", 1, 2),
+				entry("a.txt", "file", "/root/a.txt", 0, 3),
+			})
+			assert.equals(0, #errors)
+		end)
+
+		it("ignores the synthetic dirs invented for dir/child shorthand", function()
+			-- "sub/" on its own line plus "sub/b.txt" elsewhere: parse_buffer
+			-- invents a second `sub` entry, which is shorthand, not a clash.
+			local synthetic = entry("sub", "dir", "/root/sub", 0, 2)
+			synthetic.synthetic = true
+			local errors = sync.check_duplicates({
+				entry("sub", "dir", "/root/sub", 0, 1),
+				synthetic,
+				entry("b.txt", "file", "/root/sub/b.txt", 1, 2),
+			})
+			assert.equals(0, #errors)
+		end)
+
+		it("reports every duplicate past the first", function()
+			local errors = sync.check_duplicates({
+				entry("a.txt", "file", "/root/a.txt", 0, 1),
+				entry("a.txt", "file", "/root/a.txt", 0, 2),
+				entry("a.txt", "file", "/root/a.txt", 0, 3),
+			})
+			assert.equals(2, #errors)
+		end)
+	end)
 end)

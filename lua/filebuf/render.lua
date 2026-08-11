@@ -182,6 +182,13 @@ function M.reproject(buf, opts)
 	st.snap_clean = true
 	st.dirty_lo, st.dirty_hi = nil, nil
 
+	-- Every line was just rewritten, so any pending paste is gone along with
+	-- the extmarks that bound it to its source.  Drop them rather than leave
+	-- them pointing at whatever line they landed on.
+	if st.copy_targets then
+		require("filebuf.copy").clear(buf)
+	end
+
 	prof.start("render.reproject.restore_folds")
 	fold.restore_folds(buf, opts.open_dirs or fold.open_folds[st.root])
 	prof.stop()
@@ -221,6 +228,13 @@ local function commit_render(buf, st, lines, open_dirs, view)
 	st._by_path_dirty = true
 	st.snap_clean = true
 	st.dirty_lo, st.dirty_hi = nil, nil
+
+	-- Every line was just rewritten, so any pending paste is gone along with
+	-- the extmarks that bound it to its source.  Drop them rather than leave
+	-- them pointing at whatever line they landed on.
+	if st.copy_targets then
+		require("filebuf.copy").clear(buf)
+	end
 
 	prof.start("render.commit.restore_folds")
 	fold.restore_folds(buf, open_dirs)

@@ -14,6 +14,7 @@ local prof = require("filebuf.profiler")
 local line_mod = require("filebuf.line")
 local state = require("filebuf.state")
 local git = require("filebuf.git")
+local copy = require("filebuf.copy")
 
 local M = {}
 
@@ -52,6 +53,7 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 	local status_map = config.git_status and st.git or nil
 	local matches = st.matches
 	local ignore_set = st.ignore_set
+	local clipboard = st.clipboard and #st.clipboard > 0 or nil
 
 	local resolve = state.range_resolver(bufnr)
 
@@ -116,6 +118,17 @@ function M.on_win(_, winid, bufnr, toprow, botrow)
 					end
 					vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, opts)
 				end
+			end
+
+			-- "(copy)" tag on yanked entries.  Priority 1 puts it after the
+			-- git indicator in the end-of-line virt_text run.
+			if clipboard and copy.is_marked(st, entry.path) then
+				vim.api.nvim_buf_set_extmark(bufnr, M.ns, lnum - 1, name_start, {
+					virt_text = { { " (copy)", "FilebufCopyMark" } },
+					priority = 1,
+					ephemeral = true,
+					end_col = name_end,
+				})
 			end
 		end
 

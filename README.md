@@ -9,6 +9,7 @@ https://github.com/user-attachments/assets/06ad1be1-f862-4bfe-a4ea-e37d05cd9b6b
 ## Features
 
 - **Editable tree** - create, rename, delete and move files/dirs in a buffer, save with `:w`.
+- **Yank & paste** - `gy` marks files/dirs (works on a visual selection too), `gp` pastes them; directories copy recursively.
 - **Indent-based folding** - directories fold like code.
 - **Git status** - per-file and per-directory git indicators (added, modified, untracked,...).
 - **Diagnostics** - when wrong operations occur, buffer won't save and shows diagnostics.
@@ -47,6 +48,10 @@ Some frequent commands I find useful:
     - `gf` to open the file under the cursor in a new buffer
     - `<CR>` to open the file or toggle the directory under the cursor
     - `K` to toggle the preview window, `K` again to focus
+- Copy entries with `gy` then `gp`:
+    - `gy` marks the entry under the cursor (or the whole visual selection) and tags it `(copy)`; a marked directory tags its children too, because the copy is recursive. `gy` again on the same entry unmarks it.
+    - `gp` pastes a line per marked entry — inside the directory under the cursor, or beside the file under the cursor.
+    - The pasted line stays bound to its source even if you rename it, which you have to do when copying into the source's own directory: two siblings cannot share a name.
 - Finished edits, use `:w` to apply the changes to disk.
 
 ## Commands
@@ -106,6 +111,8 @@ require("filebuf").setup({
         toggle_preview = "K",
         toggle_hidden = "gh",
         close_filebuf = "q",
+        copy = "gy", -- normal: entry under cursor; visual: the selection
+        paste = "gp",
         find_mode = "g/", -- skips hidden / ignored entries
 		find_mode_full = "",
     },
@@ -128,4 +135,5 @@ Override these to match your colorscheme:
 | `FilebufHiddenDir` | Hidden directories |
 | `FilebufLink` | Symlinks |
 | `FilebufSearchMatch` | Entries revealed by the `/` fallback search (links to `Search`) |
+| `FilebufCopyMark` | The `(copy)` tag on yanked entries (links to `Comment`) |
 | `FilebufFoldLine` | Fold line background |

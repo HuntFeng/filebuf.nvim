@@ -24,6 +24,8 @@ local config = {
 		preview = "K",
 		toggle_hidden = "gh",
 		close_filebuf = "q",
+		copy = "gy",
+		paste = "gp",
 		find_mode = "g/",
 		find_mode_full = "",
 		sort_by_name = "",
@@ -48,6 +50,8 @@ local HIGHLIGHTS = {
 	-- Entries revealed by tree search (find mode / :FilebufFind).  Linked rather
 	-- colour so it follows the colourscheme's search highlight.
 	FilebufSearchMatch = { link = "Search" },
+	-- "(copy)" tag on entries sitting in the yank clipboard.
+	FilebufCopyMark = { link = "Comment" },
 	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
 }
 
