@@ -91,11 +91,29 @@ local function setup_keymaps(buf)
 	end
 end
 
---- Apply the window-local fold and display options to the current window.
---- Folds are computed by 'foldexpr' from the buffer's indentation, so any
---- window showing a filebuf needs these set before it renders.
+-- Window options are window-local, not buffer-local: once set they stick to
+-- the window and leak into whatever buffer is shown there next.  Saved here
+-- when filebuf takes over the window and restored when the buffer is wiped
+-- (BufDelete/BufUnload below) so closing filebuf hands the window back the
+-- way it was found.  Not BufEnter/BufLeave: those also fire on focus bounces
+-- (e.g. the K preview float) that never really leave the buffer, and
+-- re-forcing foldlevel=0 on every bounce was silently closing open folds.
+local WIN_OPT_NAMES = { "foldexpr", "foldmethod", "foldlevel", "foldenable", "foldcolumn", "foldtext", "winhighlight" }
+local saved_win_opts = {}
+
 local function set_window_options()
-	-- 'foldexpr' first: setting 'foldmethod' triggers the first evaluation.
+	local win = vim.api.nvim_get_current_win()
+	-- Reopening filebuf (e.g. :Filebuf on a different root) re-enters an
+	-- already-current filebuf window: its options are already ours, so
+	-- re-saving here would clobber the real pre-filebuf values with our own.
+	if not saved_win_opts[win] then
+		local saved = { fillchars = vim.wo[win].fillchars }
+		for _, name in ipairs(WIN_OPT_NAMES) do
+			saved[name] = vim.wo[win][name]
+		end
+		saved_win_opts[win] = saved
+	end
+
 	vim.wo.foldexpr = "v:lua.FilebufFoldExpr()"
 	vim.wo.foldmethod = "expr"
 	vim.wo.foldlevel = 0
@@ -104,10 +122,23 @@ local function set_window_options()
 	vim.wo.foldtext = "v:lua.FilebufFoldText()"
 	vim.wo.winhighlight = "Folded:FilebufFoldLine"
 	vim.opt_local.fillchars:append({
-		foldopen = "\226\150\188",
-		foldclose = "\226\150\182",
+		foldopen = "▼",
+		foldclose = "▶",
 		fold = " ",
 	})
+end
+
+local function restore_window_options()
+	local win = vim.api.nvim_get_current_win()
+	local saved = saved_win_opts[win]
+	if not saved then
+		return
+	end
+	saved_win_opts[win] = nil
+	for _, name in ipairs(WIN_OPT_NAMES) do
+		vim.wo[win][name] = saved[name]
+	end
+	vim.wo[win].fillchars = saved.fillchars
 end
 
 --- Build a confirmation message from diff ops and ask the user to confirm.
@@ -568,6 +599,10 @@ function M.open(dir)
 			-- Persist fold state so reopen at the same root remembers
 			-- which folds the user had open.
 			fold.capture_fold_state(buf)
+			-- bufhidden=wipe means this fires the moment filebuf stops being
+			-- shown (opening a file, closing, switching away) — the window is
+			-- about to be handed to someone else, so put its options back now.
+			restore_window_options()
 			-- Cancel the deep scan first so the buffer is writable for find
 			-- cleanup (restoring saved entries during BufUnload).
 			render.cancel_deep_scan(buf)

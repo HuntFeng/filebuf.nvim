@@ -215,8 +215,8 @@ function M.paste(buf)
 	flash(buf, at + 1, at + #clip)
 
 	vim.api.nvim_win_set_cursor(0, { at + 1, 0 })
-  -- re-eval folds then restore folds
-  vim.cmd("silent! normal! zx")
+	-- re-eval folds then restore folds
+	vim.cmd("silent! normal! zx")
 	fold.restore_folds(buf, root and fold.open_set(root))
 end
 
