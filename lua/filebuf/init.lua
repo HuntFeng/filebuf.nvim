@@ -14,6 +14,7 @@ local search = require("filebuf.search")
 local scan = require("filebuf.scan")
 local state = require("filebuf.state")
 local render = require("filebuf.render")
+local copy = require("filebuf.copy")
 
 local M = {}
 M.config = config
@@ -58,6 +59,7 @@ local function setup_keymaps(buf)
 		sort_by_type = { M.sort_by, "filebuf: sort by type", { method = "type" } },
 		sort_by_ctime = { M.sort_by, "filebuf: sort by ctime", { method = "created" } },
 		sort_by_mtime = { M.sort_by, "filebuf: sort by mtime", { method = "modified" } },
+		paste = { M.paste_entries, "filebuf: paste yanked entries" },
 	}
 	for name, def in pairs(BUF_KEYMAPS) do
 		local key = km[name]
@@ -73,6 +75,19 @@ local function setup_keymaps(buf)
 				end
 			end, { buffer = buf, desc = desc })
 		end
+	end
+
+	-- Yank works on the cursor entry in normal mode and on the selection in
+	-- visual mode, so it needs both, and neither table models two modes.
+	if km.copy and km.copy ~= "" then
+		vim.keymap.set("n", km.copy, function()
+			require("filebuf.copy").yank_at_cursor(buf)
+		end, { buffer = buf, desc = "filebuf: yank entry (copy)" })
+		vim.keymap.set("x", km.copy, function()
+			local a, b = vim.fn.line("v"), vim.fn.line(".")
+			vim.cmd("normal! \27") -- <Esc>
+			require("filebuf.copy").yank(buf, math.min(a, b), math.max(a, b))
+		end, { buffer = buf, desc = "filebuf: yank entries (copy)" })
 	end
 end
 
@@ -129,6 +144,18 @@ local function confirm_save(ops, root)
 		end
 		if #ops.deleted > MAX_SHOWN then
 			lines[#lines + 1] = string.format("  ... and %d more", #ops.deleted - MAX_SHOWN)
+		end
+	end
+
+	if ops.copied and #ops.copied > 0 then
+		lines[#lines + 1] = ""
+		lines[#lines + 1] = string.format("Copy (%d):", #ops.copied)
+		for i = 1, math.min(#ops.copied, MAX_SHOWN) do
+			local c = ops.copied[i]
+			lines[#lines + 1] = "  c " .. rel(c.src) .. " -> " .. rel(c.dst.path)
+		end
+		if #ops.copied > MAX_SHOWN then
+			lines[#lines + 1] = string.format("  ... and %d more", #ops.copied - MAX_SHOWN)
 		end
 	end
 
@@ -195,6 +222,27 @@ local function save_buffer(buf)
 	local ok, result = pcall(function()
 		local buf_entries = buffer.parse_buffer(buf, dir)
 
+		-- Two siblings with the same name cannot both exist, so this is checked
+		-- on the full entry list — before the copy split, which is exactly the
+		-- operation that makes a clash easy to produce.
+		local pre_errors = sync.check_duplicates(buf_entries)
+
+		-- Pull the pasted lines out: they are copies of a known source, not
+		-- entries to be diffed.  Left in, the diff's rename phases would happily
+		-- pair a pasted line with an unrelated same-named disk entry and turn
+		-- the copy into a move.
+		local copies, diff_entries, copy_errors = copy.split(buf, buf_entries)
+		local flagged = {}
+		for _, err in ipairs(pre_errors) do
+			flagged[err.lnum] = true
+		end
+		for _, err in ipairs(copy_errors) do
+			-- A duplicate already reported on this line says the same thing.
+			if not flagged[err.lnum] then
+				pre_errors[#pre_errors + 1] = err
+			end
+		end
+
 		-- In find mode the diff is scoped to the query results.
 		-- Otherwise the snapshot (already in memory from the last render) is
 		-- the disk baseline.  A fresh find(1) is only the last-resort fallback
@@ -204,7 +252,7 @@ local function save_buffer(buf)
 			or scan.scan_disk_entries(st.root)
 
 		prof.start("save_filebuf.identical")
-		if disk_entries and identical(buf_entries, disk_entries) then
+		if disk_entries and #pre_errors == 0 and #copies == 0 and identical(diff_entries, disk_entries) then
 			prof.stop()
 			pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 			vim.bo[buf].modified = false
@@ -217,7 +265,12 @@ local function save_buffer(buf)
 			return
 		end
 
-		local ops = sync.compute_diff(buf_entries, disk_entries)
+		local ops = sync.compute_diff(diff_entries, disk_entries)
+		ops.copied = copies
+		for _, err in ipairs(ops.errors) do
+			pre_errors[#pre_errors + 1] = err
+		end
+		ops.errors = pre_errors
 
 		if #ops.errors > 0 then
 			sync.report_errors(buf, ops.errors)
@@ -226,7 +279,7 @@ local function save_buffer(buf)
 		pcall(vim.diagnostic.reset, sync.diag_ns, buf)
 
 		prof.start("save_filebuf.pre_apply")
-		local has_changes = #ops.renamed > 0 or #ops.created > 0 or #ops.deleted > 0
+		local has_changes = #ops.renamed > 0 or #ops.created > 0 or #ops.deleted > 0 or #ops.copied > 0
 		if config.save_confirmation and has_changes then
 			if not confirm_save(ops, dir) then
 				prof.stop()
@@ -241,6 +294,11 @@ local function save_buffer(buf)
 		sync.apply_ops(ops)
 		prof.stop()
 
+		-- The yank has been consumed.
+		if #ops.copied > 0 then
+			copy.clear(buf)
+		end
+
 		if st.mode == "find" then
 			search.exit(buf)
 		end
@@ -252,8 +310,10 @@ local function save_buffer(buf)
 		-- so the resulting tree is known rather than inferred.  apply_ops
 		-- declines the cases it cannot reproduce exactly (see snapshot.lua),
 		-- and then the full rescan below is what runs.
+		-- A recursive copy brings in paths the ops never named, so the cache
+		-- cannot replay it; those saves take the full rescan below.
 		local applied = false
-		if st.snap and st.mode ~= "find" then
+		if st.snap and st.mode ~= "find" and #ops.copied == 0 then
 			applied = snapshot.apply_ops(st.snap, ops, st.ignore_set)
 				and render.reproject(buf, { keep_view = true, force = true })
 		end
@@ -330,6 +390,13 @@ end
 ---@param entry table
 function M.preview_entry(buf, entry)
 	require("filebuf.preview").show(buf, entry)
+end
+
+--- Paste the yanked entries at the cursor.  The lines appear immediately;
+--- the filesystem copy happens on :w, like every other filebuf edit.
+---@param buf number
+function M.paste_entries(buf)
+	copy.paste(buf)
 end
 
 --- Enter interactive find mode on a filebuf buffer.

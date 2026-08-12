@@ -76,6 +76,13 @@ function M.init(buf, root)
 		--- back to walking the buffer, which is always correct.
 		snap_clean = false,
 
+		--- Yanked entries awaiting a paste ({ path, name, type } plus a `paths`
+		--- set), and extmark id → { src, type } for the lines a paste inserted.
+		--- Both owned by filebuf.copy; cleared on a successful save and on any
+		--- full re-render (which rewrites every line, marks included).
+		clipboard = nil,
+		copy_targets = nil,
+
 		--- Range of lines touched since the last render, for the incremental
 		--- re-parse on :w.  nil means "nothing edited".
 		dirty_lo = nil,

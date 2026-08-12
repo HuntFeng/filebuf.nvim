@@ -45,7 +45,10 @@ function M.parse_buffer(buf, root)
 	local stack = {}
 
 	--- Append one entry and, when it's a directory, push it as an ancestor.
-	local function add(name, is_dir, is_link, indent, lnum)
+	--- `synthetic` marks the intermediate directories invented for a
+	--- "dir/subfile" line — they may legitimately repeat a directory that
+	--- already has its own line, so validation has to skip them.
+	local function add(name, is_dir, is_link, indent, lnum, synthetic)
 		while #stack > 0 and stack[#stack].indent >= indent do
 			table.remove(stack)
 		end
@@ -60,6 +63,7 @@ function M.parse_buffer(buf, root)
 			path = path,
 			indent = indent,
 			lnum = lnum,
+			synthetic = synthetic or nil,
 		}
 	end
 
@@ -80,7 +84,7 @@ function M.parse_buffer(buf, root)
 				end
 				for i, part in ipairs(parts) do
 					local part_is_dir = (i < #parts) or is_dir
-					add(part, part_is_dir, is_link, indent + (i - 1), lnum)
+					add(part, part_is_dir, is_link, indent + (i - 1), lnum, i < #parts)
 				end
 			end
 		end

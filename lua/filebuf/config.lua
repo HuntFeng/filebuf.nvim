@@ -24,6 +24,8 @@ local config = {
 		preview = "K",
 		toggle_hidden = "gh",
 		close_filebuf = "q",
+		copy = "gy",
+		paste = "gp",
 		find_mode = "g/",
 		find_mode_full = "",
 		sort_by_name = "",
@@ -48,6 +50,8 @@ local HIGHLIGHTS = {
 	-- Entries revealed by tree search (find mode / :FilebufFind).  Linked rather
 	-- colour so it follows the colourscheme's search highlight.
 	FilebufSearchMatch = { link = "Search" },
+	-- Flash shown on yanked/pasted lines, mirroring the native TextYankPost flash.
+	FilebufCopyMark = { link = "Visual" },
 	FilebufFoldLine = { bg = nil }, -- remove bg of foldlines
 }
 
@@ -57,7 +61,7 @@ function config.define_highlights()
 		vim.api.nvim_set_hl(0, name, vim.tbl_extend("force", def, { default = true }))
 	end
 	-- WinBar is a built-in Neovim highlight group.
-  -- Don't use default=true
+	-- Don't use default=true
 	vim.api.nvim_set_hl(0, "WinBar", { link = "TabLineSel" })
 end
 
