@@ -87,7 +87,7 @@ local function setup_keymaps(buf)
 			-- line("v") is only meaningful while the selection is live, so read
 			-- the range before leaving visual mode.
 			local a, b = vim.fn.line("v"), vim.fn.line(".")
-			vim.cmd("normal! \27")
+			vim.cmd("normal! <esc>")
 			require("filebuf.copy").yank(buf, math.min(a, b), math.max(a, b))
 		end, { buffer = buf, desc = "filebuf: yank entries (copy)" })
 	end
