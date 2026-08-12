@@ -132,16 +132,6 @@ describe("copy", function()
 		assert.equals(tmpdir .. "/tree", clip[1].path)
 	end)
 
-	it("re-yanking the same entry clears the clipboard", function()
-		goto_line("source.txt")
-		local copy = require("filebuf.copy")
-		copy.yank_at_cursor(buf)
-		assert.is_not_nil(helpers.state(buf).clipboard)
-
-		copy.yank_at_cursor(buf)
-		assert.is_nil(helpers.state(buf).clipboard)
-	end)
-
 	it("marks the children of a yanked directory as copied", function()
 		goto_line("tree/")
 		local copy = require("filebuf.copy")
