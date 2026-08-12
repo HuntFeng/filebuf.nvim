@@ -84,10 +84,8 @@ local function setup_keymaps(buf)
 			require("filebuf.copy").yank_at_cursor(buf)
 		end, { buffer = buf, desc = "filebuf: yank entry (copy)" })
 		vim.keymap.set("x", km.copy, function()
-			-- line("v") is only meaningful while the selection is live, so read
-			-- the range before leaving visual mode.
 			local a, b = vim.fn.line("v"), vim.fn.line(".")
-			vim.cmd("normal! <esc>")
+			vim.cmd("normal! \27") -- <Esc>
 			require("filebuf.copy").yank(buf, math.min(a, b), math.max(a, b))
 		end, { buffer = buf, desc = "filebuf: yank entries (copy)" })
 	end
