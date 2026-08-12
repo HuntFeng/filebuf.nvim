@@ -20,6 +20,7 @@
 ----------------------------------------------------------------------
 local line_mod = require("filebuf.line")
 local state = require("filebuf.state")
+local fold = require("filebuf.fold")
 
 local M = {}
 
@@ -188,6 +189,12 @@ function M.paste(buf)
 		at, indent = 0, 0
 	end
 
+	fold.capture_fold_state(buf)
+	local root = state.root(buf)
+	if root and entry and entry.type == "dir" then
+		fold.open_set(root)[entry.path] = true
+	end
+
 	local prefix = line_mod.indent_str(indent)
 	local lines = {}
 	for i, src in ipairs(clip) do
@@ -208,6 +215,9 @@ function M.paste(buf)
 	flash(buf, at + 1, at + #clip)
 
 	vim.api.nvim_win_set_cursor(0, { at + 1, 0 })
+  -- re-eval folds then restore folds
+  vim.cmd("silent! normal! zx")
+	fold.restore_folds(buf, root and fold.open_set(root))
 end
 
 ----------------------------------------------------------------------
