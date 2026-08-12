@@ -144,23 +144,6 @@ function M.yank(buf, lo, hi)
 		return
 	end
 
-	-- Re-yanking the identical selection is an unmark.
-	local clip = st.clipboard
-	if clip and #clip == #picked then
-		local same = true
-		for _, p in ipairs(picked) do
-			if not clip.paths[p.path] then
-				same = false
-				break
-			end
-		end
-		if same then
-			M.clear(buf)
-			vim.notify("filebuf: yank cleared", vim.log.levels.INFO)
-			return
-		end
-	end
-
 	picked.paths = paths
 	st.clipboard = picked
 	-- A directory at the tail of the selection marks its children too
