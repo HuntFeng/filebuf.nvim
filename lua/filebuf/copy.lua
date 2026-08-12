@@ -5,8 +5,7 @@
 -- entry" cannot be expressed by the text alone.  Two pieces of state fill
 -- the gap, both living on the buffer state:
 --
---   st.clipboard    the yanked source entries; drives the "(copy)" tag
---                   drawn by filebuf.decoration.
+--   st.clipboard    the yanked source entries.
 --   st.copy_targets extmark id → source, for the lines a paste inserted.
 --                   Real (non-ephemeral) extmarks, so the binding follows
 --                   the line as the user edits above it — and survives
@@ -28,6 +27,25 @@ local M = {}
 --- filebuf-deco, whose marks are all ephemeral.
 M.ns = vim.api.nvim_create_namespace("filebuf-copy")
 
+--- Namespace for the transient yank/paste flash, kept apart from M.ns so
+--- the flash's short-lived highlight can never be mistaken for a
+--- copy_targets mark by M.pending().
+local flash_ns = vim.api.nvim_create_namespace("filebuf-copy-flash")
+
+--- Flash lines `lo`..`hi` with FilebufCopyMark, the way Neovim's native
+--- TextYankPost handler flashes a real yank.
+---@param buf number
+---@param lo  number 1-based, inclusive
+---@param hi  number 1-based, inclusive
+local function flash(buf, lo, hi)
+	local hl = vim.hl or vim.highlight
+	hl.range(buf, flash_ns, "FilebufCopyMark", { lo - 1, 0 }, { hi - 1, 0 }, {
+		regtype = "V",
+		inclusive = true,
+		timeout = 300,
+	})
+end
+
 --- True when `path` is at or below `dir`.
 ---@param path string
 ---@param dir  string
@@ -42,8 +60,7 @@ end
 
 --- Whether `path` is yanked — either listed outright, or a descendant of a
 --- yanked directory.  Descendants count because a directory copy is
---- recursive, so they really are part of what will be copied; this is what
---- puts "(copy)" on the children of a yanked folder.
+--- recursive, so they really are part of what will be copied.
 ---@param st   table   buffer state
 ---@param path string
 ---@return boolean
@@ -122,6 +139,7 @@ function M.yank(buf, lo, hi)
 
 	picked.paths = paths
 	st.clipboard = picked
+	flash(buf, lo, hi)
 	vim.notify(
 		string.format("filebuf: yanked %d %s", #picked, #picked == 1 and "entry" or "entries"),
 		vim.log.levels.INFO
@@ -145,6 +163,7 @@ function M.clear(buf)
 	end
 	if vim.api.nvim_buf_is_valid(buf) then
 		vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
+		vim.api.nvim_buf_clear_namespace(buf, flash_ns, 0, -1)
 	end
 end
 
@@ -200,6 +219,7 @@ function M.paste(buf)
 		local id = vim.api.nvim_buf_set_extmark(buf, M.ns, at + i - 1, 0, { right_gravity = false })
 		st.copy_targets[id] = { src = src.path, type = src.type }
 	end
+	flash(buf, at + 1, at + #clip)
 
 	vim.api.nvim_win_set_cursor(0, { at + 1, 0 })
 end
