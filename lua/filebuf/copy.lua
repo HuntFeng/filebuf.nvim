@@ -46,28 +46,6 @@ local function flash(buf, lo, hi)
 	})
 end
 
---- Last line of the visible subtree rooted at the directory on line `lnum`
---- (indent `indent`).  A closed child fold is skipped over via
---- foldclosedend instead of walked line by line, so the cost is bounded by
---- what's already on screen under the directory — the same lines a redraw
---- already pays for — never a whole-tree walk.
----@param resolve fun(lnum: number): table|nil  from state.range_resolver
----@param lnum    number  the directory's own line
----@param indent  number  the directory's indent level
----@return number
-local function subtree_end(resolve, lnum, indent)
-	local last, probe = lnum, lnum + 1
-	while true do
-		local entry = resolve(probe)
-		if not entry or entry.indent <= indent then
-			return last
-		end
-		local closed_end = vim.fn.foldclosedend(probe)
-		last = closed_end ~= -1 and closed_end or probe
-		probe = last + 1
-	end
-end
-
 --- True when `path` is at or below `dir`.
 ---@param path string
 ---@param dir  string
@@ -121,11 +99,9 @@ function M.yank(buf, lo, hi)
 
 	local resolve = state.range_resolver(buf)
 	local picked, paths = {}, {}
-	local last_entry
 	for lnum = lo, hi do
 		local entry = resolve(lnum)
 		if entry then
-			last_entry = entry
 			local nested = false
 			for _, p in ipairs(picked) do
 				if p.type == "dir" and under(entry.path, p.path) then
@@ -149,9 +125,6 @@ function M.yank(buf, lo, hi)
 	-- A directory at the tail of the selection marks its children too
 	-- (M.is_marked), so the flash should cover whatever of them is visible.
 	local flash_hi = hi
-	if last_entry and last_entry.type == "dir" then
-		flash_hi = subtree_end(resolve, hi, last_entry.indent)
-	end
 	flash(buf, lo, flash_hi)
 	vim.notify(
 		string.format("filebuf: yanked %d %s", #picked, #picked == 1 and "entry" or "entries"),
